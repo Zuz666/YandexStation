@@ -36,6 +36,7 @@ from .core.yandex_session import YandexSession
 from .core.yandex_station import YandexStationBase
 from .hass import hass_utils
 from .core.policy import EntryPolicy, SessionConfig
+from .core.cache import CacheManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -166,24 +167,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     policy = EntryPolicy.from_configs(config, entry.options)
     session_config = SessionConfig.from_configs(config, entry.options)
 
+    cache_manager = CacheManager(
+        hass, entry.entry_id, account_login=entry.unique_id
+    )
+
     session = utils.async_create_clientsession(hass)
     yandex = YandexSession(session, config=session_config, **entry.data)
+    yandex.policy = policy
     yandex.add_update_listener(update_cookie_and_token)
 
+    quasar = None
     try:
-        if not await yandex.refresh_cookies():
-            persistent_notification.async_create(
-                hass,
-                "Необходимо заново авторизоваться в Яндексе. Для этого [добавьте "
-                "новую интеграцию](/config/integrations) с тем же логином.",
-                title="Yandex.Station",
-            )
-            return False
+        if policy.effective_cloud_allowed:
+            if not await yandex.refresh_cookies():
+                persistent_notification.async_create(
+                    hass,
+                    "Необходимо заново авторизоваться в Яндексе. Для этого [добавьте "
+                    "новую интеграцию](/config/integrations) с тем же логином.",
+                    title="Yandex.Station",
+                )
+                return False
 
-        quasar = YandexQuasar(yandex, policy=policy)
+        quasar = YandexQuasar(yandex, policy=policy, cache_manager=cache_manager)
         await quasar.init()
     except Exception as e:
-        raise ConfigEntryNotReady from e
+        if not quasar or not quasar.devices:
+            raise ConfigEntryNotReady from e
 
     await hass_utils.load_fake_devies(hass, quasar)
 

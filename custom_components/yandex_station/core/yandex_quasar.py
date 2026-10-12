@@ -7,7 +7,8 @@ from aiohttp import WSMsgType
 
 from .quasar_info import has_quasar
 from .yandex_session import YandexSession
-from .policy import EntryPolicy, Readiness
+from .policy import DevicesState, EntryPolicy, Readiness
+from .cache import CacheManager, StationSnapshot
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -210,36 +211,83 @@ class YandexQuasar(Dispatcher):
         session: YandexSession,
         policy: EntryPolicy | None = None,
         readiness: Readiness | None = None,
+        cache_manager: CacheManager | None = None,
     ):
         super().__init__()
         self.session = session
-        self.policy = policy or EntryPolicy()
+        self.policy = policy or getattr(session, "policy", None) or EntryPolicy()
         self.readiness = readiness or getattr(session, "readiness", None) or Readiness()
+        self.cache_manager = cache_manager
         self.devices = []
         self.scenarios = None
         self.device_tokens = {}
         self.online_updated = asyncio.Event()
         self.online_updated.set()
+
+    def _restore_from_snapshot(self, snapshot: StationSnapshot):
+        self.devices = [dict(d) for d in snapshot.devices]
+        self.readiness.devices_state = DevicesState.READY
+        self.readiness.inventory_source = "cache"
+        self.readiness.last_snapshot_at = snapshot.updated_at
+        for glagol_id, token_data in snapshot.device_tokens.items():
+            if isinstance(token_data, dict) and token_data.get("state") != "invalid":
+                self.device_tokens[glagol_id] = token_data.get("token")
+        for dev in self.speakers + self.modules:
+            did = dev.get("quasar_info", {}).get("device_id")
+            if did and did in snapshot.local_config:
+                cfg = snapshot.local_config[did]
+                if "host" in cfg:
+                    dev.setdefault("host", cfg["host"])
+                if "port" in cfg:
+                    dev.setdefault("port", cfg["port"])
+
     async def init(self):
         """Основная функция. Возвращает список колонок."""
-        _LOGGER.debug("Получение списка устройств.")
+        snapshot = None
+        if self.cache_manager:
+            snapshot = await self.cache_manager.async_load()
 
-        r = await self.session.get(
-            f"https://iot.quasar.yandex.ru/m/v3/user/devices", timeout=15
-        )
-        resp = await r.json()
-        assert resp["status"] == "ok", resp
+        if self.policy.effective_use_cached_devices:
+            if not snapshot or not snapshot.devices:
+                _LOGGER.warning("Cache is missing or empty, cannot start in cached mode")
+                self.readiness.devices_state = DevicesState.UNAVAILABLE
+                raise RuntimeError("cache_missing")
 
-        self.devices = []
+            self._restore_from_snapshot(snapshot)
+            return
 
-        for house in resp["households"]:
-            self.devices.extend(
-                {**device, "house_name": house["name"]} for device in house["all"]
+        try:
+            _LOGGER.debug("Получение списка устройств из облака.")
+            r = await self.session.get(
+                "https://iot.quasar.yandex.ru/m/v3/user/devices", timeout=15
             )
+            resp = await r.json()
+            assert resp["status"] == "ok", resp
 
-        await self.load_scenarios()
-        await self.load_speakers()
+            self.devices = []
+            for house in resp["households"]:
+                self.devices.extend(
+                    {**device, "house_name": house["name"]} for device in house["all"]
+                )
 
+            self.readiness.devices_state = DevicesState.READY
+            self.readiness.inventory_source = "cloud"
+
+            if self.cache_manager:
+                await self.cache_manager.async_save_devices(self.devices)
+
+            if self.policy.enable_scenarios and self.policy.effective_cloud_allowed:
+                await self.load_scenarios()
+                await self.load_speakers()
+
+        except Exception as e:
+            _LOGGER.debug("Cloud devices fetch failed: %r", e)
+            if snapshot and snapshot.devices:
+                _LOGGER.info("Falling back to cached snapshot")
+                self._restore_from_snapshot(snapshot)
+            else:
+                self.readiness.devices_state = DevicesState.UNAVAILABLE
+                raise
     @property
     def speakers(self):
         return [i for i in self.devices if has_quasar(i) and i.get("capabilities")]

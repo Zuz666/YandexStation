@@ -52,6 +52,9 @@ class YandexCalendar(CalendarEntity):
         return self.next_event
 
     async def async_update(self):
+        if not self.quasar.policy.effective_cloud_allowed:
+            self._attr_available = False
+            return
         try:
             alarms = await self.quasar.get_alarms(self.device)
             self.events = [alarm_to_event(i) for i in alarms]
