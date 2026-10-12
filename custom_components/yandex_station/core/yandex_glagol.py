@@ -28,10 +28,21 @@ class YandexGlagol:
 
     waiters: Dict[str, Future] = {}
 
-    def __init__(self, session: YandexSession, device: dict):
+    def __init__(
+        self,
+        session: YandexSession,
+        device: dict,
+        token: str | None = None,
+        quasar=None,
+    ):
         self.session = session
         self.device = device
-        self.loop = asyncio.get_event_loop()
+        self.device_token = token
+        self.quasar = quasar
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = None
 
     def debug(self, text: str):
         _LOGGER.debug(f"{self.device['name']} | {text}")
@@ -59,9 +70,18 @@ class YandexGlagol:
         # @dext0r: fix bug with wrong content-type
         resp = json.loads(await r.text())
         assert resp["status"] == "ok", resp
-
-        return resp["token"]
-
+        self.device_token = resp["token"]
+        if self.quasar:
+            did = self.device.get("quasar_info", {}).get("device_id")
+            if did:
+                self.quasar.device_tokens[did] = self.device_token
+                if getattr(self.quasar, "cache_manager", None):
+                    asyncio.create_task(
+                        self.quasar.cache_manager.async_save_device_token(
+                            did, self.device_token
+                        )
+                    )
+        return self.device_token
     async def start_or_restart(self):
         # first time
         if not self.url:
@@ -138,9 +158,7 @@ class YandexGlagol:
 
                 self.update_handler(data)
 
-            # TODO: find better place
-            self.device_token = None
-
+            # Preserved across reconnects per RFC v2 §3.4
         except (ClientConnectorError, ConnectionResetError, ServerTimeoutError) as e:
             self.debug(f"Ошибка подключения: {repr(e)}")
 
