@@ -36,6 +36,7 @@ from .core.yandex_session import YandexSession
 from .core.yandex_station import YandexStationBase
 from .hass import hass_utils
 from .core.policy import EntryPolicy, SessionConfig
+from .core.lifecycle import LifecycleManager, StableStreamDispatcher, StreamContext
 from .core.cache import CacheManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -153,8 +154,29 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
 
     # using executor, because bug with "Detected blocking call"
     await hass.async_add_executor_job(import_conversation)
+    context = StreamContext(hass=hass)
+    try:
+        from homeassistant.helpers import network
+        context.hass_url = network.get_url(hass, allow_external=False)
+        stream.StreamView.hass_url = context.hass_url
+    except Exception as e:
+        _LOGGER.warning(f"Ошибка получения локального адреса Home Assistant: {e}")
 
-    hass.http.register_view(stream.StreamView(hass))
+    stream.StreamView.hass = hass
+    stream.StreamView.key = context.key
+    context.implementation = stream.StreamImplementation(context)
+
+    dispatcher = StableStreamDispatcher(context)
+    hass.http.register_view(dispatcher)
+
+    lifecycle = LifecycleManager(context)
+    hass.data[DOMAIN]["lifecycle"] = lifecycle
+
+    async def reload_code_service(call: ServiceCall):
+        enable = hass.data[DOMAIN].get(DATA_CONFIG, {}).get("enable_code_reload", False)
+        return await lifecycle.async_hot_reload(hass, enable_code_reload=enable)
+
+    hass.services.async_register(DOMAIN, "reload_code", reload_code_service)
 
     return True
 
