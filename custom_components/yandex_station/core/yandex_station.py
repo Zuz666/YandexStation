@@ -743,15 +743,15 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             # на Яндекс ТВ Станция (2023) громкость от 0 до 100
             # на колонках - от 0 до 10
             k = 100 if is_tv(self.device) else 10
-            await self.quasar.send(self.device, f"громкость на {round(k * volume)}")
-            if volume > 0:
-                self._attr_is_volume_muted = False
-                self._attr_volume_level = round(volume, 2)
-            else:
-                # don't change volume_level so can back to previous value
-                self._attr_is_volume_muted = True
-            self.async_write_ha_state()
-
+            ok = await self.quasar.send(self.device, f"громкость на {round(k * volume)}")
+            if ok:
+                if volume > 0:
+                    self._attr_is_volume_muted = False
+                    self._attr_volume_level = round(volume, 2)
+                else:
+                    # don't change volume_level so can back to previous value
+                    self._attr_is_volume_muted = True
+                self.async_write_ha_state()
     async def async_volume_up(self):
         if self.local_state:
             await self.glagol.send(utils.external_command("sound_louder"))
@@ -788,19 +788,19 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             await self.glagol.send({"command": "play"})
 
         else:
-            await self.quasar.send(self.device, "продолжить")
-            self._attr_state = MediaPlayerState.PLAYING
-            self.async_write_ha_state()
-
+            ok = await self.quasar.send(self.device, "продолжить")
+            if ok:
+                self._attr_state = MediaPlayerState.PLAYING
+                self.async_write_ha_state()
     async def async_media_pause(self):
         if self.local_state:
             await self.glagol.send({"command": "stop"})
 
         else:
-            await self.quasar.send(self.device, "пауза")
-            self._attr_state = MediaPlayerState.PAUSED
-            self.async_write_ha_state()
-
+            ok = await self.quasar.send(self.device, "пауза")
+            if ok:
+                self._attr_state = MediaPlayerState.PAUSED
+                self.async_write_ha_state()
     async def async_media_stop(self):
         await self.async_media_pause()
 

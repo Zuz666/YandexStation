@@ -8,7 +8,12 @@ from aiohttp import WSMsgType
 from .quasar_info import has_quasar
 from .yandex_session import YandexSession
 from .policy import DevicesState, EntryPolicy, Readiness
-from .cache import CacheManager, StationSnapshot
+from .cache import (
+    CacheManager,
+    SCENARIO_STATE_CONFIRMED,
+    SCENARIO_STATE_PENDING,
+    StationSnapshot,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,7 +68,7 @@ MASK_RU = "оеаинтсрвлкмдпуяы"
 
 def encode(uid: str) -> str:
     """Кодируем UID в рус. буквы. Яндекс привередливый."""
-    return "".join([MASK_RU[MASK_EN.index(s)] for s in uid])
+    return "".join([MASK_RU[MASK_EN.index(s)] if s in MASK_EN else s for s in uid.lower()])
 
 
 def parse_scenario(data: dict) -> dict:
@@ -221,6 +226,7 @@ class YandexQuasar(Dispatcher):
         self.devices = []
         self.scenarios = None
         self.device_tokens = {}
+        self._device_command_locks = {}
         self.online_updated = asyncio.Event()
         self.online_updated.set()
 
@@ -299,21 +305,62 @@ class YandexQuasar(Dispatcher):
 
     async def load_speakers(self):
         hashes = {}
-        for scenario in self.scenarios:
-            try:
-                hash = scenario["triggers"][0]["value"]
-                hashes[hash] = scenario["id"]
-            except Exception:
-                pass
+        if self.scenarios:
+            for scenario in self.scenarios:
+                try:
+                    h = scenario["triggers"][0]["value"]
+                    hashes[h] = scenario["id"]
+                except Exception:
+                    pass
+
+        creation_journal = {}
+        if self.cache_manager and self.cache_manager.snapshot:
+            creation_journal = self.cache_manager.snapshot.scenario_creation
 
         for speaker in self.speakers:
             device_id: str = speaker["id"]
-            hash = encode(device_id)
-            speaker["scenario_id"] = (
-                hashes[hash]
-                if hash in hashes
-                else await self.add_scenario(device_id, hash)
-            )
+            hash_code = encode(device_id)
+
+            if hash_code in hashes:
+                speaker["scenario_id"] = hashes[hash_code]
+                if self.cache_manager:
+                    await self.cache_manager.async_save_scenario_marker(
+                        device_id, hash_code, SCENARIO_STATE_CONFIRMED
+                    )
+            else:
+                existing_entry = creation_journal.get(device_id)
+                existing_state = (
+                    existing_entry.get("state")
+                    if isinstance(existing_entry, dict)
+                    else None
+                )
+
+                if existing_state in (SCENARIO_STATE_PENDING, SCENARIO_STATE_CONFIRMED):
+                    _LOGGER.info(
+                        "Scenario for %s has marker %s; skipping duplicate POST",
+                        device_id,
+                        existing_state,
+                    )
+                    speaker["scenario_id"] = None
+                else:
+                    if self.cache_manager:
+                        await self.cache_manager.async_save_scenario_marker(
+                            device_id, hash_code, SCENARIO_STATE_PENDING
+                        )
+                    try:
+                        sid = await self.add_scenario(device_id, hash_code)
+                        speaker["scenario_id"] = sid
+                        if self.cache_manager:
+                            await self.cache_manager.async_save_scenario_marker(
+                                device_id, hash_code, SCENARIO_STATE_CONFIRMED
+                            )
+                    except Exception as e:
+                        _LOGGER.warning(
+                            "Failed to create scenario for %s: %r; pending marker retained",
+                            device_id,
+                            e,
+                        )
+                        speaker["scenario_id"] = None
 
     async def load_speaker_config(self, device: dict):
         """Загружаем device_id и platform для колонок. Они не приходят с полным
@@ -369,36 +416,51 @@ class YandexQuasar(Dispatcher):
         assert resp["status"] == "ok", resp
         return resp["scenario_id"]
 
-    async def send(self, device: dict, text: str, is_tts: bool = False):
+    async def send(self, device: dict, text: str, is_tts: bool = False) -> bool:
         """Запускает сценарий на выполнение команды или TTS."""
-        # skip send for yandex modules
-        if "scenario_id" not in device:
-            return
-        _LOGGER.debug(f"{device['name']} => cloud | {text}")
+        sid = device.get("scenario_id")
+        if not sid:
+            _LOGGER.debug(
+                f"{device.get('name')} => cloud send skipped: no valid scenario_id"
+            )
+            return False
 
         device_id = device["id"]
-        name = "ХА " + device_id
-        trigger = encode(device_id)
-        payload = (
-            scenario_speaker_tts(name, trigger, device_id, text)
-            if is_tts
-            else scenario_speaker_action(name, trigger, device_id, text)
-        )
+        lock = self._device_command_locks.setdefault(device_id, asyncio.Lock())
+        async with lock:
+            _LOGGER.debug(f"{device['name']} => cloud | {text}")
 
-        sid = device["scenario_id"]
+            name = "ХА " + device_id
+            trigger = encode(device_id)
+            payload = (
+                scenario_speaker_tts(name, trigger, device_id, text)
+                if is_tts
+                else scenario_speaker_action(name, trigger, device_id, text)
+            )
 
-        r = await self.session.put(
-            f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/{sid}", json=payload
-        )
-        resp = await r.json()
-        assert resp["status"] == "ok", resp
+            try:
+                r = await self.session.put(
+                    f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/{sid}",
+                    json=payload,
+                )
+                resp = await r.json()
+                if resp.get("status") != "ok":
+                    _LOGGER.warning(f"Scenario update failed: {resp}")
+                    return False
 
-        r = await self.session.post(
-            f"https://iot.quasar.yandex.ru/m/user/scenarios/{sid}/actions"
-        )
-        resp = await r.json()
-        assert resp["status"] == "ok", resp
-
+                r = await self.session.post(
+                    f"https://iot.quasar.yandex.ru/m/user/scenarios/{sid}/actions"
+                )
+                resp = await r.json()
+                if resp.get("status") != "ok":
+                    _LOGGER.warning(f"Scenario action failed: {resp}")
+                    return False
+                return True
+            except Exception as e:
+                _LOGGER.warning(
+                    f"Cloud command send failed for {device.get('name')}: {e!r}"
+                )
+                return False
     async def load_local_speakers(self):
         """Загружает список локальных колонок. Не используется."""
         try:
