@@ -296,6 +296,12 @@ class CacheManager:
         )
         self._lock = asyncio.Lock()
         self._snapshot: StationSnapshot | None = None
+        self._untrusted: bool = False
+
+    @property
+    def is_untrusted(self) -> bool:
+        """Return True if stored data on disk was invalid/untrusted."""
+        return self._untrusted
     @property
     def snapshot(self) -> StationSnapshot | None:
         """Return the last known-good in-memory snapshot."""
@@ -337,7 +343,9 @@ class CacheManager:
                 _LOGGER.warning(
                     "%s: invalid snapshot format for entry %s", DOMAIN, self._entry_id
                 )
+                self._untrusted = True
                 return None
+            self._untrusted = False
             if snapshot.entry_id != self._entry_id:
                 _LOGGER.warning(
                     "%s: snapshot belongs to another entry %s",
@@ -458,20 +466,39 @@ class CacheManager:
                 snapshot.local_config[glagol_id] = record
             return await self._async_save_locked()
 
+    async def async_save_and_verify_scenario_marker(
+        self, device_id: str, trigger: str, state: str
+    ) -> bool:
+        """Save scenario marker and verify on-disk readback under lock (RFC v2 §3.3.5)."""
+        _require_id(device_id, "device_id")
+        _require_id(trigger, "trigger")
+        if state not in SCENARIO_STATES:
+            raise ValueError(f"unknown scenario marker state: {state}")
+        record = {
+            "trigger": trigger,
+            "state": state,
+            "updated_at": dt_util.utcnow().isoformat(),
+        }
+        async with self._lock:
+            snapshot = self._ensure_snapshot()
+            snapshot.scenario_creation[device_id] = record
+            rev = await self._async_save_locked()
+            return await self._async_verify_durable_marker_locked(rev, (device_id, state))
+
     async def async_verify_durable_marker(
         self,
         revision: int,
         marker: tuple[str, str] | None = None,
     ) -> bool:
-        """Confirm that the last save reached the disk (RFC v2 §3.3.5).
+        """Confirm that the last save reached the disk (RFC v2 §3.3.5)."""
+        async with self._lock:
+            return await self._async_verify_durable_marker_locked(revision, marker)
 
-        Reads the storage file directly through the executor, bypassing the
-        Store memory cache. True only when the durable revision matches and,
-        for a non-idempotent scenario POST, the marker (device_id, state) is
-        present on disk. Store may swallow write errors, so a mismatch must
-        forbid the POST. This protects against a process crash, not against
-        disk loss or corruption.
-        """
+    async def _async_verify_durable_marker_locked(
+        self,
+        revision: int,
+        marker: tuple[str, str] | None = None,
+    ) -> bool:
         data = await self._hass.async_add_executor_job(
             _load_json_file, self._store.path
         )
