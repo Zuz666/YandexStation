@@ -31,7 +31,7 @@ from homeassistant.helpers.restore_state import (
     RestoredExtraData,
 )
 from homeassistant.helpers.template import Template
-from .policy import DevicesState
+from .policy import AuthState, DevicesState
 from homeassistant.util import slugify
 
 from . import stream, utils
@@ -224,8 +224,30 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
 
     @property
     def transport(self) -> str:
-        return "local" if self.local_state else "cloud"
+        if self.local_state is not None:
+            return "local"
+        if self._is_cloud_control_ready():
+            return "cloud"
+        return "unavailable"
 
+    def _is_cloud_control_ready(self) -> bool:
+        if not self.device.get("capabilities"):
+            return False
+        if not getattr(self.quasar, "policy", None):
+            return True
+        if not self.quasar.policy.effective_cloud_allowed:
+            return False
+        if not self.quasar.policy.enable_scenarios:
+            return False
+        if not self.device.get("scenario_id"):
+            return False
+        readiness = getattr(self.quasar, "readiness", None)
+        if readiness:
+            if readiness.auth_state != AuthState.VALID:
+                return False
+            if readiness.devices_state != DevicesState.READY:
+                return False
+        return True
     @property
     def cloud_state(self) -> str:
         if getattr(self.quasar, "policy", None) and getattr(self.quasar, "readiness", None):
