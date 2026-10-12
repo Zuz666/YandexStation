@@ -35,6 +35,7 @@ from .core.yandex_quasar import YandexQuasar
 from .core.yandex_session import YandexSession
 from .core.yandex_station import YandexStationBase
 from .hass import hass_utils
+from .core.policy import EntryPolicy, SessionConfig
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,6 +103,17 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Optional(CONF_CLOUD_UPDATES): cv.boolean,
                 vol.Optional(CONF_LOCAL_UPDATES): cv.boolean,
                 vol.Optional(CONF_DEBUG, default=False): cv.boolean,
+                vol.Optional("enable_scenarios"): cv.boolean,
+                vol.Optional("use_cached_devices"): cv.boolean,
+                vol.Optional("force_offline_local"): cv.boolean,
+                vol.Optional("quasar_base_url"): cv.string,
+                vol.Optional("account_base_url"): cv.string,
+                vol.Optional("passport_base_url"): cv.string,
+                vol.Optional("mobileproxy_base_url"): cv.string,
+                vol.Optional("glagol_base_url"): cv.string,
+                vol.Optional("rpc_base_url"): cv.string,
+                vol.Optional("cookie_storage_endpoints"): cv.ensure_list,
+                vol.Optional("csrf_endpoints"): cv.ensure_list,
             },
             extra=vol.ALLOW_EXTRA,
         ),
@@ -150,8 +162,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     async def update_cookie_and_token(**kwargs):
         hass.config_entries.async_update_entry(entry, data=kwargs)
 
+    config = hass.data.get(DOMAIN, {}).get(DATA_CONFIG, {})
+    policy = EntryPolicy.from_configs(config, entry.options)
+    session_config = SessionConfig.from_configs(config, entry.options)
+
     session = utils.async_create_clientsession(hass)
-    yandex = YandexSession(session, **entry.data)
+    yandex = YandexSession(session, config=session_config, **entry.data)
     yandex.add_update_listener(update_cookie_and_token)
 
     try:
@@ -164,7 +180,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             )
             return False
 
-        quasar = YandexQuasar(yandex)
+        quasar = YandexQuasar(yandex, policy=policy)
         await quasar.init()
     except Exception as e:
         raise ConfigEntryNotReady from e
@@ -177,17 +193,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # add stations to global list
     speakers = hass.data[DOMAIN][DATA_SPEAKERS]
     for device in quasar.speakers + quasar.modules:
-        did = device["quasar_info"]["device_id"]
-        if did in speakers:
-            device.update(speakers[did])
-        speakers[did] = device
-
+        did = device.get("quasar_info", {}).get("device_id")
+        if did:
+            shared = speakers.setdefault(did, {})
+            if "host" in shared and shared["host"]:
+                device.setdefault("host", shared["host"])
+            if "port" in shared and shared["port"]:
+                device.setdefault("port", shared["port"])
+            if device.get("host"):
+                shared["host"] = device["host"]
+            if device.get("port"):
+                shared["port"] = device["port"]
+            shared["device_id"] = did
     await _setup_devices(hass, quasar)
 
-    config = hass.data[DOMAIN][DATA_CONFIG]
-    if config.get(CONF_CLOUD_UPDATES, True):
+    if policy.effective_cloud_updates:
         quasar.start()
-
     if hass_utils.incluce_devices(hass, entry):
         quasar.platforms = platforms = PLATFORMS
         entry.async_on_unload(
@@ -209,33 +230,41 @@ async def async_reload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    quasar: YandexQuasar = hass.data[DOMAIN][entry.unique_id]
-    quasar.stop()
+    quasar: YandexQuasar | None = hass.data[DOMAIN].get(entry.unique_id)
+    if quasar:
+        quasar.stop()
 
-    platforms = getattr(quasar, "platforms")
-    return await hass.config_entries.async_unload_platforms(entry, platforms)
-
+    platforms = getattr(quasar, "platforms", None) or PLATFORMS
+    unloaded = await hass.config_entries.async_unload_platforms(entry, platforms)
+    if unloaded and entry.unique_id in hass.data[DOMAIN]:
+        hass.data[DOMAIN].pop(entry.unique_id, None)
+    return unloaded
 
 async def _init_local_discovery(hass: HomeAssistant):
     """Init descovery local speakers with Zeroconf (mDNS)."""
     speakers: dict = hass.data[DOMAIN][DATA_SPEAKERS]
 
     async def found_local_speaker(info: dict):
-        speaker = speakers.setdefault(info["device_id"], {})
-        entity: YandexStationBase = speaker.get("entity")
-
-        # If speaker has active local connection - we are skipping this update
-        # because of bug https://github.com/AlexxIT/YandexStation/issues/568
-        if entity and entity.local_state:
+        did = info.get("device_id")
+        if not did:
             return
+        shared = speakers.setdefault(did, {})
+        shared["host"] = info.get("host")
+        shared["port"] = info.get("port")
+        shared.update(info)
 
-        speaker.update(info)
-
-        if entity and entity.hass:
-            await entity.init_local_mode()
-            entity.async_write_ha_state()
-
-    zeroconf = await utils.get_zeroconf_singleton(hass)
+        for key, val in hass.data.get(DOMAIN, {}).items():
+            if isinstance(val, YandexQuasar):
+                for dev in val.speakers + val.modules:
+                    if dev.get("quasar_info", {}).get("device_id") == did:
+                        dev["host"] = info["host"]
+                        dev["port"] = info["port"]
+                        entity: YandexStationBase = dev.get("entity")
+                        if entity and entity.local_state:
+                            continue
+                        if entity and entity.hass:
+                            await entity.init_local_mode()
+                            entity.async_write_ha_state()
 
     listener = YandexIOListener(
         lambda info: hass.create_task(found_local_speaker(info))

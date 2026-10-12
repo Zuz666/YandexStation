@@ -8,6 +8,7 @@ import time
 from typing import Awaitable
 
 from aiohttp import ClientResponse, ClientSession
+from .policy import Readiness, SessionConfig
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,13 +44,19 @@ class BasicSession:
     domain: str = None
     proxy: str = None
     ssl: bool = None
+    config: SessionConfig = None
+
+    def __init__(self, session: ClientSession, config: SessionConfig | None = None):
+        self._session = session
+        self.config = config or SessionConfig(domain=self.domain, proxy=self.proxy, ssl=self.ssl)
 
     def _request(self, method: str, url: str, **kwargs) -> Awaitable[ClientResponse]:
-        """Internal request function with global support proxy ans ssl options."""
-        if self.domain:
-            url = url.replace("yandex.ru", self.domain)
-        kwargs["proxy"] = self.proxy
-        kwargs["ssl"] = self.ssl
+        """Internal request function with per-instance and global fallback proxy/ssl/domain options."""
+        url = self.config.resolve_url(url)
+        proxy = self.config.proxy if self.config.proxy is not None else self.proxy
+        ssl = self.config.ssl if self.config.ssl is not None else self.ssl
+        kwargs["proxy"] = proxy
+        kwargs["ssl"] = ssl
         kwargs.setdefault("timeout", 5.0)
         return getattr(self._session, method)(url, **kwargs)
 
@@ -66,8 +73,6 @@ class BasicSession:
     @property
     def client_session(self):
         return self._session
-
-
 # noinspection PyPep8
 class YandexSession(BasicSession):
     """Class for login in yandex via username, token, capcha."""
@@ -84,14 +89,20 @@ class YandexSession(BasicSession):
         x_token: str = None,
         music_token: str = None,
         cookie: str = None,
+        config: SessionConfig | None = None,
+        readiness: Readiness | None = None,
+        **kwargs,
     ):
         """
         :param x_token: optional x-token
         :param music_token: optional token for glagol API
         :param cookie: optional base64 cookie from last session
         """
-        self._session = session
-
+        super().__init__(session, config=config)
+        self.readiness = readiness or Readiness()
+        self.csrf_token = None
+        self.auth_headers = None
+        self.auth_json = None
         # fix bug with wrong CSRF token response
         setattr(session.cookie_jar, "_quote_cookie", False)
 
