@@ -199,6 +199,15 @@ class OptionsFlowHandler(OptionsFlow):
             return await self._async_save_options(user_input)
 
         defaults = dict(self.config_entry.options)
+        quasar_url = defaults.get("quasar_base_url") or "https://iot.quasar.yandex.ru (по умолчанию)"
+        account_url = defaults.get("account_base_url") or "https://quasar.yandex.ru (по умолчанию)"
+        passport_url = defaults.get("passport_base_url") or "https://passport.yandex.ru (по умолчанию)"
+        placeholders = {
+            "current_quasar": quasar_url,
+            "current_account": account_url,
+            "current_passport": passport_url,
+        }
+
         schema_dict = {
             vol.Optional(
                 "force_offline_local",
@@ -229,7 +238,11 @@ class OptionsFlowHandler(OptionsFlow):
             ): cv.string,
         }
         data = vol_schema(schema_dict, defaults)
-        return self.async_show_form(step_id="settings", data_schema=data)
+        return self.async_show_form(
+            step_id="settings",
+            data_schema=data,
+            description_placeholders=placeholders,
+        )
 
     async def async_step_devices(self, user_input: dict = None):
         """Configure device inclusion."""
