@@ -245,13 +245,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    quasar: YandexQuasar | None = hass.data[DOMAIN].get(entry.unique_id)
+    quasar: YandexQuasar | None = hass.data.get(DOMAIN, {}).get(entry.unique_id)
     if quasar:
-        quasar.stop()
+        if hasattr(quasar, "async_stop"):
+            await quasar.async_stop()
+        else:
+            quasar.stop()
 
     platforms = getattr(quasar, "platforms", None) or PLATFORMS
     unloaded = await hass.config_entries.async_unload_platforms(entry, platforms)
-    if unloaded and entry.unique_id in hass.data[DOMAIN]:
+    if unloaded and entry.unique_id in hass.data.get(DOMAIN, {}):
         hass.data[DOMAIN].pop(entry.unique_id, None)
     return unloaded
 
@@ -269,7 +272,7 @@ async def _init_local_discovery(hass: HomeAssistant):
         shared.update(info)
 
         for key, val in hass.data.get(DOMAIN, {}).items():
-            if isinstance(val, YandexQuasar):
+            if hasattr(val, "speakers") and hasattr(val, "modules"):
                 for dev in val.speakers + val.modules:
                     if dev.get("quasar_info", {}).get("device_id") == did:
                         dev["host"] = info["host"]
@@ -295,7 +298,7 @@ async def _init_services(hass: HomeAssistant):
     def get_all_speakers():
         speakers = []
         for val in hass.data.get(DOMAIN, {}).values():
-            if isinstance(val, YandexQuasar):
+            if hasattr(val, "speakers") and hasattr(val, "modules"):
                 speakers.extend(val.speakers + val.modules)
         return speakers
 

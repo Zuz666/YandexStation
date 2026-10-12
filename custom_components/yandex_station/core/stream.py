@@ -102,7 +102,11 @@ class StreamImplementation:
     def __init__(self, context=None):
         self.context = context
         self.hass = getattr(context, "hass", None) or StreamView.hass
-        self.session = async_get_clientsession(self.hass) if self.hass else None
+        try:
+            self.session = async_get_clientsession(self.hass) if self.hass else None
+        except Exception as e:
+            _LOGGER.debug("Could not get clientsession for stream: %r", e)
+            self.session = None
 
     def get_url(self, url: str) -> str:
         if url[0] != "/":

@@ -23,13 +23,19 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 RELOADABLE_MODULES = [
+    "custom_components.yandex_station.core.const",
+    "custom_components.yandex_station.core.policy",
+    "custom_components.yandex_station.core.cache",
+    "custom_components.yandex_station.core.utils",
     "custom_components.yandex_station.core.stream",
     "custom_components.yandex_station.core.yandex_session",
+    "custom_components.yandex_station.core.yandex_glagol",
+    "custom_components.yandex_station.core.quasar_info",
     "custom_components.yandex_station.core.yandex_quasar",
     "custom_components.yandex_station.core.yandex_station",
-    "custom_components.yandex_station.core.yandex_glagol",
-    "custom_components.yandex_station.core.utils",
     "custom_components.yandex_station.hass.hass_utils",
+    "custom_components.yandex_station.hass.shopping_list",
+    "custom_components.yandex_station.hass.todo_list",
     "custom_components.yandex_station.media_player",
     "custom_components.yandex_station.select",
     "custom_components.yandex_station.calendar",
@@ -127,7 +133,8 @@ class LifecycleManager:
             entries = [
                 e
                 for e in hass.config_entries.async_entries(DOMAIN)
-                if not getattr(e, "disabled_by", None)
+                if getattr(e, "disabled_by", None) is None
+                or str(getattr(e, "disabled_by", None)).lower() in ("none", "")
             ]
 
             # 2. Quiesce: close admission & drain in-flight requests (timeout 10s)
@@ -142,15 +149,34 @@ class LifecycleManager:
 
             # 3. Unload affected loaded entries through Core
             unloaded_entries = []
+            failed_unload = False
             for entry in entries:
-                try:
-                    if getattr(entry, "state", None) and str(entry.state).lower() == "loaded":
+                state_val = getattr(entry, "state", None)
+                state_str = str(getattr(state_val, "value", state_val)).lower()
+                is_loaded = state_str == "loaded"
+                if is_loaded:
+                    try:
                         ok = await hass.config_entries.async_unload(entry.entry_id)
                         if ok:
                             unloaded_entries.append(entry.entry_id)
-                except Exception as e:
-                    _LOGGER.error("Failed to unload entry %s during hot-reload: %r", entry.entry_id, e)
+                        else:
+                            failed_unload = True
+                            break
+                    except Exception as e:
+                        _LOGGER.error("Failed to unload entry %s: %r", entry.entry_id, e)
+                        failed_unload = True
+                        break
 
+            if failed_unload:
+                _LOGGER.warning("Unload failed; rolling back unloaded entries with old code")
+                for uid in unloaded_entries:
+                    try:
+                        await hass.config_entries.async_setup(uid)
+                    except Exception as e:
+                        _LOGGER.error("Rollback setup failed for %s: %r", uid, e)
+                if self.context:
+                    self.context.admission_open = True
+                return {"error": "unload_failed", "unloaded_entries": unloaded_entries}
             # 4. In-place importlib.reload of domain modules
             reloaded_modules = []
             try:
@@ -169,15 +195,27 @@ class LifecycleManager:
                 }
 
             # 5. Rebind stream implementation
+            rebind_ok = False
             if self.context:
                 try:
                     stream_mod = sys.modules.get("custom_components.yandex_station.core.stream")
                     if stream_mod and hasattr(stream_mod, "StreamImplementation"):
                         new_impl = stream_mod.StreamImplementation(self.context)
                         self.context.implementation = new_impl
+                        rebind_ok = True
+                    else:
+                        _LOGGER.error("StreamImplementation missing in reloaded stream module")
                 except Exception as e:
                     _LOGGER.error("Failed to rebind stream implementation: %r", e)
 
+            if not rebind_ok and self.context:
+                self.context.admission_open = False
+                self.context.implementation = None
+                return {
+                    "error": "rebind_failed",
+                    "reloaded_modules_count": len(reloaded_modules),
+                    "http_status": 503,
+                }
             # 6. Re-setup entries through Core
             setup_results = {}
             for entry_id in unloaded_entries:
