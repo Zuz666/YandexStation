@@ -2,7 +2,11 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
+from homeassistant.util import dt as dt_util, slugify
 
+from .core.const import DOMAIN
+from .core.yandex_quasar import YandexQuasar
 from .core.entity import YandexCustomEntity
 from .hass import hass_utils
 
@@ -17,6 +21,11 @@ ENTITY_DESCRIPTIONS = {
 
 async def async_setup_entry(hass, entry, async_add_entities):
     entities = []
+    quasar: YandexQuasar | None = hass.data.get(DOMAIN, {}).get(entry.unique_id)
+
+    if quasar and quasar.policy.enable_diagnostic_sensors:
+        for speaker in quasar.speakers + quasar.modules:
+            entities.append(YandexStationLocalConnection(quasar, speaker))
 
     for quasar, device, config in hass_utils.incluce_devices(hass, entry):
         for instance in device["capabilities"]:
@@ -54,3 +63,57 @@ class YandexBinarySensor(BinarySensorEntity, YandexCustomEntity):
         if self.instance in properties:
             value = properties[self.instance]
             self._attr_is_on = value is not None and value > 0
+
+
+class YandexStationLocalConnection(BinarySensorEntity):
+    """Binary sensor for real-time Glagol local connectivity."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_has_entity_name = True
+    _attr_name = "Локальное подключение"
+
+    def __init__(self, quasar: YandexQuasar, device: dict):
+        self.quasar = quasar
+        self.device = device
+        did = device.get("quasar_info", {}).get("device_id") or device.get("id")
+        self._did = did
+        self._attr_unique_id = f"{did}_local_connection"
+        self.entity_id = f"binary_sensor.yandex_station_{slugify(self._attr_unique_id)}"
+        self._attr_is_on = False
+        self._software_version = None
+        self._last_heartbeat = None
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, did)},
+            name=device["name"],
+        )
+        self._unsub = quasar.subscribe_update(f"{self._did}_glagol", self._on_glagol_update)
+
+    async def async_added_to_hass(self):
+        entity = self.device.get("entity")
+        if entity and getattr(entity, "local_state", None):
+            self._attr_is_on = True
+        self.async_on_remove(self._unsub)
+
+    def _on_glagol_update(self, data: dict | None):
+        if data and "state" in data:
+            self._attr_is_on = True
+            if sw := data.get("softwareVersion"):
+                self._software_version = sw
+            self._last_heartbeat = dt_util.utcnow().isoformat()
+        else:
+            self._attr_is_on = False
+        if self.hass:
+            self.async_write_ha_state()
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        attrs = {
+            "host": self.device.get("host"),
+            "port": self.device.get("port"),
+        }
+        if self._software_version:
+            attrs["software_version"] = self._software_version
+        if self._last_heartbeat:
+            attrs["last_heartbeat"] = self._last_heartbeat
+        return attrs
