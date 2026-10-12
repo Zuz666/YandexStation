@@ -275,6 +275,7 @@ async def _init_local_discovery(hass: HomeAssistant):
                             await entity.init_local_mode()
                             entity.async_write_ha_state()
 
+    zeroconf = await utils.get_zeroconf_singleton(hass)
     listener = YandexIOListener(
         lambda info: hass.create_task(found_local_speaker(info))
     )
@@ -285,7 +286,12 @@ async def _init_local_discovery(hass: HomeAssistant):
 
 async def _init_services(hass: HomeAssistant):
     """Init Yandex Station TTS service."""
-    speakers: dict = hass.data[DOMAIN][DATA_SPEAKERS]
+    def get_all_speakers():
+        speakers = []
+        for val in hass.data.get(DOMAIN, {}).values():
+            if isinstance(val, YandexQuasar):
+                speakers.extend(val.speakers + val.modules)
+        return speakers
 
     try:
         # starting from Home Assistant 2023.7
@@ -299,8 +305,8 @@ async def _init_services(hass: HomeAssistant):
             except TypeError:
                 # for HA before 2025.10
                 entity_ids = await service.async_extract_entity_ids(hass, call)
-            for speaker in speakers.values():
-                entity: YandexStationBase = speaker.get("entity")
+            for dev in get_all_speakers():
+                entity: YandexStationBase = dev.get("entity")
                 if (
                     not entity
                     or entity.entity_id not in entity_ids
@@ -325,9 +331,8 @@ async def _init_services(hass: HomeAssistant):
 
     async def yandex_station_say(call: ServiceCall):
         entity_ids = call.data.get(ATTR_ENTITY_ID) or utils.find_station(
-            speakers.values()
+            get_all_speakers()
         )
-
         _LOGGER.debug(f"Yandex say to: {entity_ids}")
 
         if not entity_ids:
