@@ -176,22 +176,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     yandex.policy = policy
     yandex.add_update_listener(update_cookie_and_token)
 
-    quasar = None
+    quasar = YandexQuasar(yandex, policy=policy, cache_manager=cache_manager)
     try:
-        if policy.effective_cloud_allowed:
-            if not await yandex.refresh_cookies():
-                persistent_notification.async_create(
-                    hass,
-                    "Необходимо заново авторизоваться в Яндексе. Для этого [добавьте "
-                    "новую интеграцию](/config/integrations) с тем же логином.",
-                    title="Yandex.Station",
-                )
-                return False
-
-        quasar = YandexQuasar(yandex, policy=policy, cache_manager=cache_manager)
         await quasar.init()
     except Exception as e:
-        if not quasar or not quasar.devices:
+        if not quasar.devices:
             raise ConfigEntryNotReady from e
 
     await hass_utils.load_fake_devies(hass, quasar)
