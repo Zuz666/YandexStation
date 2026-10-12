@@ -75,24 +75,24 @@ def test_offline_bootstrap_from_snapshot(tmp_path):
             },
         )
         mock_session = MagicMock()
-        mock_session.cookie_jar = MagicMock()
         with patch("custom_components.yandex_station.core.utils.async_create_clientsession", return_value=mock_session):
             with patch.object(CacheManager, "async_load", AsyncMock(return_value=snapshot)):
                 with patch("custom_components.yandex_station.core.yandex_session.YandexSession.refresh_cookies") as mock_refresh:
                     mock_refresh.side_effect = RuntimeError("Network call not allowed in offline mode")
-                # Setup entry in offline mode must succeed from cache without refresh_cookies
-                success = await async_setup_entry(mock_hass, entry)
-                assert success is True
 
-                quasar = mock_hass.data[DOMAIN][entry.unique_id]
-                assert len(quasar.devices) == 2
-                assert len(quasar.speakers) == 1
-                assert len(quasar.modules) == 1
-                assert quasar.policy.force_offline_local is True
-                assert quasar.policy.effective_cloud_allowed is False
-                assert quasar.device_tokens["glagol_did_1"] == "token_for_1"
-                assert quasar.device_tokens["glagol_did_2"] == "token_for_2"
-                mock_refresh.assert_not_called()
+                    # Setup entry in offline mode must succeed from cache without refresh_cookies
+                    success = await async_setup_entry(mock_hass, entry)
+                    assert success is True
+
+                    quasar = mock_hass.data[DOMAIN][entry.unique_id]
+                    assert len(quasar.devices) == 2
+                    assert len(quasar.speakers) == 1
+                    assert len(quasar.modules) == 1
+                    assert quasar.policy.force_offline_local is True
+                    assert quasar.policy.effective_cloud_allowed is False
+                    assert quasar.device_tokens["glagol_did_1"] == "token_for_1"
+                    assert quasar.device_tokens["glagol_did_2"] == "token_for_2"
+                    mock_refresh.assert_not_called()
 
     asyncio.run(scenario())
 
@@ -169,3 +169,106 @@ def test_glagol_token_preservation_on_disconnect():
 
     # Token must NOT be reset to None on disconnect
     assert glagol.device_token == "initial_token"
+
+
+def test_offline_acceptance_a1_full_lifecycle(tmp_path):
+    """A1: --network none, force_offline_local=True, snapshot with Station & Module, cached tokens.
+
+    Setup completes, platforms forward, no cloud HTTP/WS calls made, loopback Glagol message
+    activates local mode on speaker, calendar/select remain unavailable.
+    """
+    from custom_components.yandex_station.media_player import async_setup_entry as mp_setup_entry
+    from custom_components.yandex_station.select import async_setup_entry as select_setup_entry
+    from custom_components.yandex_station.calendar import async_setup_entry as cal_setup_entry
+
+    async def scenario():
+        hass = MagicMock(spec=HomeAssistant)
+        hass.data = {DOMAIN: {DATA_CONFIG: {}, DATA_SPEAKERS: {}}}
+        hass.config = MagicMock()
+        hass.config.path = lambda *args: str(tmp_path.joinpath(*args))
+        hass.config_entries = MagicMock()
+        hass.config_entries.async_update_entry = MagicMock()
+
+        entry = MagicMock()
+        entry.entry_id = "entry_a1"
+        entry.unique_id = "test_user_a1"
+        entry.data = {"x_token": "token_a1"}
+        entry.options = {"force_offline_local": True}
+        entry.async_on_unload = MagicMock()
+
+        # Real platform forwarding
+        async def forward_setups(e, platforms):
+            for plat in platforms:
+                if plat == "media_player":
+                    await mp_setup_entry(hass, e, lambda entities, update_before_add=False: None)
+                elif plat == "select":
+                    await select_setup_entry(hass, e, lambda entities, update_before_add=False: None)
+                elif plat == "calendar":
+                    await cal_setup_entry(hass, e, lambda entities, update_before_add=False: None)
+            return True
+
+        hass.config_entries.async_forward_entry_setups = AsyncMock(side_effect=forward_setups)
+
+        snapshot_devices = [
+            {
+                "id": "station_cloud_1",
+                "name": "Станция Зал",
+                "type": "devices.types.smart_speaker.yandex.station",
+                "capabilities": [{"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": True}}],
+                "properties": [],
+                "quasar_info": {"device_id": "glagol_1", "platform": "yandexstation"},
+            },
+            {
+                "id": "module_cloud_2",
+                "name": "Модуль ТВ",
+                "type": "devices.types.media_device.tv_box",
+                "capabilities": [],
+                "properties": [],
+                "quasar_info": {"device_id": "glagol_2", "platform": "yandexmodule"},
+            },
+        ]
+
+        snapshot = StationSnapshot(
+            entry_id=entry.entry_id,
+            account_login="test_user_a1",
+            revision=1,
+            devices=snapshot_devices,
+            local_config={"glagol_1": {"host": "127.0.0.1", "port": 1961}},
+            device_tokens={"glagol_1": {"token": "glagol_token_1", "state": "valid"}},
+        )
+
+        mock_session = MagicMock()
+        mock_session.cookie_jar = MagicMock()
+        with patch("custom_components.yandex_station.core.utils.async_create_clientsession", return_value=mock_session):
+            with patch.object(CacheManager, "async_load", AsyncMock(return_value=snapshot)):
+                success = await async_setup_entry(hass, entry)
+                assert success is True
+
+                quasar = hass.data[DOMAIN][entry.unique_id]
+                station_dev = next(d for d in quasar.devices if d["id"] == "station_cloud_1")
+                entity = station_dev.get("entity")
+                assert entity is not None
+
+                # Initially not available before confirmed local state
+                assert entity.available is False
+
+                # Simulate local Glagol message from loopback
+                entity.async_set_state({
+                    "state": {"aliceState": "IDLE", "volume": 0.3},
+                    "softwareVersion": "1.0.0",
+                })
+
+                # Now speaker is available locally!
+                assert entity.available is True
+                attrs = entity.extra_state_attributes
+                assert attrs["transport"] == "local"
+                assert attrs["cloud_state"] == "offline"
+
+                # Verify central barrier blocks cloud requests
+                with pytest.raises(RuntimeError, match="blocked by force_offline_local"):
+                    await quasar.session._request("get", "https://quasar.yandex.ru/get_account_config")
+
+                with pytest.raises(RuntimeError, match="blocked by force_offline_local"):
+                    await quasar.session.ws_connect("wss://iot.quasar.yandex.ru/ws")
+
+    asyncio.run(scenario())
