@@ -8,7 +8,14 @@ import time
 from typing import Awaitable
 
 from aiohttp import ClientResponse, ClientSession
-from .policy import Readiness, SessionConfig
+from .policy import (
+    AuthState,
+    CsrfState,
+    DEFAULT_COOKIE_STORAGE_ENDPOINTS,
+    DEFAULT_CSRF_ENDPOINTS,
+    Readiness,
+    SessionConfig,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,10 +107,10 @@ class YandexSession(BasicSession):
         """
         super().__init__(session, config=config)
         self.readiness = readiness or Readiness()
+        self._csrf_lock = asyncio.Lock()
         self.csrf_token = None
         self.auth_headers = None
         self.auth_json = None
-        # fix bug with wrong CSRF token response
         setattr(session.cookie_jar, "_quote_cookie", False)
 
         self.x_token = x_token
@@ -257,20 +264,92 @@ class YandexSession(BasicSession):
         return True
 
     async def refresh_cookies(self) -> bool:
-        """Checks if cookies ok and updates them if necessary."""
-        # check cookies
-        r = await self._get("https://yandex.ru/iot?storage=1")
-        resp = await r.json()
-        if resp["storage"]["user"]["uid"]:
-            # if cookies fine - return
+        """Checks if cookies ok across fallback endpoints and updates them if necessary."""
+        endpoints = (
+            self.config.cookie_storage_endpoints
+            if self.config
+            else DEFAULT_COOKIE_STORAGE_ENDPOINTS
+        )
+        probe_successful = False
+        confirmed_invalid = False
+
+        for url in endpoints:
+            resolved_url = self.config.resolve_url(url) if self.config else url
+            try:
+                r = await self._get(resolved_url)
+                if r.status == 200:
+                    try:
+                        resp = await r.json()
+                        if isinstance(resp, dict):
+                            if resp.get("status") == "ok":
+                                probe_successful = True
+                                break
+                            storage = resp.get("storage")
+                            if (
+                                isinstance(storage, dict)
+                                and storage.get("user", {}).get("uid")
+                            ):
+                                probe_successful = True
+                                break
+                    except Exception:
+                        pass
+                elif r.status in (401, 403):
+                    confirmed_invalid = True
+            except Exception as e:
+                _LOGGER.debug(f"Cookie probe failed on {resolved_url}: {e!r}")
+
+        if probe_successful:
+            self.readiness.auth_state = AuthState.VALID
             return True
 
-        # refresh cookies
-        ok = await self.login_token(self.x_token)
-        if ok:
-            await self._handle_update()
-        return ok
+        if not confirmed_invalid:
+            self.readiness.auth_state = AuthState.UNKNOWN
+            return False
 
+        if self.x_token:
+            try:
+                ok = await self.login_token(self.x_token)
+                if ok:
+                    self.readiness.auth_state = AuthState.VALID
+                    await self._handle_update()
+                    return True
+            except Exception as e:
+                _LOGGER.debug("Login with x_token failed: %r", e)
+
+        self.readiness.auth_state = AuthState.REAUTH_REQUIRED
+        return False
+
+    async def ensure_csrf(self) -> str | None:
+        if self.csrf_token:
+            return self.csrf_token
+
+        async with self._csrf_lock:
+            if self.csrf_token:
+                return self.csrf_token
+
+            endpoints = (
+                self.config.csrf_endpoints
+                if self.config
+                else DEFAULT_CSRF_ENDPOINTS
+            )
+            for url in endpoints:
+                resolved_url = self.config.resolve_url(url) if self.config else url
+                try:
+                    _LOGGER.debug(f"Обновление CSRF-токена, url: {resolved_url}")
+                    r = await self._get(resolved_url)
+                    if r.status != 200:
+                        continue
+                    raw = await r.text()
+                    m = re.search(r'"csrfToken2":"([^"]+)"', raw)
+                    if m:
+                        self.csrf_token = m.group(1)
+                        self.readiness.csrf_state = CsrfState.CANDIDATE
+                        return self.csrf_token
+                except Exception as e:
+                    _LOGGER.debug(f"CSRF probe error on {resolved_url}: {e!r}")
+
+            self.readiness.csrf_state = CsrfState.UNAVAILABLE
+            return None
     async def get_music_token(self, x_token: str):
         """Get music token using x-token. Usual you should'n call this method."""
         _LOGGER.debug("Get music token")
@@ -315,17 +394,9 @@ class YandexSession(BasicSession):
 
         # all except GET should contain CSRF token
         if method != "get" and not url.startswith("https://rpc.alice.yandex.ru"):
-            if self.csrf_token is None:
-                _LOGGER.debug(f"Обновление CSRF-токена, proxy: {self.proxy}")
-                r = await self._get(
-                    "https://yandex.ru/iot", proxy=self.proxy, ssl=self.ssl
-                )
-                raw = await r.text()
-                m = re.search('"csrfToken2":"(.+?)"', raw)
-                assert m, raw
-                self.csrf_token = m[1]
-
-            kwargs["headers"] = {"x-csrf-token": self.csrf_token}
+            csrf = await self.ensure_csrf()
+            if csrf:
+                kwargs.setdefault("headers", {})["x-csrf-token"] = csrf
 
         r = await self._request(method, url, **kwargs)
         if r.status == 200:
@@ -336,12 +407,25 @@ class YandexSession(BasicSession):
             # 401 - no cookies
             await self.refresh_cookies()
         elif r.status == 403:
-            # 403 - no x-csrf-token
-            self.csrf_token = None
+            # Check if this is specifically a CSRF rejection
+            is_csrf_reject = False
+            try:
+                raw_text = await r.text()
+                if "csrf" in raw_text.lower():
+                    is_csrf_reject = True
+            except Exception:
+                pass
+
+            if is_csrf_reject:
+                self.csrf_token = None
+                self.readiness.csrf_state = CsrfState.UNAVAILABLE
+            else:
+                retry = 0
         elif not url.endswith("/get_alarms"):
             _LOGGER.warning(f"{url} return {r.status} status")
 
-        if retry:
+        is_csrf_retry = (r.status == 403 and locals().get("is_csrf_reject", False))
+        if retry and (method.lower() == "get" or is_csrf_retry):
             _LOGGER.debug(f"Retry {method} {url}")
             return await self.request(method, url, retry - 1, **kwargs)
 
