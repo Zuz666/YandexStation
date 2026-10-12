@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        pass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -163,6 +169,23 @@ class SessionConfig:
         return inst
 
     def resolve_url(self, url: str) -> str:
+        if not url:
+            return url
+
+        # Base URL overrides (RFC v2 §4.2)
+        base_map = (
+            ("https://iot.quasar.yandex.ru", self.quasar_base_url),
+            ("https://quasar.yandex.ru", self.account_base_url),
+            ("https://passport.yandex.ru", self.passport_base_url),
+            ("https://mobileproxy.passport.yandex.net", self.mobileproxy_base_url),
+            ("https://quasar.yandex.net/glagol", self.glagol_base_url),
+            ("https://rpc.alice.yandex.ru", self.rpc_base_url),
+        )
+        for default_base, custom_base in base_map:
+            if custom_base and custom_base != default_base and url.startswith(default_base):
+                url = custom_base.rstrip("/") + url[len(default_base):]
+                break
+
         if not self.domain:
             return url
         parsed = urlsplit(url)
