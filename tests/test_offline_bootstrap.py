@@ -1,0 +1,171 @@
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from homeassistant.core import HomeAssistant
+
+from custom_components.yandex_station import async_setup_entry
+from custom_components.yandex_station.core.cache import CacheManager, StationSnapshot
+from custom_components.yandex_station.core.const import DATA_CONFIG, DATA_SPEAKERS, DOMAIN
+from custom_components.yandex_station.core.policy import EntryPolicy, SessionConfig
+
+
+@pytest.fixture
+def mock_hass(tmp_path):
+    hass = MagicMock(spec=HomeAssistant)
+    hass.data = {DOMAIN: {DATA_CONFIG: {}, DATA_SPEAKERS: {}}}
+    hass.config = MagicMock()
+    hass.config.path = lambda *args: str(tmp_path.joinpath(*args))
+    hass.config_entries = MagicMock()
+    hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+    hass.config_entries.async_update_entry = MagicMock()
+    return hass
+
+
+def test_offline_bootstrap_from_snapshot(tmp_path):
+    async def scenario():
+        hass = MagicMock(spec=HomeAssistant)
+        hass.data = {DOMAIN: {DATA_CONFIG: {}, DATA_SPEAKERS: {}}}
+        hass.config = MagicMock()
+        hass.config.path = lambda *args: str(tmp_path.joinpath(*args))
+        hass.config_entries = MagicMock()
+        hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+        hass.config_entries.async_update_entry = MagicMock()
+        mock_hass = hass
+        entry = MagicMock()
+        entry.entry_id = "test_entry_id_1"
+        entry.unique_id = "test_login"
+        entry.data = {"x_token": "valid_token"}
+        entry.options = {"force_offline_local": True}
+        entry.async_on_unload = MagicMock()
+
+        # Prepopulate snapshot in cache manager
+        cache = CacheManager(mock_hass, entry.entry_id, account_login="test_login")
+        snapshot_devices = [
+            {
+                "id": "station_cloud_1",
+                "name": "Станция Зал",
+                "type": "devices.types.smart_speaker.yandex.station",
+                "capabilities": [{"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": True}}],
+                "properties": [],
+                "quasar_info": {"device_id": "glagol_did_1", "platform": "yandexstation"},
+            },
+            {
+                "id": "module_cloud_2",
+                "name": "Модуль Спальня",
+                "type": "devices.types.media_device.tv_box",
+                "capabilities": [],
+                "properties": [],
+                "quasar_info": {"device_id": "glagol_did_2", "platform": "yandexmodule"},
+            },
+        ]
+
+        snapshot = StationSnapshot(
+            entry_id=entry.entry_id,
+            account_login="test_login",
+            revision=1,
+            devices=snapshot_devices,
+            local_config={
+                "glagol_did_1": {"host": "127.0.0.1", "port": 1961},
+                "glagol_did_2": {"host": "127.0.0.1", "port": 1961},
+            },
+            device_tokens={
+                "glagol_did_1": {"token": "token_for_1", "state": "valid"},
+                "glagol_did_2": {"token": "token_for_2", "state": "valid"},
+            },
+        )
+        mock_session = MagicMock()
+        mock_session.cookie_jar = MagicMock()
+        with patch("custom_components.yandex_station.core.utils.async_create_clientsession", return_value=mock_session):
+            with patch.object(CacheManager, "async_load", AsyncMock(return_value=snapshot)):
+                with patch("custom_components.yandex_station.core.yandex_session.YandexSession.refresh_cookies") as mock_refresh:
+                    mock_refresh.side_effect = RuntimeError("Network call not allowed in offline mode")
+                # Setup entry in offline mode must succeed from cache without refresh_cookies
+                success = await async_setup_entry(mock_hass, entry)
+                assert success is True
+
+                quasar = mock_hass.data[DOMAIN][entry.unique_id]
+                assert len(quasar.devices) == 2
+                assert len(quasar.speakers) == 1
+                assert len(quasar.modules) == 1
+                assert quasar.policy.force_offline_local is True
+                assert quasar.policy.effective_cloud_allowed is False
+                assert quasar.device_tokens["glagol_did_1"] == "token_for_1"
+                assert quasar.device_tokens["glagol_did_2"] == "token_for_2"
+                mock_refresh.assert_not_called()
+
+    asyncio.run(scenario())
+
+
+def test_offline_missing_cache_raises(tmp_path):
+    from homeassistant.exceptions import ConfigEntryNotReady
+
+    async def scenario():
+        hass = MagicMock(spec=HomeAssistant)
+        hass.data = {DOMAIN: {DATA_CONFIG: {}, DATA_SPEAKERS: {}}}
+        hass.config = MagicMock()
+        hass.config.path = lambda *args: str(tmp_path.joinpath(*args))
+        entry = MagicMock()
+        entry.entry_id = "test_entry_empty"
+        entry.unique_id = "test_login"
+        entry.data = {"x_token": "valid_token"}
+        entry.options = {"force_offline_local": True}
+
+        mock_session = MagicMock()
+        mock_session.cookie_jar = MagicMock()
+        with patch("custom_components.yandex_station.core.utils.async_create_clientsession", return_value=mock_session):
+            with patch.object(CacheManager, "async_load", AsyncMock(return_value=None)):
+                with pytest.raises(ConfigEntryNotReady):
+                    await async_setup_entry(hass, entry)
+
+    asyncio.run(scenario())
+
+
+def test_offline_entities_availability():
+    from custom_components.yandex_station.select import YandexEqualizer
+    from custom_components.yandex_station.calendar import YandexCalendar
+
+    async def scenario():
+        quasar = MagicMock()
+        quasar.policy = EntryPolicy(force_offline_local=True)
+        quasar.get_device_config = AsyncMock()
+        quasar.get_alarms = AsyncMock()
+
+        sp = {
+            "id": "dev1",
+            "name": "Speaker 1",
+            "quasar_info": {"device_id": "did1", "platform": "yandexstation"},
+        }
+        eq = YandexEqualizer(quasar, sp)
+        await eq.async_update()
+        assert eq.available is False
+        quasar.get_device_config.assert_not_called()
+
+        cal = YandexCalendar(quasar, sp)
+        await cal.async_update()
+        assert cal.available is False
+        quasar.get_alarms.assert_not_called()
+
+    asyncio.run(scenario())
+
+
+def test_glagol_token_preservation_on_disconnect():
+    from custom_components.yandex_station.core.yandex_glagol import YandexGlagol
+
+    session = MagicMock()
+    device = {
+        "name": "Speaker",
+        "host": "127.0.0.1",
+        "port": 1961,
+        "quasar_info": {"device_id": "did_glagol_1", "platform": "yandexstation"},
+    }
+    glagol = YandexGlagol(session, device, token="initial_token")
+    assert glagol.device_token == "initial_token"
+
+    # Simulate update_handler and disconnect
+    handler = MagicMock()
+    glagol.update_handler = handler
+    glagol.update_handler(None)
+
+    # Token must NOT be reset to None on disconnect
+    assert glagol.device_token == "initial_token"

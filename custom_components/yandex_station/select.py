@@ -97,6 +97,10 @@ class YandexEqualizer(SelectEntity):
         self.entity_id = f"select.yandex_station_{slugify(self._attr_unique_id)}"
 
     async def async_update(self):
+        if not self.quasar.policy.effective_cloud_allowed:
+            self._attr_available = False
+            self._attr_should_poll = False
+            return
         try:
             config, _ = await self.quasar.get_device_config(self.device)
             if eq := config.get("equalizer"):
