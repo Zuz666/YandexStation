@@ -123,6 +123,7 @@ def test_speaker_transport_and_alice_sensors():
             "name": "Станция Спальня",
             "quasar_info": {"device_id": did, "platform": "yandexstation"},
             "capabilities": [{"type": "devices.capabilities.on_off"}],
+            "scenario_id": "scen_valid_1",
         }
         station = YandexStation(quasar, device)
         device["entity"] = station
@@ -153,6 +154,26 @@ def test_speaker_transport_and_alice_sensors():
         alice_sensor._on_glagol_update(None)
         assert alice_sensor.native_value is None
 
+        # Test module device (no capabilities) -> unavailable when not local
+        module_device = {
+            "id": "mod_1",
+            "name": "Модуль",
+            "capabilities": [],
+            "quasar_info": {"device_id": "mod_did", "platform": "yandexmodule"},
+        }
+        mod_sensor = YandexTransportSensor(quasar, module_device)
+        assert mod_sensor.native_value == "unavailable"
+
+        # Test speaker without scenario_id -> unavailable when not local
+        device_no_scen = dict(device)
+        device_no_scen.pop("entity", None)
+        device_no_scen["scenario_id"] = None
+        no_scen_sensor = YandexTransportSensor(quasar, device_no_scen)
+        assert no_scen_sensor.native_value == "unavailable"
+
+        # Verify station entity itself returns unavailable when scenario_id is None
+        device["scenario_id"] = None
+        assert station.transport == "unavailable"
     asyncio.run(scenario())
 
 

@@ -27,8 +27,7 @@ from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.util import slugify
 from .core.const import DOMAIN
-from .core.yandex_quasar import YandexQuasar
-from .core.policy import DevicesState
+from .core.policy import AuthState, DevicesState
 _LOGGER = logging.getLogger(__name__)
 
 if (MAJOR_VERSION, MINOR_VERSION) >= (2026, 7):
@@ -352,11 +351,24 @@ class YandexTransportSensor(SensorEntity):
     @property
     def native_value(self) -> str:
         entity = self.device.get("entity")
+        if entity and hasattr(entity, "transport"):
+            return entity.transport
         if entity and getattr(entity, "local_state", None) is not None:
             return "local"
-        if (
-            self.quasar.policy.effective_cloud_allowed
-            and self.quasar.readiness.devices_state == DevicesState.READY
-        ):
-            return "cloud"
-        return "unavailable"
+        if not self.device.get("capabilities"):
+            return "unavailable"
+        if not getattr(self.quasar, "policy", None):
+            return "unavailable"
+        if not self.quasar.policy.effective_cloud_allowed:
+            return "unavailable"
+        if not self.quasar.policy.enable_scenarios:
+            return "unavailable"
+        if not self.device.get("scenario_id"):
+            return "unavailable"
+        readiness = getattr(self.quasar, "readiness", None)
+        if readiness:
+            if readiness.auth_state != AuthState.VALID:
+                return "unavailable"
+            if readiness.devices_state != DevicesState.READY:
+                return "unavailable"
+        return "cloud"
