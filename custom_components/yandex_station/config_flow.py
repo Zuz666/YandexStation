@@ -21,6 +21,7 @@ from .core import utils
 from .core.const import DOMAIN
 from .core.yandex_quasar import YandexQuasar
 from .core.yandex_session import LoginResponse, YandexSession
+from .core.cache import CacheManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,7 +56,12 @@ class YandexStationFlowHandler(ConfigFlow, domain=DOMAIN):
 
         else:
             return await self.async_step_user()
-
+    async def async_step_reauth(self, entry_data=None):
+        """Handle reauthorization request from Core (RFC v2 §6.3)."""
+        entry_id = self.context.get("entry_id")
+        if entry_id:
+            self._reauth_entry = self.hass.config_entries.async_get_entry(entry_id)
+        return await self.async_step_user()
     async def async_step_user(self, user_input=None):
         """Init by user via GUI"""
         if user_input is None:
@@ -122,6 +128,26 @@ class YandexStationFlowHandler(ConfigFlow, domain=DOMAIN):
         captcha form if captcha required. Show auth form with error if error.
         """
         if resp.ok:
+            if hasattr(self, "_reauth_entry") and self._reauth_entry:
+                if (
+                    self._reauth_entry.unique_id
+                    and resp.display_login != self._reauth_entry.unique_id
+                ):
+                    _LOGGER.warning(
+                        "Reauth account mismatch: expected %s, got %s",
+                        self._reauth_entry.unique_id,
+                        resp.display_login,
+                    )
+                    return self.async_abort(reason="account_mismatch")
+
+                self.hass.config_entries.async_update_entry(
+                    self._reauth_entry, data={"x_token": resp.x_token}
+                )
+                self.hass.async_create_task(
+                    self.hass.config_entries.async_reload(self._reauth_entry.entry_id)
+                )
+                return self.async_abort(reason="reauth_successful")
+
             # set unique_id or return existing entry
             entry = await self.async_set_unique_id(resp.display_login)
             if entry:
@@ -136,7 +162,6 @@ class YandexStationFlowHandler(ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(
                     title=resp.display_login, data={"x_token": resp.x_token}
                 )
-
         elif resp.errors:
             _LOGGER.debug(f"Config error: {resp.error}")
             if self.cur_step:
@@ -148,30 +173,80 @@ class YandexStationFlowHandler(ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry):
-        return OptionsFlowHandler()
+        return OptionsFlowHandler(config_entry)
 
 
 class OptionsFlowHandler(OptionsFlow):
+    def __init__(self, config_entry: ConfigEntry = None):
+        self._config_entry = config_entry
+
     @property
-    def config_entry(self):
+    def config_entry(self) -> ConfigEntry:
+        if self._config_entry is not None:
+            return self._config_entry
         return self.hass.config_entries.async_get_entry(self.handler)
 
     async def async_step_init(self, user_input: dict = None):
-        if user_input:
-            return self.async_create_entry(title="", data=user_input)
+        if user_input is not None:
+            new_options = dict(self.config_entry.options)
+            for k, v in user_input.items():
+                if v == "":
+                    new_options.pop(k, None)
+                elif v is not None:
+                    new_options[k] = v
 
-        quasar: YandexQuasar = self.hass.data[DOMAIN][self.config_entry.unique_id]
-        devices = {i["id"]: device_name(i) for i in quasar.devices}
+            if user_input.pop("trigger_reauth", False):
+                self.config_entry.async_start_reauth(self.hass)
+                return self.async_abort(reason="reauth_started")
 
-        # sort by names
-        devices = dict(sorted(devices.items(), key=lambda x: x[1]))
+            # Synchronously commit options to entry BEFORE scheduling reload (RFC v2 §6.2)
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, options=new_options
+            )
+            self.hass.async_create_task(
+                self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            )
+            return self.async_create_entry(title="", data=new_options)
+
+        devices = {}
+        entry_login = self.config_entry.unique_id
+        quasar: YandexQuasar | None = self.hass.data.get(DOMAIN, {}).get(entry_login)
+        if quasar and quasar.devices:
+            for i in quasar.devices:
+                devices[i["id"]] = device_name(i)
+        else:
+            cache = CacheManager(
+                self.hass, self.config_entry.entry_id, account_login=entry_login
+            )
+            snapshot = await cache.async_load()
+            if snapshot and snapshot.devices:
+                for i in snapshot.devices:
+                    devices[i["id"]] = device_name(i)
 
         defaults = dict(self.config_entry.options)
         if include := defaults.get("include"):
-            # filter only existing devices
-            defaults["include"] = [i for i in include if i in devices]
+            for inc in include:
+                if isinstance(inc, str) and inc not in devices:
+                    devices[inc] = f"{inc} (недоступно)"
 
-        data = vol_schema({vol.Optional("include"): cv.multi_select(devices)}, defaults)
+        devices = dict(sorted(devices.items(), key=lambda x: x[1]))
+
+        schema_dict = {
+            vol.Optional("include"): cv.multi_select(devices),
+            vol.Optional(
+                "force_offline_local",
+                default=defaults.get("force_offline_local", False),
+            ): cv.boolean,
+            vol.Optional(
+                "use_cached_devices",
+                default=defaults.get("use_cached_devices", False),
+            ): cv.boolean,
+            vol.Optional(
+                "enable_scenarios", default=defaults.get("enable_scenarios", True)
+            ): cv.boolean,
+        }
+
+        data = vol_schema(schema_dict, defaults)
         return self.async_show_form(step_id="init", data_schema=data)
 
 
