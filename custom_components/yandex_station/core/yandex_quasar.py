@@ -749,6 +749,25 @@ class YandexQuasar(Dispatcher):
             self.updates_task.cancel()
         self.dispatcher.clear()
 
+    async def async_stop(self):
+        """Cancel and await background tasks and Glagol connections (RFC v2 §2.3, §7.3)."""
+        if self.updates_task:
+            self.updates_task.cancel()
+            try:
+                await self.updates_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self.updates_task = None
+
+        for speaker in self.speakers + self.modules:
+            entity = speaker.get("entity")
+            if entity and getattr(entity, "glagol", None):
+                try:
+                    await entity.glagol.stop()
+                except Exception:
+                    pass
+
+        self.dispatcher.clear()
     async def set_account_config(self, key: str, value):
         kv = ACCOUNT_CONFIG.get(key)
         assert kv and value in kv["values"], f"{key}={value}"

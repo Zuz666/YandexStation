@@ -76,7 +76,7 @@ def test_offline_bootstrap_from_snapshot(tmp_path):
         )
         mock_session = MagicMock()
         with patch("custom_components.yandex_station.core.utils.async_create_clientsession", return_value=mock_session):
-            with patch.object(CacheManager, "async_load", AsyncMock(return_value=snapshot)):
+            with patch("custom_components.yandex_station.core.cache.CacheManager.async_load", AsyncMock(return_value=snapshot)):
                 with patch("custom_components.yandex_station.core.yandex_session.YandexSession.refresh_cookies") as mock_refresh:
                     mock_refresh.side_effect = RuntimeError("Network call not allowed in offline mode")
 
@@ -240,7 +240,7 @@ def test_offline_acceptance_a1_full_lifecycle(tmp_path):
         mock_session = MagicMock()
         mock_session.cookie_jar = MagicMock()
         with patch("custom_components.yandex_station.core.utils.async_create_clientsession", return_value=mock_session):
-            with patch.object(CacheManager, "async_load", AsyncMock(return_value=snapshot)):
+            with patch("custom_components.yandex_station.core.cache.CacheManager.async_load", AsyncMock(return_value=snapshot)):
                 success = await async_setup_entry(hass, entry)
                 assert success is True
 

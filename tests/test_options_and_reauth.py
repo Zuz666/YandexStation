@@ -35,7 +35,7 @@ def test_options_flow_opens_when_quasar_missing(tmp_path):
             }],
         )
 
-        with patch.object(CacheManager, "async_load", AsyncMock(return_value=snapshot)):
+        with patch("custom_components.yandex_station.core.cache.CacheManager.async_load", AsyncMock(return_value=snapshot)):
             flow = OptionsFlowHandler(entry)
             flow.hass = hass
 
