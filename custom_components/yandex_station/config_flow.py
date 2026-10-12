@@ -187,52 +187,19 @@ class OptionsFlowHandler(OptionsFlow):
         return self.hass.config_entries.async_get_entry(self.handler)
 
     async def async_step_init(self, user_input: dict = None):
+        """Show main menu with options (RFC v2 §6.1)."""
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["settings", "devices", "reauth"],
+        )
+
+    async def async_step_settings(self, user_input: dict = None):
+        """Configure integration parameters and endpoints."""
         if user_input is not None:
-            new_options = dict(self.config_entry.options)
-            for k, v in user_input.items():
-                if v == "":
-                    new_options.pop(k, None)
-                elif v is not None:
-                    new_options[k] = v
-
-            if user_input.pop("trigger_reauth", False):
-                self.config_entry.async_start_reauth(self.hass)
-                return self.async_abort(reason="reauth_started")
-
-            # Synchronously commit options to entry BEFORE scheduling reload (RFC v2 §6.2)
-            self.hass.config_entries.async_update_entry(
-                self.config_entry, options=new_options
-            )
-            self.hass.async_create_task(
-                self.hass.config_entries.async_reload(self.config_entry.entry_id)
-            )
-            return self.async_create_entry(title="", data=new_options)
-
-        devices = {}
-        entry_login = self.config_entry.unique_id
-        quasar: YandexQuasar | None = self.hass.data.get(DOMAIN, {}).get(entry_login)
-        if quasar and quasar.devices:
-            for i in quasar.devices:
-                devices[i["id"]] = device_name(i)
-        else:
-            cache = CacheManager(
-                self.hass, self.config_entry.entry_id, account_login=entry_login
-            )
-            snapshot = await cache.async_load()
-            if snapshot and snapshot.devices:
-                for i in snapshot.devices:
-                    devices[i["id"]] = device_name(i)
+            return await self._async_save_options(user_input)
 
         defaults = dict(self.config_entry.options)
-        if include := defaults.get("include"):
-            for inc in include:
-                if isinstance(inc, str) and inc not in devices:
-                    devices[inc] = f"{inc} (недоступно)"
-
-        devices = dict(sorted(devices.items(), key=lambda x: x[1]))
-
         schema_dict = {
-            vol.Optional("include"): cv.multi_select(devices),
             vol.Optional(
                 "force_offline_local",
                 default=defaults.get("force_offline_local", False),
@@ -261,10 +228,63 @@ class OptionsFlowHandler(OptionsFlow):
                 default=defaults.get("passport_base_url", ""),
             ): cv.string,
         }
-
         data = vol_schema(schema_dict, defaults)
-        return self.async_show_form(step_id="init", data_schema=data)
+        return self.async_show_form(step_id="settings", data_schema=data)
 
+    async def async_step_devices(self, user_input: dict = None):
+        """Configure device inclusion."""
+        if user_input is not None:
+            return await self._async_save_options(user_input)
+
+        devices = {}
+        entry_login = self.config_entry.unique_id
+        quasar: YandexQuasar | None = self.hass.data.get(DOMAIN, {}).get(entry_login)
+        if quasar and quasar.devices:
+            for i in quasar.devices:
+                devices[i["id"]] = device_name(i)
+        else:
+            cache = CacheManager(
+                self.hass, self.config_entry.entry_id, account_login=entry_login
+            )
+            snapshot = await cache.async_load()
+            if snapshot and snapshot.devices:
+                for i in snapshot.devices:
+                    devices[i["id"]] = device_name(i)
+
+        defaults = dict(self.config_entry.options)
+        if include := defaults.get("include"):
+            for inc in include:
+                if isinstance(inc, str) and inc not in devices:
+                    devices[inc] = f"{inc} (недоступно)"
+
+        devices = dict(sorted(devices.items(), key=lambda x: x[1]))
+        schema_dict = {
+            vol.Optional("include"): cv.multi_select(devices),
+        }
+        data = vol_schema(schema_dict, defaults)
+        return self.async_show_form(step_id="devices", data_schema=data)
+
+    async def async_step_reauth(self, user_input: dict = None):
+        """Start reauthorization flow."""
+        self.config_entry.async_start_reauth(self.hass)
+        return self.async_abort(reason="reauth_started")
+
+    async def _async_save_options(self, user_input: dict):
+        """Synchronously commit options to entry and schedule reload (RFC v2 §6.2)."""
+        new_options = dict(self.config_entry.options)
+        for k, v in user_input.items():
+            if v == "":
+                new_options.pop(k, None)
+            elif v is not None:
+                new_options[k] = v
+
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options=new_options
+        )
+        self.hass.async_create_task(
+            self.hass.config_entries.async_reload(self.config_entry.entry_id)
+        )
+        return self.async_create_entry(title="", data=new_options)
 
 def vol_schema(schema: dict, defaults: dict | None) -> vol.Schema:
     if defaults:
