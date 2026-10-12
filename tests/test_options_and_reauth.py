@@ -39,11 +39,18 @@ def test_options_flow_opens_when_quasar_missing(tmp_path):
             flow = OptionsFlowHandler(entry)
             flow.hass = hass
 
-            # Step init should display form with cached devices + preserved offline devices
-            result = await flow.async_step_init()
-            assert result["type"] == "form"
-            assert result["step_id"] == "init"
+            # Step init should display menu with options
+            menu = await flow.async_step_init()
+            assert menu["type"] == "menu"
+            assert menu["step_id"] == "init"
+            assert "settings" in menu["menu_options"]
+            assert "devices" in menu["menu_options"]
+            assert "reauth" in menu["menu_options"]
 
+            # Step devices should display form with cached devices + preserved offline devices
+            result = await flow.async_step_devices()
+            assert result["type"] == "form"
+            assert result["step_id"] == "devices"
     asyncio.run(scenario())
 
 
@@ -73,7 +80,7 @@ def test_options_flow_commit_and_reload():
             "enable_scenarios": False,
         }
 
-        result = await flow.async_step_init(user_input)
+        result = await flow.async_step_settings(user_input)
         assert result["type"] == "create_entry"
 
         # Verify synchronous update before reload
@@ -86,6 +93,22 @@ def test_options_flow_commit_and_reload():
         assert len(created_tasks) == 1
 
     asyncio.run(scenario())
+def test_options_flow_reauth_trigger():
+    async def scenario():
+        hass = MagicMock(spec=HomeAssistant)
+        entry = MagicMock()
+        entry.async_start_reauth = MagicMock()
+
+        flow = OptionsFlowHandler(entry)
+        flow.hass = hass
+
+        res = await flow.async_step_reauth()
+        assert res["type"] == "abort"
+        assert res["reason"] == "reauth_started"
+        entry.async_start_reauth.assert_called_once_with(hass)
+
+    asyncio.run(scenario())
+
 
 
 def test_reauth_same_account_updates_and_reloads():
