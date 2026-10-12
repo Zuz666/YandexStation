@@ -94,6 +94,77 @@ async def get_content_type(hass: HomeAssistant, url: str) -> str | None:
         _LOGGER.debug(f"Can't get content type: {repr(e)}")
         return None
 
+class StreamImplementation:
+    def __init__(self, context=None):
+        self.context = context
+        self.hass = getattr(context, "hass", None) or StreamView.hass
+        self.session = async_get_clientsession(self.hass) if self.hass else None
+
+    def get_url(self, url: str) -> str:
+        if url[0] != "/":
+            return url
+        return async_process_play_media_url(self.hass, url)
+
+    async def head(self, request: web.Request, token: str, ext: str):
+        key = getattr(self.context, "key", None) or StreamView.key
+        try:
+            data = jwt.decode(token, key, algorithms=["HS256"])
+        except jwt.InvalidTokenError:
+            return web.HTTPNotFound()
+
+        _LOGGER.debug(f"Stream.{ext} HEAD {data}")
+        url = self.get_url(data["url"])
+        headers = copy_headers(request.headers, REQUEST_HEADERS)
+        async with self.session.head(url, headers=headers) as r:
+            headers = copy_headers(r.headers, RESPONSE_HEADERS)
+            headers[hdrs.CONTENT_TYPE] = MIME_TYPES[ext]
+            return web.Response(status=r.status, headers=headers)
+
+    async def get(self, request: web.Request, token: str, ext: str):
+        key = getattr(self.context, "key", None) or StreamView.key
+        try:
+            data = jwt.decode(token, key, algorithms=["HS256"])
+        except jwt.InvalidTokenError:
+            return web.HTTPNotFound()
+
+        _LOGGER.debug(f"Stream.{ext} GET {data}")
+        url = self.get_url(data["url"])
+        try:
+            if ext == "m3u8":
+                body = await get_hls(self.session, url)
+                return web.Response(
+                    body=body,
+                    headers={
+                        hdrs.ACCESS_CONTROL_ALLOW_HEADERS: "*",
+                        hdrs.ACCESS_CONTROL_ALLOW_ORIGIN: "*",
+                        hdrs.CONTENT_TYPE: MIME_TYPES[ext],
+                    },
+                )
+
+            headers = copy_headers(request.headers, REQUEST_HEADERS)
+            async with self.session.get(
+                url, headers=headers, timeout=STREAM_TIMEOUT
+            ) as r:
+                headers = copy_headers(r.headers, RESPONSE_HEADERS)
+                headers[hdrs.CONTENT_TYPE] = MIME_TYPES[ext]
+                if ext == "ts":
+                    headers[hdrs.ACCESS_CONTROL_ALLOW_HEADERS] = "*"
+                    headers[hdrs.ACCESS_CONTROL_ALLOW_ORIGIN] = "*"
+
+                response = web.StreamResponse(status=r.status, headers=headers)
+                response.force_close()
+                await response.prepare(request)
+                try:
+                    while data := await r.content.readany():
+                        await response.write(data)
+                except ClientError as e:
+                    _LOGGER.debug(f"Streaming client error: {repr(e)}")
+                except TimeoutError as e:
+                    _LOGGER.debug(f"Streaming timeout: {repr(e)}")
+                return response
+        except Exception:
+            pass
+
 
 class StreamView(HomeAssistantView):
     requires_auth = False
@@ -109,7 +180,8 @@ class StreamView(HomeAssistantView):
         self.session = async_get_clientsession(hass)
 
         StreamView.hass = hass
-        StreamView.key = secrets.token_hex()
+        if not StreamView.key:
+            StreamView.key = secrets.token_hex()
 
         try:
             StreamView.hass_url = network.get_url(hass, allow_external=False)
@@ -121,7 +193,6 @@ class StreamView(HomeAssistantView):
         if url[0] != "/":
             return url
         return async_process_play_media_url(self.hass, url)
-
     async def head(self, request: web.Request, token: str, ext: str):
         try:
             data = jwt.decode(token, StreamView.key, "HS256")
