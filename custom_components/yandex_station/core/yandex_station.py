@@ -258,7 +258,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
     def internal_update_is_on(self, device: dict):
         """Update is_on attribute for devices with this state."""
         for i in device["capabilities"]:
-            if (s := i["state"]) and s.get("instance") == "on":
+            if (s := i.get("state")) and s.get("instance") == "on":
                 self.is_on = s["value"]
                 if self.hass:
                     self.async_write_ha_state()
@@ -584,8 +584,9 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             self._attr_should_poll = True
             self._attr_shuffle = None
             self._attr_supported_features = CLOUD_FEATURES
-
-            self.async_write_ha_state()
+            self.quasar.dispatch_update(f"{self.unique_id}_glagol", None)
+            if self.hass:
+                self.async_write_ha_state()
             return
 
         state = data["state"]
@@ -612,7 +613,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         self._attr_available = True
         self._attr_should_poll = False
         self._attr_supported_features = LOCAL_FEATURES
-
+        self.quasar.dispatch_update(f"{self.unique_id}_glagol", data)
         # optional attributes for local mode
         self._attr_media_artist = None
         self._attr_media_channel = None

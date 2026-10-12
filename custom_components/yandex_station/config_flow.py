@@ -245,6 +245,10 @@ class OptionsFlowHandler(OptionsFlow):
                 "enable_scenarios", default=defaults.get("enable_scenarios", True)
             ): cv.boolean,
             vol.Optional(
+                "enable_diagnostic_sensors",
+                default=defaults.get("enable_diagnostic_sensors", True),
+            ): cv.boolean,
+            vol.Optional(
                 "quasar_base_url",
                 default=defaults.get("quasar_base_url", ""),
             ): cv.string,

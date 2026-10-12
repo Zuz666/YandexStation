@@ -43,10 +43,12 @@ _LOGGER = logging.getLogger(__name__)
 
 # only for speakers
 SPEAKER_PLATFORMS = [
+    "binary_sensor",
     "calendar",
     "camera",
     "media_player",
     "select",
+    "sensor",
 ]
 # for import section
 PLATFORMS = [
@@ -116,6 +118,7 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Optional("rpc_base_url"): cv.string,
                 vol.Optional("cookie_storage_endpoints"): cv.ensure_list,
                 vol.Optional("csrf_endpoints"): cv.ensure_list,
+                vol.Optional("enable_diagnostic_sensors"): cv.boolean,
             },
             extra=vol.ALLOW_EXTRA,
         ),
