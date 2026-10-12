@@ -184,6 +184,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         self.device = device
         self.requests = {}
 
+        self._attr_available = False
         self._attr_assumed_state = True
         self._attr_is_volume_muted = False
         self._attr_media_image_remotely_accessible = True
@@ -221,13 +222,37 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         quasar.subscribe_update(device["id"], self.on_update)
 
     @property
+    def transport(self) -> str:
+        return "local" if self.local_state else "cloud"
+
+    @property
+    def cloud_state(self) -> str:
+        if getattr(self.quasar, "policy", None) and getattr(self.quasar, "readiness", None):
+            return str(self.quasar.readiness.computed_cloud_state(self.quasar.policy))
+        return "unknown"
+
+    @property
     def extra_state_attributes(self):
         data = {}
         if self.local_state:
-            data["alice_state"] = self.local_state["aliceState"]
+            data["alice_state"] = self.local_state.get("aliceState")
         if self.is_on is not None:
             data["is_on"] = self.is_on
+        if getattr(self.quasar, "policy", None) and self.quasar.policy.force_offline_local:
+            data["transport"] = self.transport
+            data["cloud_state"] = self.cloud_state
         return data or None
+    @property
+    def available(self) -> bool:
+        if self.local_state is not None:
+            return True
+        if (
+            self.quasar.policy.effective_cloud_allowed
+            and self.quasar.readiness.devices_state == DevicesState.READY
+        ):
+            return bool(self._attr_available)
+        return False
+
 
     def internal_update_is_on(self, device: dict):
         """Update is_on attribute for devices with this state."""
@@ -538,7 +563,10 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
 
             self.debug("Возврат в облачный режим")
             self.local_state = None
-
+            self._attr_available = (
+                self.quasar.policy.effective_cloud_allowed
+                and self.quasar.readiness.devices_state == DevicesState.READY
+            )
             self._attr_assumed_state = True
             self._attr_media_artist = None
             self._attr_media_channel = None

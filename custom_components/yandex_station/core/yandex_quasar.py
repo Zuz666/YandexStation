@@ -602,6 +602,9 @@ class YandexQuasar(Dispatcher):
         self.dispatch_update(device["id"], device)
 
     async def update_online_stats(self):
+        if not self.policy.effective_cloud_allowed:
+            return
+
         if not self.online_updated.is_set():
             await self.online_updated.wait()
             return
@@ -630,6 +633,10 @@ class YandexQuasar(Dispatcher):
                 break
 
     async def connect(self):
+        if self.policy.effective_use_cached_devices or not self.policy.effective_cloud_allowed:
+            _LOGGER.debug("Skipping cloud connect() due to cache-only/offline policy")
+            return
+
         r = await self.session.get("https://iot.quasar.yandex.ru/m/v3/user/devices")
         resp = await r.json()
         assert resp["status"] == "ok", resp
@@ -660,6 +667,10 @@ class YandexQuasar(Dispatcher):
                     _ = asyncio.create_task(self.get_voice_trigger(3))
 
     async def devices_passive_update(self, *args):
+        if self.policy.effective_use_cached_devices or not self.policy.effective_cloud_allowed:
+            _LOGGER.debug("Skipping devices_passive_update due to cache-only/offline policy")
+            return
+
         try:
             r = await self.session.get(
                 f"https://iot.quasar.yandex.ru/m/v3/user/devices", timeout=15
