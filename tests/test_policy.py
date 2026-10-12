@@ -53,6 +53,8 @@ def test_session_config_isolation_and_endpoints():
     assert cfg1.resolve_url("https://quasar.yandex.ru/get_account_config") == "https://quasar.yandex.by/get_account_config"
     # Should not blindly replace substrings elsewhere in the URL
     assert cfg2.resolve_url("https://api.music.yandex.net/music") == "https://api.music.yandex.net/music"
+    cfg_custom = SessionConfig(quasar_base_url="https://mirror.org")
+    assert cfg_custom.resolve_url("https://iot.quasar.yandex.ru/m/v3/user/devices") == "https://mirror.org/m/v3/user/devices"
 
 
 def test_readiness_and_computed_cloud_state():

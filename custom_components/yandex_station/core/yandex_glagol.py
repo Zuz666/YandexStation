@@ -39,6 +39,7 @@ class YandexGlagol:
         self.device = device
         self.device_token = token
         self.quasar = quasar
+        self._connect_task = None
         try:
             self.loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -89,8 +90,7 @@ class YandexGlagol:
         # first time
         if not self.url:
             self.url = f"wss://{self.device['host']}:{self.device['port']}"
-            _ = asyncio.create_task(self._connect(0))
-
+            self._connect_task = asyncio.create_task(self._connect(0))
         # check IP change
         elif self.device["host"] not in self.url:
             self.debug("Обновление IP-адреса устройства")
@@ -102,9 +102,15 @@ class YandexGlagol:
     async def stop(self):
         self.debug("Останавливаем локальное подключение")
         self.url = None
-        if self.ws:
+        if self._connect_task:
+            self._connect_task.cancel()
+            try:
+                await self._connect_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._connect_task = None
+        if self.ws and not self.ws.closed:
             await self.ws.close()
-
     async def _connect(self, fails: int):
         self.debug("Локальное подключение")
 
@@ -194,8 +200,7 @@ class YandexGlagol:
             self.debug(f"Таймаут до следующего подключения {delay}")
             await asyncio.sleep(delay)
 
-        _ = asyncio.create_task(self._connect(fails))
-
+        self._connect_task = asyncio.create_task(self._connect(fails))
     # async def _keep_connection(self):
     #     _LOGGER.debug("Start keep connection task")
     #     while not self.ws.closed:

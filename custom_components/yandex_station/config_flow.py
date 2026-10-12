@@ -244,6 +244,18 @@ class OptionsFlowHandler(OptionsFlow):
             vol.Optional(
                 "enable_scenarios", default=defaults.get("enable_scenarios", True)
             ): cv.boolean,
+            vol.Optional(
+                "quasar_base_url",
+                default=defaults.get("quasar_base_url", ""),
+            ): cv.string,
+            vol.Optional(
+                "account_base_url",
+                default=defaults.get("account_base_url", ""),
+            ): cv.string,
+            vol.Optional(
+                "passport_base_url",
+                default=defaults.get("passport_base_url", ""),
+            ): cv.string,
         }
 
         data = vol_schema(schema_dict, defaults)
