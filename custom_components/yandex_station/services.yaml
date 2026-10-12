@@ -2,6 +2,10 @@ reload:
   name: Reload
   description: Reload Yandex Station notify services.
 
+reload_code:
+  name: Reload Code
+  description: Experimental hot-reload of Yandex Station python modules without restarting Home Assistant Core.
+
 send_command:
   name: Send Command
   description: Send command to Yandex.Station.
