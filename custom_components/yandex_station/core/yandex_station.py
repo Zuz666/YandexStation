@@ -282,9 +282,12 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
     async def init_local_mode(self):
         # self.debug(f"Init local mode (hass: {self.hass is not None})")
         if not self.glagol:
-            self.glagol = YandexGlagol(self.quasar.session, self.device)
+            did = self.device.get("quasar_info", {}).get("device_id")
+            token = self.quasar.device_tokens.get(did) if did else None
+            self.glagol = YandexGlagol(
+                self.quasar.session, self.device, token=token, quasar=self.quasar
+            )
             self.glagol.update_handler = self.async_set_state
-
         await self.glagol.start_or_restart()
 
         await self.init_hdmi_audio()
@@ -294,6 +297,8 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             return
 
         if self.device_platform not in ("yandexstation", "yandexstation_2"):
+            return
+        if not self.quasar.policy.effective_cloud_allowed:
             return
 
         try:
