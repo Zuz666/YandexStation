@@ -147,3 +147,104 @@ def test_send_missing_scenario_id_fails_cleanly():
         session.post.assert_not_called()
 
     asyncio.run(scenario())
+
+
+def test_failed_durable_marker_verification_aborts_post():
+    async def scenario():
+        session = MagicMock()
+        cache = MagicMock(spec=CacheManager)
+        cache.snapshot = StationSnapshot(entry_id="e1", account_login="u1")
+        # Verification returns False (e.g. disk write failed)
+        cache.async_save_and_verify_scenario_marker = AsyncMock(return_value=False)
+
+        quasar = YandexQuasar(session, cache_manager=cache)
+        quasar.devices = [{
+            "id": "dev_fail_1",
+            "name": "Колонка",
+            "capabilities": [{"type": "devices.capabilities.on_off"}],
+            "quasar_info": {"device_id": "did1", "platform": "yandexstation"},
+        }]
+        quasar.scenarios = []
+        quasar.add_scenario = AsyncMock()
+
+        await quasar.load_speakers()
+
+        # Because durable verification failed, POST MUST NOT be called!
+        quasar.add_scenario.assert_not_called()
+        assert quasar.devices[0]["scenario_id"] is None
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_load_speakers_calls_are_serialized():
+    async def scenario():
+        session = MagicMock()
+        cache = MagicMock(spec=CacheManager)
+        snapshot = StationSnapshot(entry_id="e1", account_login="u1")
+        cache.snapshot = snapshot
+
+        async def mock_save_and_verify(dev_id, trigger, state):
+            snapshot.scenario_creation[dev_id] = {"trigger": trigger, "state": state}
+            await asyncio.sleep(0.01)
+            return True
+
+        cache.async_save_and_verify_scenario_marker = AsyncMock(side_effect=mock_save_and_verify)
+        cache.async_save_scenario_marker = AsyncMock()
+
+        quasar = YandexQuasar(session, cache_manager=cache)
+        speaker = {
+            "id": "dev_concurrent_1",
+            "name": "Колонка",
+            "capabilities": [{"type": "devices.capabilities.on_off"}],
+            "quasar_info": {"device_id": "did1", "platform": "yandexstation"},
+        }
+        quasar.devices = [speaker]
+        quasar.scenarios = []
+
+        add_count = 0
+
+        async def mock_add(dev_id, hash_code):
+            nonlocal add_count
+            add_count += 1
+            await asyncio.sleep(0.01)
+            return f"scen_{add_count}"
+
+        quasar.add_scenario = AsyncMock(side_effect=mock_add)
+
+        # Run two concurrent load_speakers calls
+        await asyncio.gather(
+            quasar.load_speakers(),
+            quasar.load_speakers(),
+        )
+
+        # Reconciliation lock ensures exactly 1 scenario creation POST occurred
+        assert add_count == 1
+        assert speaker["scenario_id"] == "scen_1"
+
+    asyncio.run(scenario())
+
+
+def test_untrusted_journal_aborts_creation():
+    async def scenario():
+        session = MagicMock()
+        cache = MagicMock(spec=CacheManager)
+        cache.is_untrusted = True
+        cache.snapshot = None
+
+        quasar = YandexQuasar(session, cache_manager=cache)
+        quasar.devices = [{
+            "id": "dev_untrusted_1",
+            "name": "Колонка",
+            "capabilities": [{"type": "devices.capabilities.on_off"}],
+            "quasar_info": {"device_id": "did1", "platform": "yandexstation"},
+        }]
+        quasar.scenarios = []
+        quasar.add_scenario = AsyncMock()
+
+        await quasar.load_speakers()
+
+        # Untrusted journal forbids automatic creation
+        quasar.add_scenario.assert_not_called()
+        assert quasar.devices[0]["scenario_id"] is None
+
+    asyncio.run(scenario())

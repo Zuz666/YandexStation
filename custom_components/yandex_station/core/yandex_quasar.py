@@ -227,6 +227,7 @@ class YandexQuasar(Dispatcher):
         self.scenarios = None
         self.device_tokens = {}
         self._device_command_locks = {}
+        self._reconciliation_lock = asyncio.Lock()
         self.online_updated = asyncio.Event()
         self.online_updated.set()
 
@@ -304,64 +305,85 @@ class YandexQuasar(Dispatcher):
         return [i for i in self.devices if has_quasar(i) and not i.get("capabilities")]
 
     async def load_speakers(self):
-        hashes = {}
-        if self.scenarios:
-            for scenario in self.scenarios:
-                try:
-                    h = scenario["triggers"][0]["value"]
-                    hashes[h] = scenario["id"]
-                except Exception:
-                    pass
+        async with self._reconciliation_lock:
+            hashes = {}
+            if self.scenarios:
+                for scenario in self.scenarios:
+                    try:
+                        h = scenario["triggers"][0]["value"]
+                        hashes[h] = scenario["id"]
+                    except Exception:
+                        pass
 
-        creation_journal = {}
-        if self.cache_manager and self.cache_manager.snapshot:
-            creation_journal = self.cache_manager.snapshot.scenario_creation
+            creation_journal = {}
+            if self.cache_manager and self.cache_manager.snapshot:
+                creation_journal = self.cache_manager.snapshot.scenario_creation
 
-        for speaker in self.speakers:
-            device_id: str = speaker["id"]
-            hash_code = encode(device_id)
+            for speaker in self.speakers:
+                device_id: str = speaker["id"]
+                hash_code = encode(device_id)
 
-            if hash_code in hashes:
-                speaker["scenario_id"] = hashes[hash_code]
-                if self.cache_manager:
-                    await self.cache_manager.async_save_scenario_marker(
-                        device_id, hash_code, SCENARIO_STATE_CONFIRMED
-                    )
-            else:
-                existing_entry = creation_journal.get(device_id)
-                existing_state = (
-                    existing_entry.get("state")
-                    if isinstance(existing_entry, dict)
-                    else None
-                )
-
-                if existing_state in (SCENARIO_STATE_PENDING, SCENARIO_STATE_CONFIRMED):
-                    _LOGGER.info(
-                        "Scenario for %s has marker %s; skipping duplicate POST",
-                        device_id,
-                        existing_state,
-                    )
-                    speaker["scenario_id"] = None
-                else:
+                if hash_code in hashes:
+                    speaker["scenario_id"] = hashes[hash_code]
                     if self.cache_manager:
                         await self.cache_manager.async_save_scenario_marker(
-                            device_id, hash_code, SCENARIO_STATE_PENDING
+                            device_id, hash_code, SCENARIO_STATE_CONFIRMED
                         )
-                    try:
-                        sid = await self.add_scenario(device_id, hash_code)
-                        speaker["scenario_id"] = sid
-                        if self.cache_manager:
-                            await self.cache_manager.async_save_scenario_marker(
-                                device_id, hash_code, SCENARIO_STATE_CONFIRMED
-                            )
-                    except Exception as e:
+                else:
+                    if self.cache_manager and getattr(self.cache_manager, "is_untrusted", False) is True:
                         _LOGGER.warning(
-                            "Failed to create scenario for %s: %r; pending marker retained",
+                            "Scenario creation journal is untrusted on disk for %s; skipping creation",
                             device_id,
-                            e,
                         )
                         speaker["scenario_id"] = None
+                        continue
 
+                    existing_entry = creation_journal.get(device_id)
+                    existing_state = (
+                        existing_entry.get("state")
+                        if isinstance(existing_entry, dict)
+                        else None
+                    )
+
+                    if existing_state in (SCENARIO_STATE_PENDING, SCENARIO_STATE_CONFIRMED):
+                        _LOGGER.info(
+                            "Scenario for %s has marker %s; skipping duplicate POST",
+                            device_id,
+                            existing_state,
+                        )
+                        if not speaker.get("scenario_id"):
+                            speaker["scenario_id"] = None
+                    else:
+                        if self.cache_manager:
+                            verified = await self.cache_manager.async_save_and_verify_scenario_marker(
+                                device_id, hash_code, SCENARIO_STATE_PENDING
+                            )
+                            if not verified:
+                                _LOGGER.warning(
+                                    "Durable pending marker verification failed on disk for %s; aborting POST",
+                                    device_id,
+                                )
+                                speaker["scenario_id"] = None
+                                continue
+
+                        try:
+                            sid = await self.add_scenario(device_id, hash_code)
+                            speaker["scenario_id"] = sid
+                            if self.scenarios is not None:
+                                self.scenarios.append(
+                                    {"id": sid, "name": f"ХА {device_id}", "triggers": [{"value": hash_code}]}
+                                )
+                            if self.cache_manager:
+                                await self.cache_manager.async_save_scenario_marker(
+                                    device_id, hash_code, SCENARIO_STATE_CONFIRMED
+                                )
+                        except Exception as e:
+                            _LOGGER.warning(
+                                "Failed to create scenario for %s: %r; pending marker retained",
+                                device_id,
+                                e,
+                            )
+                            speaker["scenario_id"] = None
     async def load_speaker_config(self, device: dict):
         """Загружаем device_id и platform для колонок. Они не приходят с полным
         списком устройств.
