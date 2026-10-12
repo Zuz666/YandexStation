@@ -203,6 +203,10 @@ class LifecycleManager:
                         new_impl = stream_mod.StreamImplementation(self.context)
                         self.context.implementation = new_impl
                         rebind_ok = True
+                        if hasattr(stream_mod, "StreamView"):
+                            stream_mod.StreamView.key = self.context.key
+                            stream_mod.StreamView.hass_url = self.context.hass_url
+                            stream_mod.StreamView.hass = self.context.hass
                     else:
                         _LOGGER.error("StreamImplementation missing in reloaded stream module")
                 except Exception as e:

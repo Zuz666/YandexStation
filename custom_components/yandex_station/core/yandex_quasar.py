@@ -254,47 +254,55 @@ class YandexQuasar(Dispatcher):
         if self.cache_manager:
             snapshot = await self.cache_manager.async_load()
 
-        if self.policy.effective_use_cached_devices:
-            if not snapshot or not snapshot.devices:
-                _LOGGER.warning("Cache is missing or empty, cannot start in cached mode")
-                self.readiness.devices_state = DevicesState.UNAVAILABLE
-                raise RuntimeError("cache_missing")
-
+        if snapshot and snapshot.devices:
+            # Cache-first: publish local entities immediately before network (RFC v2 §3.1)
             self._restore_from_snapshot(snapshot)
+            if self.policy.effective_cloud_allowed and not self.policy.effective_use_cached_devices:
+                try:
+                    await self._sync_cloud_devices()
+                except Exception as e:
+                    _LOGGER.debug(
+                        "Initial cloud sync failed, continuing in cached mode: %r", e
+                    )
             return
 
+        if self.policy.effective_use_cached_devices:
+            _LOGGER.warning("Cache is missing or empty, cannot start in cached mode")
+            self.readiness.devices_state = DevicesState.UNAVAILABLE
+            raise RuntimeError("cache_missing")
+
+        # No snapshot: initial cloud bootstrap required
         try:
-            _LOGGER.debug("Получение списка устройств из облака.")
-            r = await self.session.get(
-                "https://iot.quasar.yandex.ru/m/v3/user/devices", timeout=15
-            )
-            resp = await r.json()
-            assert resp["status"] == "ok", resp
-
-            self.devices = []
-            for house in resp["households"]:
-                self.devices.extend(
-                    {**device, "house_name": house["name"]} for device in house["all"]
-                )
-
-            self.readiness.devices_state = DevicesState.READY
-            self.readiness.inventory_source = "cloud"
-
-            if self.cache_manager:
-                await self.cache_manager.async_save_devices(self.devices)
-
-            if self.policy.enable_scenarios and self.policy.effective_cloud_allowed:
-                await self.load_scenarios()
-                await self.load_speakers()
-
+            await self._sync_cloud_devices()
         except Exception as e:
             _LOGGER.debug("Cloud devices fetch failed: %r", e)
-            if snapshot and snapshot.devices:
-                _LOGGER.info("Falling back to cached snapshot")
-                self._restore_from_snapshot(snapshot)
-            else:
-                self.readiness.devices_state = DevicesState.UNAVAILABLE
-                raise
+            self.readiness.devices_state = DevicesState.UNAVAILABLE
+            raise
+
+    async def _sync_cloud_devices(self):
+        """Sync devices catalog and scenarios from Yandex cloud."""
+        _LOGGER.debug("Получение списка устройств из облака.")
+        r = await self.session.get(
+            "https://iot.quasar.yandex.ru/m/v3/user/devices", timeout=15
+        )
+        resp = await r.json()
+        assert resp["status"] == "ok", resp
+
+        self.devices = []
+        for house in resp["households"]:
+            self.devices.extend(
+                {**device, "house_name": house["name"]} for device in house["all"]
+            )
+
+        self.readiness.devices_state = DevicesState.READY
+        self.readiness.inventory_source = "cloud"
+
+        if self.cache_manager:
+            await self.cache_manager.async_save_devices(self.devices)
+
+        if self.policy.enable_scenarios and self.policy.effective_cloud_allowed:
+            await self.load_scenarios()
+            await self.load_speakers()
     @property
     def speakers(self):
         return [i for i in self.devices if has_quasar(i) and i.get("capabilities")]
