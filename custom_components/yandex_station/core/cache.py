@@ -283,6 +283,11 @@ class CacheManager:
         account_login: str | None = None,
         account_uid: str | None = None,
     ) -> None:
+        if not hasattr(hass, "loop"):
+            try:
+                hass.loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
         self._hass = hass
         self._entry_id = entry_id
         self._account_login = account_login

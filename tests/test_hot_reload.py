@@ -1,5 +1,7 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+import importlib
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import jwt
 from aiohttp import web
@@ -115,5 +117,98 @@ def test_lifecycle_manager_opt_in():
         # Without enable_code_reload=True, hot reload must be refused
         result = await mgr.async_hot_reload(hass, enable_code_reload=False)
         assert result.get("error") == "hot_reload_disabled"
+
+
+
+def test_hot_reload_two_entries_success():
+    async def scenario():
+        hass = MagicMock()
+        entry1 = MagicMock(entry_id="e1", disabled_by=None)
+        entry1.state = "loaded"
+        entry2 = MagicMock(entry_id="e2", disabled_by=None)
+        entry2.state = "loaded"
+        hass.config_entries.async_entries.return_value = [entry1, entry2]
+        hass.config_entries.async_unload = AsyncMock(return_value=True)
+        hass.config_entries.async_setup = AsyncMock(return_value=True)
+
+        context = StreamContext(hass=hass, hass_url="http://127.0.0.1:8123")
+        mgr = LifecycleManager(context=context)
+        with patch("importlib.reload", side_effect=lambda m: m):
+            res = await mgr.async_hot_reload(hass, enable_code_reload=True)
+        assert res.get("success") is True
+        assert res.get("setup_results") == {"e1": True, "e2": True}
+        assert hass.config_entries.async_unload.call_count == 2
+        assert hass.config_entries.async_setup.call_count == 2
+        assert context.admission_open is True
+
+    asyncio.run(scenario())
+
+
+def test_hot_reload_failed_unload_rolls_back():
+    async def scenario():
+        hass = MagicMock()
+        entry1 = MagicMock(entry_id="e1", disabled_by=None)
+        entry1.state = "loaded"
+        entry2 = MagicMock(entry_id="e2", disabled_by=None)
+        entry2.state = "loaded"
+        hass.config_entries.async_entries.return_value = [entry1, entry2]
+
+        # e1 unloads ok, e2 fails to unload!
+        async def mock_unload(eid):
+            if eid == "e1":
+                return True
+            return False
+
+        hass.config_entries.async_unload = AsyncMock(side_effect=mock_unload)
+        hass.config_entries.async_setup = AsyncMock(return_value=True)
+
+        context = StreamContext(hass=hass, hass_url="http://127.0.0.1:8123")
+        mgr = LifecycleManager(context=context)
+
+        res = await mgr.async_hot_reload(hass, enable_code_reload=True)
+        assert res.get("error") == "unload_failed"
+        # Entry 1 must be rolled back (re-setup) with old code!
+        hass.config_entries.async_setup.assert_called_once_with("e1")
+        # Admission must be re-opened for existing working runtime
+        assert context.admission_open is True
+
+    asyncio.run(scenario())
+
+
+def test_hot_reload_failed_rebind_leaves_http_503():
+    async def scenario():
+        hass = MagicMock()
+        entry1 = MagicMock(entry_id="e1", disabled_by=None)
+        entry1.state = "loaded"
+        hass.config_entries.async_entries.return_value = [entry1]
+        hass.config_entries.async_unload = AsyncMock(return_value=True)
+        hass.config_entries.async_setup = AsyncMock(return_value=True)
+
+        context = StreamContext(hass=hass, hass_url="http://127.0.0.1:8123")
+        mgr = LifecycleManager(context=context)
+
+        orig_reload = importlib.reload
+        stream_mod = sys.modules.get("custom_components.yandex_station.core.stream")
+        orig_impl = getattr(stream_mod, "StreamImplementation", None)
+        try:
+            def mock_reload(m):
+                res = orig_reload(m)
+                if getattr(m, "__name__", "") == "custom_components.yandex_station.core.stream":
+                    if hasattr(res, "StreamImplementation"):
+                        delattr(res, "StreamImplementation")
+                return res
+
+            with patch("importlib.reload", side_effect=mock_reload):
+                res = await mgr.async_hot_reload(hass, enable_code_reload=True)
+                assert res.get("error") == "rebind_failed"
+                # HTTP admission must remain closed (HTTP 503) per RFC §7.4
+                assert context.admission_open is False
+
+                dispatcher = StableStreamDispatcher(context)
+                resp = await dispatcher.get(MagicMock(), "tok", "mp3")
+                assert resp.status == 503
+        finally:
+            if stream_mod and orig_impl:
+                setattr(stream_mod, "StreamImplementation", orig_impl)
 
     asyncio.run(scenario())
