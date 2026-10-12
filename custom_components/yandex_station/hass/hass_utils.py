@@ -55,11 +55,14 @@ INCLUDE_SKIP_INSTANCES = {
 def incluce_devices(
     hass: HomeAssistant, config_entry: ConfigEntry
 ) -> list[tuple[YandexQuasar, dict, dict]]:
-    quasar: YandexQuasar = hass.data[DOMAIN][config_entry.unique_id]
-    config: dict = hass.data[DOMAIN][DATA_CONFIG]
+    if DOMAIN not in hass.data:
+        return []
+    quasar: YandexQuasar | None = hass.data[DOMAIN].get(config_entry.unique_id)
+    if not quasar or not getattr(quasar, "devices", None):
+        return []
+    config: dict = hass.data[DOMAIN].get(DATA_CONFIG, {})
     # config_entry has more priority
     includes = config_entry.options.get(CONF_INCLUDE, []) + config.get(CONF_INCLUDE, [])
-
     devices = []
 
     # первый цикл по devices, второй по include, чтоб одинаковые include работали на

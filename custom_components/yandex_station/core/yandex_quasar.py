@@ -7,6 +7,7 @@ from aiohttp import WSMsgType
 
 from .quasar_info import has_quasar
 from .yandex_session import YandexSession
+from .policy import EntryPolicy, Readiness
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -204,12 +205,21 @@ class YandexQuasar(Dispatcher):
     online_updated: asyncio.Event = None
     updates_task: asyncio.Task = None
 
-    def __init__(self, session: YandexSession):
+    def __init__(
+        self,
+        session: YandexSession,
+        policy: EntryPolicy | None = None,
+        readiness: Readiness | None = None,
+    ):
         super().__init__()
         self.session = session
+        self.policy = policy or EntryPolicy()
+        self.readiness = readiness or getattr(session, "readiness", None) or Readiness()
+        self.devices = []
+        self.scenarios = None
+        self.device_tokens = {}
         self.online_updated = asyncio.Event()
         self.online_updated.set()
-
     async def init(self):
         """Основная функция. Возвращает список колонок."""
         _LOGGER.debug("Получение списка устройств.")
