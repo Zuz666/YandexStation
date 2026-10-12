@@ -58,8 +58,11 @@ class YandexGlagol:
         return self.device["name"]
 
     async def get_device_token(self):
-        self.debug("Обновление токена устройства")
+        if getattr(self.session, "policy", None) and not self.session.policy.effective_cloud_allowed:
+            self.debug("Облачное получение токена заблокировано force_offline_local")
+            return None
 
+        self.debug("Обновление токена устройства")
         payload = {
             "device_id": self.device["quasar_info"]["device_id"],
             "platform": self.device["quasar_info"]["platform"],
@@ -111,6 +114,9 @@ class YandexGlagol:
             if not self.device_token:
                 self.device_token = await self.get_device_token()
 
+            if not self.device_token:
+                self.debug("Токен устройства отсутствует, локальное подключение пропущено")
+                return
             self.ws = await self.session.ws_connect(self.url, heartbeat=55, ssl=False)
             await self.ping(command="softwareVersion")
 

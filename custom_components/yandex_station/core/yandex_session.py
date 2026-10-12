@@ -56,9 +56,31 @@ class BasicSession:
     def __init__(self, session: ClientSession, config: SessionConfig | None = None):
         self._session = session
         self.config = config or SessionConfig(domain=self.domain, proxy=self.proxy, ssl=self.ssl)
+    @staticmethod
+    def _is_cloud_url(url: str) -> bool:
+        if not url:
+            return False
+        from urllib.parse import urlsplit
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+        if (
+            host in ("127.0.0.1", "localhost", "::1")
+            or host.startswith("192.168.")
+            or host.startswith("10.")
+            or (host.startswith("172.") and host.split(".")[1].isdigit() and 16 <= int(host.split(".")[1]) <= 31)
+            or host.endswith(".local")
+        ):
+            return False
+        return True
 
     def _request(self, method: str, url: str, **kwargs) -> Awaitable[ClientResponse]:
         """Internal request function with per-instance and global fallback proxy/ssl/domain options."""
+        if getattr(self, "policy", None) and not self.policy.effective_cloud_allowed:
+            if self._is_cloud_url(url):
+                raise RuntimeError(f"Cloud request blocked by force_offline_local policy: {url}")
+
         url = self.config.resolve_url(url)
         proxy = self.config.proxy if self.config.proxy is not None else self.proxy
         ssl = self.config.ssl if self.config.ssl is not None else self.ssl
@@ -380,6 +402,10 @@ class YandexSession(BasicSession):
         return await self.request("put", url, **kwargs)
 
     async def ws_connect(self, *args, **kwargs):
+        url = args[0] if args else kwargs.get("url", "")
+        if getattr(self, "policy", None) and not self.policy.effective_cloud_allowed:
+            if self._is_cloud_url(url):
+                raise RuntimeError(f"Cloud WebSocket blocked by force_offline_local policy: {url}")
         if "ssl" not in kwargs:
             kwargs.setdefault("proxy", self.proxy)
             kwargs.setdefault("ssl", self.ssl)
