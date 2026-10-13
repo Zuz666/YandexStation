@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+from pathlib import Path
+import inspect
 import logging
 import secrets
 import sys
@@ -17,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from aiohttp import web
+from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -24,27 +27,12 @@ from homeassistant.exceptions import HomeAssistantError
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+_ROOT = "custom_components.yandex_station"
+_PINNED_CORES = frozenset({
+    ("2023.2.0", (3, 10, 7)),
+    ("2026.6.1", (3, 14, 5)),
+})
 
-RELOADABLE_MODULES = [
-    "custom_components.yandex_station.core.const",
-    "custom_components.yandex_station.core.policy",
-    "custom_components.yandex_station.core.cache",
-    "custom_components.yandex_station.core.utils",
-    "custom_components.yandex_station.core.stream",
-    "custom_components.yandex_station.core.yandex_session",
-    "custom_components.yandex_station.core.yandex_glagol",
-    "custom_components.yandex_station.core.quasar_info",
-    "custom_components.yandex_station.core.yandex_quasar",
-    "custom_components.yandex_station.core.yandex_station",
-    "custom_components.yandex_station.hass.hass_utils",
-    "custom_components.yandex_station.hass.shopping_list",
-    "custom_components.yandex_station.hass.todo_list",
-    "custom_components.yandex_station.media_player",
-    "custom_components.yandex_station.select",
-    "custom_components.yandex_station.calendar",
-    "custom_components.yandex_station.config_flow",
-    "custom_components.yandex_station",
-]
 
 
 @dataclass
@@ -56,7 +44,6 @@ class StreamContext:
     admission_open: bool = True
     active_requests: int = 0
     drain_event: asyncio.Event = field(default_factory=asyncio.Event)
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def __post_init__(self):
         self.drain_event.set()
@@ -139,9 +126,15 @@ class LifecycleManager:
         self._reload_requests: dict[str, tuple[asyncio.Task | None, Any]] = {}
         self._reload_tasks: set[asyncio.Task] = set()
         self._entry_capability = ContextVar("yandex_station_entry_capability", default=None)
+        self._consumer_depth = ContextVar("yandex_station_consumer_depth", default=None)
         self._internal_capability = None
         self._internal_entry_id = None
         self._stopping = False
+        self._source_baseline: dict | None = None
+        self._reload_task: asyncio.Task | None = None
+        self.last_reload_result: dict[str, Any] | None = None
+        self.generation = 0
+        self.conversation_available = False
 
     @property
     def admission_open(self) -> bool:
@@ -258,17 +251,57 @@ class LifecycleManager:
             self._reload_requests.pop(entry_id, None)
 
     @asynccontextmanager
-    async def consumer(self):
-        if not self.admission_open:
+    async def consumer(self, entry_id: str | None = None):
+        owner = asyncio.current_task()
+        inherited = self._consumer_depth.get()
+        depth = inherited[1] if inherited is not None and inherited[0] is owner else 0
+        internal = (
+            entry_id is not None
+            and self._internal_capability is not None
+            and self._entry_capability.get() is self._internal_capability
+            and self._internal_entry_id == entry_id
+        )
+        if not self.admission_open and not depth and not internal:
             raise HomeAssistantError("reload_in_progress")
         self.active_consumers += 1
         self._consumers_drained.clear()
+        token = self._consumer_depth.set((owner, depth + 1))
         try:
             yield
         finally:
+            self._consumer_depth.reset(token)
             self.active_consumers -= 1
             if not self.active_consumers:
                 self._consumers_drained.set()
+
+    def guard_entity(self, entity, entry_id: str) -> None:
+        """Fence old entity methods and account for async HA entrypoints."""
+        generation = self.generation
+        protected = set()
+        for cls in type(entity).__mro__:
+            if not cls.__module__.startswith(_ROOT):
+                continue
+            for name, method in cls.__dict__.items():
+                if (
+                    not (name.startswith("async_") or name.startswith("handle_async_"))
+                    or name in protected
+                    or name in {
+                        "async_added_to_hass", "async_will_remove_from_hass",
+                        "async_remove",
+                    }
+                    or not inspect.iscoroutinefunction(method)
+                ):
+                    continue
+                protected.add(name)
+                original = getattr(entity, name)
+
+                async def guarded(*args, _original=original, **kwargs):
+                    if generation != self.generation:
+                        raise HomeAssistantError("stale_entity_generation")
+                    async with self.consumer(entry_id):
+                        return await _original(*args, **kwargs)
+
+                setattr(entity, name, guarded)
 
     def bind_service(self, name: str, target):
         """Registered handler stays stable; only the reloadable target changes."""
@@ -317,6 +350,8 @@ class LifecycleManager:
             if _event is None:
                 self.stop_unsubscribe()
             self.stop_unsubscribe = None
+        if self._reload_task is not None:
+            await asyncio.shield(self._reload_task)
         await self.async_stop_discovery()
         for requester, start in self._reload_requests.values():
             if requester is not None:
@@ -337,139 +372,351 @@ class LifecycleManager:
             await self.context.implementation.async_close()
             self.context.implementation = None
 
+    @staticmethod
+    def _scan_sources() -> dict:
+        planner = importlib.import_module(_ROOT + ".core.reload_plan")
+        return planner.scan(Path(__file__).resolve().parents[1])
+
+    async def async_capture_baseline(self, hass: HomeAssistant) -> None:
+        """Capture the running version's contracts at ordinary Core startup."""
+        if self._source_baseline is None:
+            self._source_baseline = await hass.async_add_executor_job(
+                self._scan_sources
+            )
+
+    def reload_service_handler(self):
+        """Keep the admin handler in the stable module across code generations."""
+        async def handle(_call):
+            config = self.hass.data.get(DOMAIN, {}).get("config", {})
+            result = await self.async_hot_reload(
+                self.hass, enable_code_reload=config.get("enable_code_reload", False)
+            )
+            try:
+                from homeassistant.core import SupportsResponse
+            except ImportError:
+                if result["status"] != "success":
+                    raise HomeAssistantError(
+                        "reload_code: " + result["reason"]
+                    )
+                return None
+            return result
+
+        return handle
+
+    @staticmethod
+    def _state(entry) -> str:
+        state = getattr(entry, "state", None)
+        return str(getattr(state, "value", state)).lower()
+
+    def _flows_active(self, config_entries, domain_entry_ids) -> bool:
+        return bool(
+            config_entries.flow.async_progress_by_handler(
+                DOMAIN, include_uninitialized=True
+            )
+            or any(
+                flow["handler"] in domain_entry_ids
+                for flow in config_entries.options.async_progress(
+                    include_uninitialized=True
+                )
+            )
+        )
+
+    def _membership_valid(self, expected_states, domain_entry_ids) -> bool:
+        config_entries = self.hass.config_entries
+        if (
+            {entry.entry_id for entry in config_entries.async_entries(DOMAIN)}
+            != domain_entry_ids
+            or self._flows_active(config_entries, domain_entry_ids)
+        ):
+            return False
+        for entry_id, (state, enabled) in expected_states.items():
+            current = config_entries.async_get_entry(entry_id)
+            if self.entry_enabled(current) != enabled or self._state(current) != state:
+                return False
+        return True
+
+    def _refuse(self, reason: str, *, status: str = "failed", **details):
+        result = {"status": status, "reason": reason, **details}
+        self.last_reload_result = result
+        return result
+
     async def async_hot_reload(
         self, hass: HomeAssistant, enable_code_reload: bool = False
     ) -> dict[str, Any]:
+        """A cancelled service waiter cannot cancel an in-flight import."""
         if not enable_code_reload:
-            _LOGGER.warning("Hot reload called but enable_code_reload is False")
-            return {"error": "hot_reload_disabled"}
-
-        if self._reload_lock.locked():
-            return {"error": "reload_already_in_progress"}
-        if self.entry_ids or self._reload_requests:
-            return {"error": "entry_operation_in_progress"}
+            return self._refuse("hot_reload_disabled")
+        if self._reload_task is not None and not self._reload_task.done():
+            return self._refuse("reload_already_in_progress")
+        if self._stopping or self.entry_ids or self._reload_requests:
+            return self._refuse("entry_operation_in_progress")
         self.hass = hass
+        task = hass.async_create_task(self._async_run_hot_reload())
+        self._reload_task = task
+        task.add_done_callback(
+            lambda finished: setattr(self, "_reload_task", None)
+            if self._reload_task is finished else None
+        )
+        return await asyncio.shield(task)
 
+    async def _async_run_hot_reload(self) -> dict[str, Any]:
         async with self._reload_lock:
-            _LOGGER.info("Starting YandexStation hot reload sequence (RFC v2 §7.3)")
-
-            # 1. Preflight: find relevant entries
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            timings = {}
+            if self.context is None or self.context.implementation is None:
+                return self._refuse("runtime_not_initialized", status="restart_required")
+            if (HA_VERSION, sys.version_info[:3]) not in _PINNED_CORES:
+                return self._refuse("unsupported_runtime")
+            if self._source_baseline is None:
+                return self._refuse("baseline_missing", status="restart_required")
+            if self.entry_ids or self._reload_requests:
+                return self._refuse("entry_operation_in_progress")
+            config_entries = self.hass.config_entries
+            all_entries = config_entries.async_entries(DOMAIN)
             entries = [
-                e
-                for e in hass.config_entries.async_entries(DOMAIN)
-                if self.entry_enabled(e)
+                entry for entry in all_entries
+                if self.entry_enabled(entry)
+                and self._state(entry) in {"loaded", "setup_retry", "setup_error"}
             ]
-
-            # 2. Quiesce: close admission & drain in-flight requests (timeout 10s)
-            if self.context:
-                self.context.admission_open = False
-                try:
-                    await asyncio.wait_for(asyncio.gather(
-                        self.context.drain_event.wait(), self._consumers_drained.wait()
-                    ), timeout=10.0)
-                except asyncio.TimeoutError:
-                    _LOGGER.warning("Drain timeout exceeded (10s); aborting hot-reload")
-                    self.context.admission_open = True
-                    return {"error": "drain_timeout"}
-
-            # 3. Unload affected loaded entries through Core
-            unloaded_entries = []
-            failed_unload = False
-            for entry in entries:
-                state_val = getattr(entry, "state", None)
-                state_str = str(getattr(state_val, "value", state_val)).lower()
-                is_loaded = state_str == "loaded"
-                if is_loaded:
-                    try:
-                        ok = await self._async_core_entry_operation(
-                            "async_unload", entry.entry_id
-                        )
-                        if ok:
-                            unloaded_entries.append(entry.entry_id)
-                        else:
-                            failed_unload = True
-                            break
-                    except Exception as e:
-                        _LOGGER.error("Failed to unload entry %s: %r", entry.entry_id, e)
-                        failed_unload = True
-                        break
-
-            if failed_unload:
-                _LOGGER.warning("Unload failed; rolling back unloaded entries with old code")
-                for uid in unloaded_entries:
-                    try:
-                        await self._async_core_entry_operation("async_setup", uid)
-                    except Exception as e:
-                        _LOGGER.error("Rollback setup failed for %s: %r", uid, e)
-                if self.context:
-                    self.context.admission_open = True
-                return {"error": "unload_failed", "unloaded_entries": unloaded_entries}
-            await self.async_stop_discovery()
-            # 4. In-place importlib.reload of domain modules
-            reloaded_modules = []
-            try:
-                for mod_name in RELOADABLE_MODULES:
-                    if mod_name in sys.modules:
-                        mod = sys.modules[mod_name]
-                        importlib.reload(mod)
-                        reloaded_modules.append(mod_name)
-            except Exception as e:
-                _LOGGER.critical("Exception during importlib.reload: %r; restart_required", e)
-                return {
-                    "error": "reload_failed",
-                    "exception": repr(e),
-                    "restart_required": True,
-                    "reloaded_modules": reloaded_modules,
-                }
-
-            # 5. Rebind stream implementation
-            rebind_ok = False
-            if self.context:
-                try:
-                    stream_mod = sys.modules.get("custom_components.yandex_station.core.stream")
-                    if stream_mod and hasattr(stream_mod, "StreamImplementation"):
-                        previous = self.context.implementation
-                        self.context.implementation = None
-                        if previous is not None:
-                            await previous.async_close()
-                        new_impl = stream_mod.StreamImplementation(self.context)
-                        self.context.implementation = new_impl
-                        rebind_ok = True
-                        root = sys.modules["custom_components.yandex_station"]
-                        await root.async_rebind_runtime(hass)
-                    else:
-                        _LOGGER.error("StreamImplementation missing in reloaded stream module")
-                except Exception as e:
-                    _LOGGER.error("Failed to rebind stream implementation: %r", e)
-                    rebind_ok = False
-
-            if not rebind_ok and self.context:
-                self.context.admission_open = False
-                self.context.implementation = None
-                return {
-                    "error": "rebind_failed",
-                    "reloaded_modules_count": len(reloaded_modules),
-                    "http_status": 503,
-                }
-            # 6. Re-setup entries through Core
-            setup_results = {}
-            for entry_id in unloaded_entries:
-                try:
-                    ok = await self._async_core_entry_operation("async_setup", entry_id)
-                    setup_results[entry_id] = ok
-                except Exception as e:
-                    setup_results[entry_id] = False
-                    _LOGGER.error("Re-setup of entry %s failed: %r", entry_id, e)
-
-            # 7. Re-open admission
-            if self.context:
-                self.context.admission_open = True
-
-            return {
-                "success": True,
-                "reloaded_modules_count": len(reloaded_modules),
-                "setup_results": setup_results,
+            domain_entry_ids = {entry.entry_id for entry in all_entries}
+            expected_states = {
+                entry.entry_id: (self._state(entry), self.entry_enabled(entry))
+                for entry in all_entries
             }
+            if self._flows_active(config_entries, domain_entry_ids):
+                return self._refuse("flow_in_progress")
+
+            try:
+                current = await self.hass.async_add_executor_job(self._scan_sources)
+                planner = importlib.import_module(_ROOT + ".core.reload_plan")
+                reason = planner.compare(self._source_baseline, current)
+            except (OSError, SyntaxError, ValueError) as error:
+                _LOGGER.warning("Reload preflight rejected: %s", type(error).__name__)
+                return self._refuse(
+                    "source_preflight_failed", status="restart_required"
+                )
+            if reason:
+                return self._refuse(reason, status="restart_required")
+            if not self._membership_valid(expected_states, domain_entry_ids) or self.entry_ids:
+                return self._refuse("membership_changed")
+            timings["preflight_ms"] = round((loop.time() - started) * 1000)
+
+            self.context.admission_open = False
+            drain_started = loop.time()
+            try:
+                await asyncio.wait_for(asyncio.gather(
+                    self.context.drain_event.wait(), self._consumers_drained.wait()
+                ), timeout=10)
+            except asyncio.TimeoutError:
+                self.context.admission_open = not self._stopping
+                return self._refuse("drain_timeout")
+            timings["drain_ms"] = round((loop.time() - drain_started) * 1000)
+            if not self._membership_valid(expected_states, domain_entry_ids) or self.entry_ids:
+                self.context.admission_open = not self._stopping
+                return self._refuse("membership_changed")
+
+            try:
+                await self.async_stop_discovery()
+            except Exception as error:
+                _LOGGER.warning("Reload discovery stop failed: %s", type(error).__name__)
+                return await self._async_rollback(
+                    [], "discovery_stop_failed", timings
+                )
+            unloaded = []
+            unload_started = loop.time()
+            for entry in entries:
+                if not self._membership_valid(expected_states, domain_entry_ids):
+                    return await self._async_rollback(
+                        unloaded, "membership_changed", timings
+                    )
+                try:
+                    ok = await self._async_core_entry_operation(
+                        "async_unload", entry.entry_id
+                    )
+                except Exception as error:
+                    _LOGGER.warning(
+                        "Reload unload failed: %s", type(error).__name__
+                    )
+                    ok = False
+                if not ok:
+                    return await self._async_rollback(
+                        unloaded, "unload_failed", timings, unsafe=True
+                    )
+                unloaded.append(entry.entry_id)
+                if self._state(entry) != "not_loaded":
+                    return await self._async_rollback(
+                        unloaded, "unload_failed", timings, unsafe=True
+                    )
+                expected_states[entry.entry_id] = ("not_loaded", True)
+            timings["unload_ms"] = round((loop.time() - unload_started) * 1000)
+
+            if not self._membership_valid(expected_states, domain_entry_ids):
+                return await self._async_rollback(
+                    unloaded, "membership_changed", timings
+                )
+            planner = importlib.import_module(_ROOT + ".core.reload_plan")
+            try:
+                unchanged = await self.hass.async_add_executor_job(
+                    planner.unchanged, current
+                )
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                return await self._async_rollback(
+                    unloaded, "source_changed_during_reload", timings
+                )
+
+            old_implementation = self.context.implementation
+            swap_started = loop.time()
+            imported = []
+            try:
+                await self.hass.async_add_executor_job(
+                    self._reload_sources, current, imported,
+                    self.conversation_available,
+                )
+            except Exception as error:
+                _LOGGER.error("Reload import failed: %s", type(error).__name__)
+                self.context.implementation = None
+                if old_implementation is not None:
+                    await old_implementation.async_close()
+                return self._refuse(
+                    "import_failed", status="restart_required",
+                    phase="import", applied_modules=tuple(imported),
+                    timings_ms=timings,
+                )
+            timings["import_ms"] = round((loop.time() - swap_started) * 1000)
+
+            previous = old_implementation
+            self.context.implementation = None
+            try:
+                if previous is not None:
+                    await previous.async_close()
+                implementation = sys.modules[_ROOT + ".core.stream"].StreamImplementation(
+                    self.context
+                )
+                self.context.implementation = implementation
+                await sys.modules[_ROOT].async_rebind_runtime(self.hass)
+            except Exception as error:
+                _LOGGER.error("Reload rebind failed: %s", type(error).__name__)
+                if self.context.implementation is not None:
+                    await self.context.implementation.async_close()
+                self.context.implementation = None
+                return self._refuse(
+                    "rebind_failed", status="restart_required", phase="rebind",
+                    timings_ms=timings, http_status=503,
+                )
+            timings["rebind_ms"] = round(
+                (loop.time() - swap_started) * 1000 - timings["import_ms"]
+            )
+            timings["code_swap_ms"] = round((loop.time() - swap_started) * 1000)
+
+            setup_results = {}
+            self.generation += 1
+            for entry in entries:
+                if not self._membership_valid(expected_states, domain_entry_ids):
+                    setup_results[entry.entry_id] = "membership_changed"
+                    continue
+                try:
+                    ok = await self._async_core_entry_operation(
+                        "async_setup", entry.entry_id
+                    )
+                except Exception as error:
+                    _LOGGER.warning(
+                        "Reload setup failed: %s", type(error).__name__
+                    )
+                    ok = False
+                setup_results[entry.entry_id] = (
+                    "loaded" if ok and self._state(entry) == "loaded"
+                    else self._state(entry)
+                )
+                expected_states[entry.entry_id] = (self._state(entry), True)
+            timings["total_ms"] = round((loop.time() - started) * 1000)
+            local_ready = any(
+                device.get("entity") is not None
+                and getattr(device["entity"], "local_state", None) is not None
+                for runtime in self.runtimes.values()
+                for device in (runtime.owned_speakers + runtime.owned_modules)
+            )
+            cloud_ready = any(
+                str(runtime.readiness.devices_state) == "ready"
+                and str(runtime.readiness.inventory_source) == "cloud"
+                for runtime in self.runtimes.values()
+            )
+            timings["local_ready_ms"] = timings["total_ms"] if local_ready else None
+            timings["cloud_ready_ms"] = timings["total_ms"] if cloud_ready else None
+            self.context.admission_open = not self._stopping
+            status = (
+                "success" if all(state == "loaded" for state in setup_results.values())
+                else "partial"
+            )
+            return self._refuse(
+                "completed" if status == "success" else "entry_setup_failed",
+                status=status, entries=setup_results, timings_ms=timings,
+                applied_modules=tuple(imported),
+            )
+
+    @staticmethod
+    def _reload_sources(
+        inventory: dict, imported: list[str], conversation_available: bool
+    ) -> None:
+        planner = importlib.import_module(_ROOT + ".core.reload_plan")
+        for name in inventory["order"]:
+            if name == __name__:
+                continue
+            if name == _ROOT + ".conversation" and not conversation_available:
+                continue
+            record = inventory["modules"][name]
+            from hashlib import sha256
+            if sha256(Path(record["path"]).read_bytes()).hexdigest() != record["digest"]:
+                raise RuntimeError("source_changed_during_import")
+            if name in sys.modules:
+                importlib.reload(sys.modules[name])
+            else:
+                importlib.import_module(name)
+            imported.append(name)
+        if not planner.unchanged(inventory):
+            raise RuntimeError("source_changed_during_import")
+
+    async def _async_rollback(
+        self, unloaded: list[str], reason: str, timings: dict,
+        unsafe: bool = False,
+    ) -> dict[str, Any]:
+        """Restore old Core entries; never reopen a partially failed account."""
+        results = {}
+        for entry_id in unloaded:
+            try:
+                results[entry_id] = bool(
+                    await self._async_core_entry_operation("async_setup", entry_id)
+                )
+            except Exception as error:
+                results[entry_id] = False
+                _LOGGER.warning("Rollback setup failed: %s", type(error).__name__)
+        unsafe = unsafe or not all(results.values()) or any(
+            self._state(entry) == "failed_unload"
+            for entry in self.hass.config_entries.async_entries(DOMAIN)
+        )
+        discovery_restored = False
+        if not unsafe:
+            try:
+                await sys.modules[_ROOT].async_rebind_runtime(self.hass)
+                discovery_restored = True
+            except Exception as error:
+                _LOGGER.warning("Rollback browser failed: %s", type(error).__name__)
+        if unsafe or not discovery_restored:
+            implementation, self.context.implementation = self.context.implementation, None
+            if implementation is not None:
+                await implementation.async_close()
+            self.context.admission_open = False
+            return self._refuse(
+                reason, status="restart_required", rollback=results,
+                discovery_restored=discovery_restored, http_status=503,
+                timings_ms=timings,
+            )
+        self.context.admission_open = not self._stopping
+        return self._refuse(
+            reason, rollback=results, discovery_restored=True, timings_ms=timings,
+        )
 
 
 def get_lifecycle(hass: HomeAssistant) -> LifecycleManager:
@@ -478,3 +725,11 @@ def get_lifecycle(hass: HomeAssistant) -> LifecycleManager:
     if "lifecycle" not in data:
         data["lifecycle"] = LifecycleManager(StreamContext(hass=hass))
     return data["lifecycle"]
+
+
+def guard_quasar_entity(quasar, entity) -> None:
+    """Connect a newly constructed entity to its owning stable Core manager."""
+    cache = getattr(quasar, "cache_manager", None)
+    cache_hass = getattr(cache, "hass", None)
+    if isinstance(cache_hass, HomeAssistant):
+        get_lifecycle(cache_hass).guard_entity(entity, cache.entry_id)

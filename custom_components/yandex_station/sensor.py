@@ -355,7 +355,7 @@ class YandexAliceStateSensor(SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        return self._state
+        return self._state.lower() if isinstance(self._state, str) else None
 
 
 class YandexTransportSensor(SensorEntity):

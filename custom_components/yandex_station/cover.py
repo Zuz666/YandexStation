@@ -2,19 +2,18 @@ import logging
 
 from homeassistant.components.cover import CoverEntity, CoverEntityFeature
 
+from .core.const import COVER_TYPES
 from .core.entity import YandexEntity
 from .hass import hass_utils
 
 _LOGGER = logging.getLogger(__name__)
-
-INCLUDE_TYPES = ("devices.types.openable.curtain",)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(
         YandexCover(quasar, device, config)
         for quasar, device, config in hass_utils.incluce_devices(hass, entry)
-        if device["type"] in INCLUDE_TYPES
+        if device["type"] in COVER_TYPES
     )
 
 

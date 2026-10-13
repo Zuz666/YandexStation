@@ -14,7 +14,7 @@ from homeassistant.util import slugify
 from .core.const import DOMAIN
 from .core.entity import YandexEntity
 from .core.image import draw_cover, draw_lyrics, draw_none
-from .core.lifecycle import get_lifecycle
+from .core.lifecycle import get_lifecycle, guard_quasar_entity
 from .core import stream
 from .core.yandex_music import get_lyrics
 from .core.yandex_quasar import YandexQuasar
@@ -109,6 +109,7 @@ class YandexLyrics(Camera):
         self._attr_unique_id = device["quasar_info"]["device_id"] + f"_lyrics"
 
         self.entity_id = f"camera.yandex_station_{slugify(self._attr_unique_id)}"
+        guard_quasar_entity(quasar, self)
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None

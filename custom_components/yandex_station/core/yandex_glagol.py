@@ -108,15 +108,14 @@ class YandexGlagol:
     async def start_or_restart(self):
         if self._stopped:
             return
-        # first time
+        endpoint = f"wss://{self.device['host']}:{self.device['port']}"
         if not self.url:
-            self.url = f"wss://{self.device['host']}:{self.device['port']}"
+            self.url = endpoint
             self._connect_task = asyncio.create_task(self._connect(0))
-        # check IP change
-        elif self.device["host"] not in self.url:
-            self.debug("Обновление IP-адреса устройства")
-            self.url = f"wss://{self.device['host']}:{self.device['port']}"
-            # force close session
+        elif endpoint != self.url:
+            self.debug("Обновление локального адреса устройства")
+            self.url = endpoint
+            # Force the current reader to reconnect to the new host or port.
             if self.ws and not self.ws.closed:
                 await self.ws.close()
 
@@ -197,9 +196,12 @@ class YandexGlagol:
             if self.token_state is not TokenState.ACCEPTED:
                 self.token_state = TokenState.CANDIDATE
 
+            connection_url = self.url
             ws = self.ws = await self.session.ws_connect(
-                self.url, role="local_ws", heartbeat=55, ssl=False
+                connection_url, role="local_ws", heartbeat=55, ssl=False
             )
+            if connection_url != self.url:
+                return
             await self.ping()
 
             while True:

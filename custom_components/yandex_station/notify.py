@@ -16,6 +16,7 @@ from homeassistant.helpers.reload import async_setup_reload_service
 from homeassistant.helpers.template import Template
 
 from .core.const import DOMAIN
+from .core.lifecycle import get_lifecycle
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -44,6 +45,7 @@ class YandexStationNotificationService(BaseNotificationService):
 
     def __init__(self, hass, data: dict):
         """Initialize the service."""
+        self.hass = hass
         self.data = data
         self.template: Template = data.pop(ATTR_MEDIA_CONTENT_ID, None)
         if self.template:
@@ -51,6 +53,10 @@ class YandexStationNotificationService(BaseNotificationService):
 
     async def async_send_message(self, message: str, **kwargs):
         """Send a TTS message to the speaker."""
+        async with get_lifecycle(self.hass).consumer():
+            return await self._async_send_message(message, **kwargs)
+
+    async def _async_send_message(self, message: str, **kwargs):
         if self.template:
             kwargs[ATTR_MESSAGE] = message
             message = self.template.async_render(kwargs)
