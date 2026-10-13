@@ -18,11 +18,11 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import AbortFlow
 
 from .core import utils
-from .core.const import DOMAIN
+from .core.const import DATA_CONFIG, DOMAIN
+from .core.policy import EntryPolicy, SessionConfig
 from .core.yandex_quasar import YandexQuasar
 from .core.yandex_session import LoginResponse, YandexSession
 from .core.cache import CacheManager
-
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -198,46 +198,63 @@ class OptionsFlowHandler(OptionsFlow):
         if user_input is not None:
             return await self._async_save_options(user_input)
 
-        defaults = dict(self.config_entry.options)
-        quasar_url = defaults.get("quasar_base_url") or "https://iot.quasar.yandex.ru (по умолчанию)"
-        account_url = defaults.get("account_base_url") or "https://quasar.yandex.ru (по умолчанию)"
-        passport_url = defaults.get("passport_base_url") or "https://passport.yandex.ru (по умолчанию)"
+        yaml_config = self.hass.data.get(DOMAIN, {}).get(DATA_CONFIG, {})
+        policy = EntryPolicy.from_configs(yaml_config, self.config_entry.options)
+        session_config = SessionConfig.from_configs(
+            yaml_config, self.config_entry.options
+        )
+
+        def format_effective(default_url: str, custom_url: str) -> str:
+            resolved = session_config.resolve_url(custom_url)
+            if custom_url == default_url and not session_config.domain:
+                return f"{resolved} (по умолчанию)"
+            if custom_url in self.config_entry.options.values():
+                return f"{resolved} (GUI override)"
+            return f"{resolved} (из YAML)"
+
         placeholders = {
-            "current_quasar": quasar_url,
-            "current_account": account_url,
-            "current_passport": passport_url,
+            "current_quasar": format_effective(
+                "https://iot.quasar.yandex.ru", session_config.quasar_base_url
+            ),
+            "current_account": format_effective(
+                "https://quasar.yandex.ru", session_config.account_base_url
+            ),
+            "current_passport": format_effective(
+                "https://passport.yandex.ru", session_config.passport_base_url
+            ),
         }
 
         schema_dict = {
             vol.Optional(
                 "force_offline_local",
-                default=defaults.get("force_offline_local", False),
+                default=policy.force_offline_local,
             ): cv.boolean,
             vol.Optional(
                 "use_cached_devices",
-                default=defaults.get("use_cached_devices", False),
+                default=policy.use_cached_devices,
             ): cv.boolean,
             vol.Optional(
-                "enable_scenarios", default=defaults.get("enable_scenarios", True)
+                "enable_scenarios",
+                default=policy.enable_scenarios,
             ): cv.boolean,
             vol.Optional(
                 "enable_diagnostic_sensors",
-                default=defaults.get("enable_diagnostic_sensors", True),
+                default=policy.enable_diagnostic_sensors,
             ): cv.boolean,
             vol.Optional(
                 "quasar_base_url",
-                default=defaults.get("quasar_base_url", ""),
+                default=self.config_entry.options.get("quasar_base_url", ""),
             ): cv.string,
             vol.Optional(
                 "account_base_url",
-                default=defaults.get("account_base_url", ""),
+                default=self.config_entry.options.get("account_base_url", ""),
             ): cv.string,
             vol.Optional(
                 "passport_base_url",
-                default=defaults.get("passport_base_url", ""),
+                default=self.config_entry.options.get("passport_base_url", ""),
             ): cv.string,
         }
-        data = vol_schema(schema_dict, defaults)
+        data = vol_schema(schema_dict, self.config_entry.options)
         return self.async_show_form(
             step_id="settings",
             data_schema=data,
@@ -278,10 +295,19 @@ class OptionsFlowHandler(OptionsFlow):
         return self.async_show_form(step_id="devices", data_schema=data)
 
     async def async_step_reauth(self, user_input: dict = None):
-        """Start reauthorization flow."""
-        self.config_entry.async_start_reauth(self.hass)
-        return self.async_abort(reason="reauth_started")
+        """Confirm and start reauthorization flow."""
+        if user_input is not None:
+            if user_input.get("confirm_reauth"):
+                self.config_entry.async_start_reauth(self.hass)
+                return self.async_abort(reason="reauth_started")
+            return await self.async_step_init()
 
+        return self.async_show_form(
+            step_id="reauth",
+            data_schema=vol.Schema({
+                vol.Required("confirm_reauth", default=False): cv.boolean,
+            }),
+        )
     async def _async_save_options(self, user_input: dict):
         """Synchronously commit options to entry and schedule reload (RFC v2 §6.2)."""
         new_options = dict(self.config_entry.options)
