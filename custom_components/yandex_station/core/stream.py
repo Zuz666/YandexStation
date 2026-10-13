@@ -53,6 +53,10 @@ _LAN_V4 = tuple(ipaddress.ip_network(value) for value in (
 _LAN_V6 = tuple(ipaddress.ip_network(value) for value in (
     "::1/128", "fc00::/7", "fe80::/10",
 ))
+_NUMERIC_HOST = re.compile(
+    r"(?:0[xX][0-9a-fA-F]+|[0-9]+)"
+    r"(?:\.(?:0[xX][0-9a-fA-F]+|[0-9]+))*\.?"
+)
 
 
 def _lan_address(address: str) -> bool:
@@ -112,8 +116,17 @@ def _destination(context: StreamContext, entry_id: str, url: str, offline: bool)
         try:
             ipaddress.ip_address(host)
         except ValueError:
-            # Names are resolved only by the LAN connector at fetch time.
-            pass
+            # aiohttp 3.8 treats octal/hex/short IPv4 as literals and skips
+            # AbstractResolver entirely. Never let a noncanonical numeric host
+            # reach that connector path; DNS names still use LanOnlyResolver.
+            if ":" in host or _NUMERIC_HOST.fullmatch(host):
+                raise ValueError("media_destination_blocked")
+            try:
+                socket.inet_aton(host)
+            except OSError:
+                pass
+            else:
+                raise ValueError("media_destination_blocked")
         else:
             if not _lan_address(host):
                 raise ValueError("media_destination_blocked")
