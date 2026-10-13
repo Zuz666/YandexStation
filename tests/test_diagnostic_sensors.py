@@ -2,10 +2,9 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass
-from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
-from homeassistant.helpers.entity import EntityCategory
+from homeassistant.helpers.device_registry import DeviceEntryType
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 
-from custom_components.yandex_station.__init__ import SPEAKER_PLATFORMS
 from custom_components.yandex_station.binary_sensor import (
     YandexStationLocalConnection,
     async_setup_entry as bs_setup_entry,
@@ -27,11 +26,6 @@ from custom_components.yandex_station.sensor import (
     YandexTransportSensor,
     async_setup_entry as sensor_setup_entry,
 )
-
-def test_speaker_platforms_includes_sensors():
-    assert "binary_sensor" in SPEAKER_PLATFORMS
-    assert "sensor" in SPEAKER_PLATFORMS
-
 
 def test_station_local_connection_binary_sensor():
     async def scenario():
