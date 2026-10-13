@@ -118,7 +118,7 @@ MASK_RU = "оеаинтсрвлкмдпуяы"
 
 
 def encode(uid: str) -> str:
-    """Кодируем UID в рус. буквы. Яндекс привередливый."""
+    """Encode a device ID into Cyrillic letters for Yandex voice triggers."""
     return "".join([MASK_RU[MASK_EN.index(s)] if s in MASK_EN else s for s in uid.lower()])
 
 
@@ -320,10 +320,10 @@ class YandexQuasar(Dispatcher):
                     dev["hdmi_audio"] = cfg["hdmi_audio"]
 
     async def init(self):
-        """Восстанавливает пригодный снимок и сразу возвращается (RFC v2 §5).
+        """Restore a valid local snapshot and return immediately.
 
-        При наличии снимка никаких cookie/CSRF/inventory/scenario/config/token
-        запросов: cloud recovery выполняется задачей после публикации сущностей.
+        When a snapshot is present, no cookie, CSRF, inventory, scenario, or
+        token requests are made during setup; cloud recovery runs in the background.
         """
         snapshot = None
         if self.cache_manager:
@@ -351,16 +351,15 @@ class YandexQuasar(Dispatcher):
             raise
 
     async def _sync_cloud_devices(self, allow_reload: bool = True) -> bool:
-        """Полный cloud GET строит новый нормализованный каталог отдельно.
+        """Fetch and normalize the full cloud device catalog.
 
-        Неизменный membership fingerprint: полный снимок сохраняется, существующие
-        device dict обновляются на месте, свежие состояния рассылаются через
-        dispatcher, reload отсутствует. Изменённый fingerprint: снимок сохраняется
-        до всего остального, запрашивается один ordinary reload, старые consumers
-        продолжают работать до своего unload. Возвращает True, когда новый каталог
-        применён напрямую (bootstrap или reload недоступен).
+        If the membership fingerprint is unchanged, saves the snapshot, updates
+        existing device dicts in place, and dispatches updates without reloading.
+        If membership changed, saves the snapshot first and requests one ordinary
+        reload while keeping existing consumers until unload. Returns True when
+        the catalog was applied directly.
         """
-        _LOGGER.debug("Получение списка устройств из облака.")
+        _LOGGER.debug("Fetching device list from the cloud")
         try:
             r = await self.session.get(
                 "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
@@ -396,7 +395,7 @@ class YandexQuasar(Dispatcher):
             old_records = self.cache_manager.snapshot.devices
         unchanged = _inventory_fingerprint(old_records) == _inventory_fingerprint(devices)
 
-        # снимок сохраняется до любого применения каталога
+        # Persist the snapshot before mutating runtime state or requesting a reload
         if self.cache_manager:
             await self.cache_manager.async_save_devices(
                 devices, account_uid=self.session.account_uid
@@ -417,15 +416,15 @@ class YandexQuasar(Dispatcher):
             if self._request_inventory_reload():
                 _LOGGER.info("Inventory membership changed; ordinary reload requested")
             else:
-                # admission закрыт или entry disabled: снимок уже надёжно сохранён,
-                # старые consumers продолжают работать до разрешённого reload/setup
+                # Admission is closed or entry is disabled: snapshot is saved on disk,
+                # existing consumers remain active until the next setup
                 _LOGGER.warning(
                     "Inventory membership changed but reload not admitted; "
                     "keeping current consumers until the next setup"
                 )
             self.dispatch_update("readiness", {})
             return False
-        # bootstrap (init): новых потребителей ещё нет, применяем напрямую
+        # Initial bootstrap: no consumers exist yet, apply catalog directly
         self.devices = devices
         self.fresh_device_ids = {d["id"] for d in devices}
         self.dispatch_update("readiness", {})
@@ -465,17 +464,17 @@ class YandexQuasar(Dispatcher):
 
     @staticmethod
     def _created_scenario_record(sid: str, device_id: str, hash_code: str) -> dict:
-        """Runtime-запись созданной пустышки в фактической wire-форме builder."""
+        """Build an in-memory dummy scenario record matching the wire builder format."""
         record = scenario_speaker_tts(f"ХА {device_id}", hash_code, device_id, "пустышка")
         record["id"] = sid
         return record
 
 
     def _scenario_candidates(self, hash_code: str) -> list[dict]:
-        """Кандидаты по типизированному voice trigger и точному hash (§6).
+        """Find candidate scenarios matching the voice trigger hash.
 
-        Проверяются все triggers; поддержаны typed `scenario.trigger.voice`,
-        известный flat template и nested `trigger` из wire templates.
+        Checks all triggers on each scenario, supporting typed `scenario.trigger.voice`,
+        legacy flat trigger dicts, and nested `trigger` objects.
         """
         candidates = []
         for scenario in self.scenarios or []:
@@ -488,7 +487,7 @@ class YandexQuasar(Dispatcher):
                 if trigger.get("type") == "scenario.trigger.voice":
                     value = trigger.get("value")
                 elif "value" in trigger and "type" not in trigger:
-                    # известный flat legacy template
+                    # Legacy flat trigger template
                     value = trigger.get("value")
                 elif isinstance(trigger.get("trigger"), dict):
                     inner = trigger["trigger"]
@@ -500,7 +499,7 @@ class YandexQuasar(Dispatcher):
         return candidates
 
     async def _scenario_detail(self, scenario_id: str) -> dict | None:
-        """GET `/m/v4/user/scenarios/{id}/edit` для кандидата без полных steps."""
+        """Fetch `/m/v4/user/scenarios/{id}/edit` when candidate steps are omitted."""
         try:
             r = await self.session.get(
                 f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/{scenario_id}/edit",
@@ -516,13 +515,11 @@ class YandexQuasar(Dispatcher):
         return None
 
     async def _verify_scenario_target(self, scenario: dict, device_id: str) -> bool | None:
-        """Полный target кандидата: True/False/None (неполный или неизвестный).
+        """Verify that the candidate scenario targets only the expected speaker.
 
-        Wire-форма фактических builders: `step["type"] ==
-        "scenarios.steps.actions.v2"` → `parameters.items` →
-        `step.action.item.device` с cloud device ID в `item["id"]`/`value["id"]`.
-        Target должен быть единственным и нашим: посторонний или дополнительный
-        device item не считается совпадением. Имя сценария identity не является.
+        Matches the wire builder layout (`scenarios.steps.actions.v2` ->
+        `parameters.items` -> `step.action.item.device`). Returns True on exact
+        match, False on a foreign target, or None if incomplete/unrecognized.
         """
         steps = scenario.get("steps")
         if not isinstance(steps, list) or not steps:
@@ -532,8 +529,8 @@ class YandexQuasar(Dispatcher):
             steps = scenario.get("steps")
             if not isinstance(steps, list) or not steps:
                 return None
-        # Собственная пустышка содержит ровно один step и один device item.
-        # Дополнительные действия или несовпадающие IDs не доказывают identity.
+        # A dummy speaker scenario has exactly one step and one target device item.
+        # Extra steps or mismatched IDs are treated as foreign or ambiguous.
         if len(steps) != 1 or not isinstance(steps[0], dict):
             return None
         step = steps[0]
@@ -559,11 +556,10 @@ class YandexQuasar(Dispatcher):
         return item_id == device_id
 
     async def _resolve_speaker_scenario(self, speaker: dict, *, allow_creation: bool = True) -> None:
-        """Binding только при единственном полном совпадении trigger+target.
+        """Bind a scenario only on a single verified trigger and target match.
 
-        Несколько совпадений, чужой target, неполный candidate/detail или
-        неизвестная структура — unresolved и запрет POST для этого устройства,
-        а не доказательство отсутствия. Вызывается под reconciliation lock.
+        Multiple matches, foreign targets, or incomplete details mark the speaker
+        as unresolved and block automatic POST creation. Must run under lock.
         """
         device_id: str = speaker["id"]
         hash_code = encode(device_id)
@@ -611,8 +607,8 @@ class YandexQuasar(Dispatcher):
         if not allow_creation:
             return
 
-        # Без подтверждённой долговременной записи unknown-outcome POST
-        # нельзя безопасно восстановить после restart.
+        # Without a verified durable pending marker on disk, an interrupted POST
+        # could not be safely reconciled after a restart.
         if not self.cache_manager:
             _LOGGER.warning("Scenario marker unavailable for %s; POST banned", device_id)
             return
@@ -658,12 +654,11 @@ class YandexQuasar(Dispatcher):
                 await self._resolve_speaker_scenario(speaker)
         self.dispatch_update("readiness", {})
     async def retry_scenario_creation(self, device_id: str, *, confirm_risk: bool = False) -> str:
-        """Ручное Recovery: одна подтверждённая попытка на устройство (§6).
+        """Run one user-confirmed manual scenario recovery attempt for a speaker.
 
-        Свежий GET и detail resolution под тем же lock. Найден match — привязка
-        без POST; конфликт/unavailable — отказ; подтверждённого match нет и
-        пользователь принял риск — marker заменяется новой revision и выполняется
-        ровно один POST. Промежуточного удаления marker нет.
+        Performs a fresh catalog GET and detail check under lock. Binds an existing
+        match without POST; rejects on conflict or unavailability; otherwise writes
+        a fresh pending marker and executes a single POST when risk is confirmed.
         """
         speaker = next(
             (s for s in self.owned_speakers if s.get("id") == device_id), None
@@ -715,9 +710,7 @@ class YandexQuasar(Dispatcher):
                 )
             return "created"
     async def load_speaker_config(self, device: dict):
-        """Загружаем device_id и platform для колонок. Они не приходят с полным
-        списком устройств.
-        """
+        """Fetch speaker `device_id` and `platform` when omitted from the device list."""
         r = await self.session.get(
             f"https://iot.quasar.yandex.ru/m/user/devices/{device['id']}/configuration",
             role="quasar",
@@ -728,7 +721,7 @@ class YandexQuasar(Dispatcher):
         device.update(resp["quasar_info"])
 
     async def load_scenarios(self):
-        """Получает список сценариев; failed GET очищает executable bindings."""
+        """Fetch the scenario catalog; clear executable bindings if the GET fails."""
         if not (self.policy.effective_cloud_allowed and self.policy.enable_scenarios):
             self.scenarios = None
             self.readiness.scenarios_state = ScenariosState.DISABLED
@@ -750,14 +743,14 @@ class YandexQuasar(Dispatcher):
             self.dispatch_update("readiness", {})
         except Exception as e:
             _LOGGER.debug("Scenario catalog unavailable: %s", type(e).__name__)
-            # старый список допустим только в diagnostics: bindings очищаются
+            # Clear executable bindings on failure so stale scenario IDs are not used
             self.scenarios = None
             self.readiness.scenarios_state = ScenariosState.UNAVAILABLE
             for speaker in self.owned_speakers:
                 speaker["scenario_id"] = None
             self.dispatch_update("readiness", {})
     def _ensure_scenario_worker(self):
-        """Отдельный worker: старт при разрешённом cloud/recovery (§6)."""
+        """Start the background scenario reconciliation worker when cloud is allowed."""
         if self.stopping or self._scenario_worker_task is not None:
             return
         if not (self.policy.effective_cloud_allowed and self.policy.enable_scenarios):
@@ -766,7 +759,7 @@ class YandexQuasar(Dispatcher):
         self._scenario_worker_task = asyncio.create_task(self._scenario_worker())
 
     async def _scenario_worker(self):
-        """GET по backoff до полного согласования; завершается после него."""
+        """Poll scenario catalog with backoff until reconciliation succeeds or stops."""
         backoff = RecoveryBackoff()
         current = asyncio.current_task()
         try:
@@ -790,7 +783,7 @@ class YandexQuasar(Dispatcher):
                 self._scenario_worker_task = None
 
     def _schedule_history(self):
-        """History задача tracked: disabled/offline отменяет и дожидается (§6)."""
+        """Schedule a tracked voice-trigger history check when cloud is active."""
         if self.stopping or not (
             self.policy.effective_cloud_allowed
             and not self.policy.effective_use_cached_devices
@@ -826,7 +819,7 @@ class YandexQuasar(Dispatcher):
         assert resp["status"] == "ok", resp
 
     async def add_scenario(self, device_id: str, hash: str) -> str:
-        """Добавляет сценарий-пустышку."""
+        """Create a dummy cloud scenario for speaker voice/TTS control."""
         payload = scenario_speaker_tts("ХА " + device_id, hash, device_id, "пустышка")
         r = await self.session.post(
             "https://iot.quasar.yandex.ru/m/v4/user/scenarios", json=payload,
@@ -947,7 +940,7 @@ class YandexQuasar(Dispatcher):
         return outcome
 
     async def load_local_speakers(self):
-        """Загружает список локальных колонок. Не используется."""
+        """Fetch the list of local speakers from the Glagol API (currently unused)."""
         try:
             r = await self.session.request_glagol(
                 "https://quasar.yandex.net/glagol/device_list", role="glagol_token"
@@ -973,7 +966,7 @@ class YandexQuasar(Dispatcher):
         return resp["quasar_config"], resp["quasar_config_version"]
 
     async def set_device_config(self, device: dict, config: dict, version: str):
-        _LOGGER.debug(f"Меняем конфиг станции: {config}")
+        _LOGGER.debug(f"Updating speaker configuration: {config}")
 
         did = device["id"]
         r = await self.session.post(
@@ -1244,7 +1237,7 @@ class YandexQuasar(Dispatcher):
             await asyncio.sleep(delay)
 
     def start(self):
-        """Запускает recovery после публикации; WS-подписку — только по policy."""
+        """Start post-publication cloud recovery and optional cloud WebSocket updates."""
         if not self.policy.effective_cloud_allowed or self.stopping:
             return
         if self._recovery_task is None:
@@ -1255,10 +1248,10 @@ class YandexQuasar(Dispatcher):
             self.updates_task = asyncio.create_task(self.run_forever())
 
     async def _async_recover_after_publication(self):
-        """Один проход cloud-read/scenarios/token-fetch после публикации (§5).
+        """Run post-publication cloud sync, scenario worker, and missing token fetches.
 
-        Никаких ожиданий чужих unload: при изменённом membership ordinary reload
-        уже запрошен, задача завершается без подмены старых consumers.
+        If device membership changed, an ordinary reload has already been scheduled
+        and this task exits without replacing active consumers.
         """
         try:
             if not self.policy.effective_use_cached_devices:
@@ -1266,7 +1259,7 @@ class YandexQuasar(Dispatcher):
                     return
             if self.stopping:
                 return
-            # сценарный worker: свой backoff, завершается после полного согласования
+            # Scenario worker runs with its own backoff and exits once reconciled
             self._ensure_scenario_worker()
             if any(
                 getattr(s.get("entity"), "local_state", False) is None
@@ -1275,7 +1268,7 @@ class YandexQuasar(Dispatcher):
                 await self.update_online_stats()
             if self.stopping:
                 return
-            # single-flight token-fetch только для колонок без известного токена
+            # Single-flight token fetch only for speakers without a known token
             for speaker in self.owned_speakers + self.owned_modules:
                 info = speaker["quasar_info"]
                 if info["device_id"] in self.device_tokens:
@@ -1300,7 +1293,7 @@ class YandexQuasar(Dispatcher):
             )
 
     def async_fetch_device_token(self, device: dict) -> asyncio.Task:
-        """Single-flight token fetch per Glagol device (RFC v2 §5)."""
+        """Fetch a Glagol device token using a single-flight task per speaker."""
         did = device["quasar_info"]["device_id"]
         task = self._token_tasks.get(did)
         if task is not None and not task.done():
@@ -1314,7 +1307,7 @@ class YandexQuasar(Dispatcher):
         info = device["quasar_info"]
         did, platform = info["device_id"], info["platform"]
         if not self.policy.effective_cloud_allowed:
-            _LOGGER.debug("Токен %s не запрашивается: cloud заблокирован policy", did)
+            _LOGGER.debug("Skipping token fetch for %s: cloud blocked by policy", did)
             return None
         r = await self.session.request_glagol(
             "https://quasar.yandex.net/glagol/token",

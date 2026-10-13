@@ -171,7 +171,7 @@ class MediaBrowser(MediaPlayerEntity):
 # noinspection PyAbstractClass
 class YandexStationBase(MediaBrowser, RestoreEntity):
     local_state: Optional[dict] = None
-    # для управления громкостью Алисы
+    # Temporary volume state while Alice is speaking
     alice_volume: Optional[dict] = None
 
     # true of false if device has HDMI
@@ -402,7 +402,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             self.glagol.update_handler = self.async_set_state
         await self.glagol.start_or_restart()
 
-        # HDMI cloud refresh не блокирует подключение: позже по policy
+        # Refresh HDMI audio setting in the background when cloud access is allowed
         if self.quasar.policy.effective_cloud_allowed:
             self._hdmi_refresh_task = asyncio.create_task(self.init_hdmi_audio())
 
@@ -430,7 +430,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                 raise ValueError("hdmi_config_unavailable")
         except Exception as error:
             _LOGGER.warning(
-                "Не получается получить настройки HDMI (%s)", safe_error_summary(error)
+                "Failed to get HDMI audio settings (%s)", safe_error_summary(error)
             )
             return
 
@@ -465,7 +465,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             await self.quasar.set_device_config(self.device, config, version)
         except Exception as error:
             _LOGGER.warning(
-                "Не получается изменить настройки HDMI (%s)", safe_error_summary(error)
+                "Failed to update HDMI audio settings (%s)", safe_error_summary(error)
             )
             return
 
@@ -497,7 +497,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                         text += f"\n[{title}]({uri})"
 
         else:
-            _LOGGER.error(f"Неизвестный тип ответа: {card['type']}")
+            _LOGGER.error(f"Unknown response card type: {card['type']}")
             return
 
         self.hass.bus.async_fire(
@@ -524,7 +524,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                 "bergamot",
                 "orion",
             ):
-                raise HomeAssistantError("Поддерживаются только станции с часами")
+                raise HomeAssistantError("Only speakers with a clock display are supported")
 
             brightness = led.setdefault("brightness", {"auto": True, "value": 0.5})
 
@@ -537,7 +537,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         # https://github.com/AlexxIT/YandexStation/issues/697
         if "visualization" in kwargs:
             if self.device_platform not in ("yandexstation_2", "orion"):
-                raise HomeAssistantError("Поддерживаются только станции с экраном")
+                raise HomeAssistantError("Only speakers with a screen are supported")
 
             visualization = led.setdefault(
                 "music_equalizer_visualization", {"style": "showClock", "auto": False}
@@ -559,7 +559,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
 
         if config.get("dndMode") is None:
             raise HomeAssistantError(
-                "Режим 'не беспокоить' не поддерживается этим устройством"
+                "Do Not Disturb mode is not supported by this device"
             )
 
         config["dndMode"]["enabled"] = value
@@ -590,8 +590,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             await self.quasar.set_account_config(k, v)
 
     def _check_set_alice_volume(self, volume: int):
-        # если уже есть активная громкость, или громкость голоса равна текущей
-        # громкости колонки - ничего не делаем
+        # Skip if Alice volume override is already active or matches current volume
         if self.alice_volume or volume == self.volume_level:
             return
 
@@ -610,7 +609,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         if alice_state == "NONE":
             alice_state = "SPEAKING"
 
-        # если что-то пошло не так, через 30 секунд возвращаем громкость
+        # Restore previous volume after 30 seconds if state transition was missed
         if time.time() > self.alice_volume["wait_ts"]:
             if "prev_volume" in self.alice_volume:
                 volume = self.alice_volume["prev_volume"]
@@ -648,7 +647,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             dialog = self.hass.data["yandex_dialogs"]
             dialog.dialogs[crc] = payload
         except:
-            _LOGGER.warning("Компонент Яндекс Диалогов не подключен")
+            _LOGGER.warning("Yandex Dialogs integration is not loaded")
 
         return f"СКАЖИ НАВЫКУ {name} {crc}"
 
@@ -680,7 +679,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             if self._attr_assumed_state:
                 return
 
-            self.debug("Возврат в облачный режим")
+            self.debug("Returning to cloud mode")
             self.local_state = None
             self._attr_available = (
                 self.quasar.policy.effective_cloud_allowed
@@ -719,7 +718,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         if sw_version := data.get("softwareVersion"):
             self.update_device_info(sw_version)
 
-        # возвращаем из состояния mute, если нужно
+        # Restore from mute if needed
         # if self.prev_volume and state['volume']:
         #     self.prev_volume = None
 
@@ -837,7 +836,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             info := QUASAR_INFO.get(self.device_platform)
         ):
             self._attr_icon = info[0]
-            self.debug(f"Установка кастомной иконки: {self._attr_icon}")
+            self.debug(f"Setting custom icon: {self._attr_icon}")
 
         if "host" in self.device:
             await self.init_local_mode()
@@ -879,7 +878,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             try:
                 volume = float(volume)
             except Exception:
-                raise HomeAssistantError(f"Неправильное значение volume: {volume}")
+                raise HomeAssistantError(f"Invalid volume value: {volume}")
 
         # fix increasing and decreasing volume by 0.05
         # https://github.com/AlexxIT/YandexStation/issues/687
@@ -895,12 +894,11 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             volume = 1
 
         if self.local_state:
-            # у станции округление громкости до десятых
+            # Speaker local volume is rounded to tenths
             await self.glagol.send({"command": "setVolume", "volume": round(volume, 1)})
 
         else:
-            # на Яндекс ТВ Станция (2023) громкость от 0 до 100
-            # на колонках - от 0 до 10
+            # Yandex TV Station uses 0..100 volume range; speakers use 0..10
             k = 100 if is_tv(self.device) else 10
             await self._async_cloud_send(f"громкость на {round(k * volume)}")
             if volume > 0:
@@ -1030,7 +1028,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                 media_type = "text"  # for support Google TTS, etc.
 
         if not media_id:
-            _LOGGER.warning("Получено пустое media_id")
+            _LOGGER.warning("Received empty media_id")
             return
 
         # tts for backward compatibility and mini-media-player support
@@ -1157,7 +1155,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                 payload = json.loads(media_id)
 
             elif media_type == "shopping_list":
-                # media_id == "update" — легаси команда для интеграции Shopping List
+                # media_id == "update" is the legacy command for Shopping List sync
                 coro = (
                     shopping_list.shopping_sync(self.hass, self.glagol)
                     if media_id == "update"
@@ -1251,13 +1249,13 @@ class YandexStation(YandexStationBase):
 
     async def async_select_source(self, source: str):
         if self.sync_mute is True:
-            # включаем звук колонке, если выключали его
+            # Unmute the speaker if it was muted by external player sync
             self.hass.create_task(self.async_mute_volume(False))
 
         if self.sync_playing:
-            # сбрасываем синхронизацию
+            # Reset sync state
             self.sync_playing = self.sync_id = self.sync_volume = self.sync_mute = None
-            # останавливаем внешний медиаплеер
+            # Pause the external media player
             self.sync_service_call("media_pause")
 
         await super().async_select_source(source)
@@ -1297,13 +1295,13 @@ class YandexStation(YandexStationBase):
             self.sync_playing = data["state"]["playing"]
             if self.sync_playing:
                 if self.sync_id == player_state["id"]:
-                    # продолжаем играть, если ID не изменился
+                    # Resume external player if track ID did not change
                     self.sync_service_call("media_play")
             else:
-                # останавливаем, если ничего не играет
+                # Pause external player when playback stops
                 self.sync_service_call("media_pause")
 
-        # Состояние проверяем для исправления бага Станция Макс 2020
+        # Check playing state to work around Station Max 2020 bug:
         # https://github.com/AlexxIT/YandexStation/issues/819
         # https://github.com/AlexxIT/YandexStation/issues/835
         if self.sync_id != player_state["id"] and data["state"]["playing"]:
@@ -1315,9 +1313,9 @@ class YandexStation(YandexStationBase):
             self.sync_mute = None
             self.sync_service_call("volume_set", volume_level=state["volume"])
 
-        # если музыка играет - глушим колонку Яндекса
+        # Mute the Yandex speaker while synced external player is active
         if self.sync_mute is True:
-            # включаем громкость колонки, когда с ней разговариваем
+            # Unmute the speaker while conversing with Alice
             if state["aliceState"] != "IDLE":
                 self.sync_mute = False
                 self.hass.create_task(self.async_mute_volume(False))

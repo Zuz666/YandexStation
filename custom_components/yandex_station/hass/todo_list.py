@@ -46,13 +46,13 @@ def todo_for_remove(
     for_remove = []
     alice_indexes = {item: i for i, item in enumerate(alice_items)}
 
-    # Помечены как завершенные
+    # Items marked as completed in Home Assistant ToDo
     for item in todo_items:
         summary = item.get("summary")
         if summary and item.get("status") == "completed" and summary in alice_items:
             for_remove.append(alice_indexes[summary])
 
-    # Удалены пользователем из ToDo
+    # Items deleted by the user from Home Assistant ToDo
     for summary in previous_alice_items - current_todo_items:
         if summary in alice_items:
             for_remove.append(alice_indexes[summary])
@@ -74,11 +74,11 @@ async def todo_for_add(
         if status == "completed" or not summary:
             continue
 
-        # Элемент уже есть у Алисы
+        # Item already exists in Alice's shopping list
         if summary in alice_items:
             continue
 
-        # Раньше был у Алисы, но пользователь удалил
+        # Item was previously synced with Alice and then deleted there
         if summary in previous_alice_items:
             continue
 
@@ -94,7 +94,7 @@ async def todo_save(hass: HomeAssistant, entity_id: str, alice_data: str) -> Non
 
     existing = {item.get("summary"): item for item in items if item.get("summary")}
 
-    # Удаляем отсутствующие
+    # Remove items no longer present in Alice's shopping list
     for summary, item in existing.items():
         if summary not in alice_items:
             uid = item.get("uid") or item.get("id") or item.get("item_id")
@@ -110,7 +110,7 @@ async def todo_save(hass: HomeAssistant, entity_id: str, alice_data: str) -> Non
                 except Exception:
                     _LOGGER.exception("Failed to remove todo item: %s", summary)
 
-    # Добавляем новые
+    # Add new items from Alice's shopping list
     for summary in alice_items:
         if summary not in existing:
             try:
@@ -128,7 +128,7 @@ async def shopping_sync(
     hass: HomeAssistant, glagol: YandexGlagol, entity_id: str
 ) -> None:
     try:
-        # Элементы из списка Home Assistant
+        # Current items from the Home Assistant ToDo list
         items = await get_todo_items(hass, entity_id)
 
         payload = {"command": "sendText", "text": "Что в списке покупок"}
@@ -137,18 +137,18 @@ async def shopping_sync(
         store = Store(hass, STORE_VERSION, STORE_KEY)
         store_data = await store.async_load() or {}
 
-        # Элементы ранее синхронизированные с алисой
+        # Items previously synced with Alice
         previous_alice_items = set(store_data.get(entity_id) or [])
 
-        # Удаляем выполненные
+        # Remove completed or deleted items
         while for_remove := todo_for_remove(items, card["text"], previous_alice_items):
-            # Не удаляет больше 2-х элементов за раз
+            # Alice removes at most 2 items per command reliably
             await glagol.send(
                 {"command": "sendText", "text": "Удали " + ", ".join(for_remove[:2])}
             )
             card = await glagol.send(payload)
 
-        # Добавляем новые элементы в список по одному
+        # Add new items to Alice's shopping list one by one
         if for_add := await todo_for_add(items, card["text"], previous_alice_items):
             for item in for_add:
                 await glagol.send(
@@ -156,15 +156,15 @@ async def shopping_sync(
                 )
             card = await glagol.send(payload)
 
-        # Сохраняем изменения из Алисы в ToDo
+        # Save changes from Alice back to Home Assistant ToDo
         await todo_save(hass, entity_id, card["text"])
 
-        # Обновляем Store
+        # Persist synced Alice items in Store
         current_alice_items = set(RE_TODO.findall(card["text"]))
         store_data[entity_id] = current_alice_items
         await store.async_save(store_data)
 
-        # Остановим алису
+        # Stop Alice's voice response
         await glagol.send({"command": "sendText", "text": "Стоп"})
 
     except Exception as e:

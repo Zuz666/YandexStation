@@ -106,9 +106,9 @@ def test_invalid_token_close_invalidates_and_refetches_once():
 
         assert glagol.token_state is TokenState.CANDIDATE
         assert glagol.device_token == "synthetic-candidate-2"
-        # ровно один single-flight fetch после подтверждённого отказа
+        # Exactly one single-flight fetch after a confirmed token rejection
         assert session.request_glagol.call_count == 1
-        # только совпадающая RAM tuple заменена новым кандидатом
+        # Only the matching RAM tuple is replaced with the new candidate
         assert quasar.device_tokens == {
             "glagol-1": {"yandexstation": "synthetic-candidate-2"}
         }
@@ -126,7 +126,7 @@ def test_other_close_codes_keep_token_and_reconnect_with_backoff():
             ws = FakeWS([ws_close(code, reason)])
             glagol, session, handler = make_glagol(ws)
             glagol.url = "wss://127.0.0.1:1905"
-            await glagol._connect(5)  # backoff 30*4=120s живёт отдельной задачей
+            await glagol._connect(5)  # 30*4=120s backoff runs as a background task
 
             assert glagol._connect_task is not None
             assert not glagol._connect_task.done()
@@ -164,7 +164,7 @@ def test_stop_cancels_tasks_closes_socket_and_resets_consumer():
         assert ws.closed
         assert glagol._stopped and glagol.url is None
         handler.assert_called_with(None)
-        # повторный start после stop запрещён
+        # Restarting after stop() is not allowed
         await glagol.start_or_restart()
         assert glagol._connect_task is None
 
