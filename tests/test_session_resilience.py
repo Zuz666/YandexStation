@@ -712,6 +712,64 @@ def test_late_403_of_old_generation_keeps_same_string_candidate():
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("retry_after", [None, "400"])
+def test_late_success_cannot_cancel_invalidated_candidate_cooldown(retry_after):
+    async def scenario():
+        client = make_client()
+        cfg = SessionConfig(csrf_endpoints=["https://yandex.ru/iot"])
+        session = YandexSession(client, config=cfg)
+        await prime_csrf(session, client, "candidate_T")
+        client.get = AsyncMock(return_value=csrf_page("candidate_new"))
+        replies = {index: asyncio.get_running_loop().create_future() for index in (1, 2)}
+        dispatched = set()
+        both_dispatched = asyncio.Event()
+
+        async def dispatch(url, **kwargs):
+            index = kwargs["json"]["request"]
+            dispatched.add(index)
+            if dispatched == {1, 2}:
+                both_dispatched.set()
+            return await replies[index]
+
+        client.put = AsyncMock(side_effect=dispatch)
+        tasks = [
+            asyncio.create_task(session.put(
+                SCENARIO_PUT_URL, role="quasar", json={"request": index}
+            ))
+            for index in (1, 2)
+        ]
+        try:
+            await asyncio.wait_for(both_dispatched.wait(), 1)
+            forbidden = captured_forbidden()
+            if retry_after is not None:
+                forbidden.headers["Retry-After"] = retry_after
+            replies[1].set_result(forbidden)
+            with pytest.raises(CloudRequestError):
+                await tasks[0]
+            retry_at = session._csrf_retry_at
+
+            replies[2].set_result(make_response(200))
+            assert (await tasks[1]).status == 200
+            assert await session.ensure_csrf() is None
+            assert session.csrf_token is None
+            assert session.readiness.csrf_state == CsrfState.UNAVAILABLE
+            assert session._csrf_retry_at == retry_at
+            assert retry_at > time.monotonic()
+            if retry_after is not None:
+                assert retry_at - time.monotonic() > 350
+            with pytest.raises(RuntimeError, match="csrf_unavailable"):
+                await session.put(SCENARIO_PUT_URL, role="quasar", json={})
+            client.get.assert_not_awaited()
+            assert client.put.call_count == 2
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await session.async_stop()
+
+    asyncio.run(scenario())
+
+
 def test_non_csrf_403_preserves_candidate():
     async def scenario():
         client = make_client()
