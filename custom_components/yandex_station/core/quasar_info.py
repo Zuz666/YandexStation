@@ -1,6 +1,6 @@
 # Thanks to: https://github.com/iswitch/ha-yandex-icons
 QUASAR_INFO: dict[str, list] = {
-    # колонки Яндекса
+    # Yandex smart speakers
     "yandexstation": ["yandex:station", "Яндекс", "Станция (2018)"],
     "yandexstation_2": ["yandex:station-max", "Яндекс", "Станция Макс (2020)"],
     "yandexmini": ["yandex:station-mini", "Яндекс", "Станция Мини (2019)"],
@@ -14,11 +14,11 @@ QUASAR_INFO: dict[str, list] = {
     "orion": ["yandex:station-3", "Яндекс", "Станция 3 (2025)"],
     "mango": ["yandex:station-street", "Яндекс", "Станция Стрит (2025)"],
     "pickle": ["yandex:station-mini-3-pro", "Яндекс", "Станция Мини 3 Про (2025)"],
-    # платформа Яндекс.ТВ (без облачного управления!)
+    # Yandex TV modules (local control only, no cloud scenarios)
     "yandexmodule": ["yandex:module", "Яндекс", "Модуль (2019)"],
     "yandexmodule_2": ["yandex:module-2", "Яндекс", "Модуль 2 (2021)"],
     "yandex_tv": ["mdi:television-classic", "Unknown", "ТВ с Алисой"],
-    # ТВ с Алисой (неизвестные модели: ТВ Станция Про QLED, ТВ Станция MiniLED)
+    # Yandex TVs with Alice (unlisted models: TV Station Pro QLED, TV Station MiniLED)
     "goya": ["yandex:tv-station", "Яндекс", "ТВ (2022)"],
     "magritte": ["yandex:tv-station", "Яндекс", "ТВ Станция LED (2023)"],
     "magritte_2": ["yandex:tv-station", "Яндекс", "ТВ Станция QLED (2025)"],
@@ -26,7 +26,7 @@ QUASAR_INFO: dict[str, list] = {
     "monet_2": ["yandex:tv-station", "Яндекс", "ТВ Станция Бейсик QLED (2025)"],
     "levitan": ["yandex:tv-station", "Яндекс", "ТВ Станция MiniLED (2026)"],
     "malevich": ["yandex:tv-station", "Яндекс", "ТВ Станция Про MiniLED (2025)"],
-    # колонки НЕ Яндекса
+    # Third-party speakers with Alice
     "lightcomm": ["yandex:dexp-smartbox", "DEXP", "Smartbox"],
     "elari_a98": ["yandex:elari-smartbeat", "Elari", "SmartBeat"],
     "linkplay_a98": ["yandex:irbis-a", "IRBIS", "A"],
@@ -34,9 +34,9 @@ QUASAR_INFO: dict[str, list] = {
     "prestigio_smart_mate": ["yandex:prestigio-smartmate", "Prestigio", "Smartmate"],
     "jbl_link_music": ["yandex:jbl-link-music", "JBL", "Link Music"],
     "jbl_link_portable": ["yandex:jbl-link-portable", "JBL", "Link Portable"],
-    # экран с Алисой
+    # Smart displays with Alice
     "quinglong": ["yandex:display-xiaomi", "Xiaomi", "Smart Display 10R X10G (2023)"],
-    # не колонки
+    # Non-speaker Quasar devices
     "saturn": ["yandex:hub", "Яндекс", "Хаб (2023)"],
     "mike": ["yandex:lg-xboom-wk7y", "Яндекс", "IP камера (2025)"],
     "cherry": ["mdi:headphones", "Яндекс", "Дропс (2026)"],

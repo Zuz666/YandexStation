@@ -79,18 +79,18 @@ async def shopping_sync(hass: HomeAssistant, glagol: YandexGlagol):
         card = await glagol.send(payload)
 
         while for_remove := shopping_for_remove(data, card["text"]):
-            # не удаляет больше 5 элементов за раз
+            # Alice removes at most 5 items per voice command
             text = "Удали " + ", ".join(for_remove[:5])
             await glagol.send({"command": "sendText", "text": text})
-            # обновим после изменений
+            # Refresh Alice shopping list after removal
             card = await glagol.send(payload)
 
         if for_add := shopping_for_add(data, card["text"]):
             for item in for_add:
-                # плохо работает, если добавлять всё сразу через запятую
+                # Add items one by one; comma-separated batch addition is unreliable
                 text = f"Добавь в список покупок {item}"
                 await glagol.send({"command": "sendText", "text": text})
-            # обновим после изменений
+            # Refresh Alice shopping list after additions
             card = await glagol.send(payload)
 
         shopping_save(hass, data, card["text"])

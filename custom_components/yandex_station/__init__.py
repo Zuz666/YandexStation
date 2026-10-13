@@ -148,7 +148,7 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
         from homeassistant.helpers import network
         context.hass_url = network.get_url(hass, allow_external=False)
     except Exception as e:
-        _LOGGER.warning(f"Ошибка получения локального адреса Home Assistant: {e}")
+        _LOGGER.warning(f"Failed to get local Home Assistant URL: {e}")
 
     context.implementation = stream.StreamImplementation(context)
 
@@ -268,7 +268,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 ))
             else:
                 quasar.platforms = platforms = _platforms(lifecycle, False)
-            # сначала публикация всех платформ, затем cloud recovery/token-fetch
+            # Set up all platforms before starting background cloud recovery and token fetch
             await hass.config_entries.async_forward_entry_setups(entry, platforms)
             if policy.effective_cloud_allowed:
                 quasar.start()

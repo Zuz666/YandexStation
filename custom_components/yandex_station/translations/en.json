@@ -1,165 +1,165 @@
 {
   "config": {
     "abort": {
-      "account_updated": "Данные аккаунта обновлены. Запланирована перезагрузка записи интеграции.",
-      "account_mismatch": "Вы вошли под другим аккаунтом. Для повторной авторизации используйте тот же логин и UID.",
-      "reauth_successful": "Авторизация обновлена. Запланирована перезагрузка записи интеграции.",
-      "reauth_started": "Повторная авторизация запущена. Перейдите в меню «Настройки» → «Устройства и службы» и завершите вход под тем же аккаунтом.",
-      "reauth_target_missing": "Запись для повторной авторизации не найдена. Запустите вход из настроек нужной записи.",
-      "reauth_cancelled": "Повторная авторизация отменена.",
-      "offline_reauth_blocked": "Автономный режим запрещает сетевой вход. Отключите его в настройках записи и повторите попытку.",
-      "entry_disabled": "Запись отключена и не будет автоматически включена.",
-      "reload_in_progress": "Выполняется перезагрузка записи. Данные не изменены."
+      "account_updated": "Account credentials updated. Integration entry reload scheduled.",
+      "account_mismatch": "Signed in with a different account. Use the same login and UID to reauthenticate.",
+      "reauth_successful": "Authentication updated. Integration entry reload scheduled.",
+      "reauth_started": "Reauthentication started. Go to Settings -> Devices & services and complete sign-in with the same account.",
+      "reauth_target_missing": "Target entry for reauthentication was not found. Start sign-in from the integration entry options.",
+      "reauth_cancelled": "Reauthentication cancelled.",
+      "offline_reauth_blocked": "Offline mode blocks network sign-in. Disable it in the entry settings and try again.",
+      "entry_disabled": "The entry is disabled and will not be enabled automatically.",
+      "reload_in_progress": "Entry reload is in progress. Data was not modified."
     },
     "error": {
-      "account.not_found": "Такого аккаунта нет",
-      "password.not_matched": "Неверный пароль",
-      "unauthorised": "Авторизация пока не пройдена",
-      "email.unsupported": "Авторизация по E-mail не поддерживается на этом аккаунте",
-      "redirect.unsupported": "Авторизация по паролю не может быть пройдена",
-      "offline_reauth_blocked": "Автономный режим запрещает сетевой вход. Отключите его в настройках записи.",
-      "reload_in_progress": "Перезагрузка записи уже выполняется. Сетевой вход не начат.",
-      "entry_disabled": "Запись отключена; сетевой вход не начат."
+      "account.not_found": "Account not found",
+      "password.not_matched": "Invalid password",
+      "unauthorised": "Authentication is not completed yet",
+      "email.unsupported": "E-mail sign-in is not supported for this account",
+      "redirect.unsupported": "Password sign-in cannot be completed",
+      "offline_reauth_blocked": "Offline mode blocks network sign-in. Disable it in the entry settings.",
+      "reload_in_progress": "Entry reload is already in progress. Network sign-in was not started.",
+      "entry_disabled": "Entry is disabled; network sign-in was not started."
     },
     "step": {
       "user": {
         "data": {
-          "method": "Способ авторизации"
+          "method": "Authentication method"
         }
       },
       "reauth_confirm": {
-        "title": "Подтверждение повторной авторизации",
-        "description": "До успешного входа прежние credentials, настройки и локальный кэш сохраняются. Для автономной записи сначала отключите автономный режим в настройках.",
+        "title": "Confirm reauthentication",
+        "description": "Existing credentials, settings, and local cache are preserved until sign-in succeeds. For an offline entry, disable offline mode in settings first.",
         "data": {
-          "confirm_reauth": "Продолжить вход под тем же аккаунтом"
+          "confirm_reauth": "Continue sign-in with the same account"
         }
       },
       "qr": {
-        "description": "Перейдите по [ссылке]({qr_url}) или отсканируйте QR-код {qr_data}"
+        "description": "Open the [link]({qr_url}) or scan the QR code {qr_data}"
       },
       "cookies": {
-        "description": "1. Установите расширение [Copy Cookies]({ex_url}) в Google Chrome или Yandex Browser\n2. Авторизуйтесь в [Yandex ID]({ya_url}) (не используйте режим инкогнито)\n3. Скопируйте сюда Cookies с помощью расширения",
+        "description": "1. Install the [Copy Cookies]({ex_url}) extension in Google Chrome or Yandex Browser\n2. Sign in to [Yandex ID]({ya_url}) (do not use incognito mode)\n3. Copy the cookies here using the extension",
         "data": {
           "cookies": "Cookies JSON"
         }
       },
       "token": {
-        "description": "Вы можете перенести токен с другого сервера Home Assistant. Его можно найти в файле `/config/.storage/core.config_entries`. Других способов получить токен - нет",
+        "description": "You can transfer a token from another Home Assistant instance. It can be found in `/config/.storage/core.config_entries`. There are no other ways to obtain a token.",
         "data": {
-          "token": "Токен"
+          "token": "Token"
         }
       }
     }
   },
   "options": {
     "abort": {
-      "reauth_started": "Повторная авторизация запущена. Текущие credentials и кэш сохраняются до успешного входа.",
-      "claim_unavailable": "В локальном снимке этого аккаунта нет пригодных колонок для передачи владения.",
-      "speaker_claimed": "Владение колонкой передано этому аккаунту. Запланирована обычная перезагрузка записи интеграции.",
-      "retry_started": "Запланирована одна обычная перезагрузка записи интеграции.",
-      "recovery_runtime_missing": "Запись сейчас не запущена. Используйте «Повторить запуск».",
-      "scenario_retry_unavailable": "Нет непривязанных сценариев с сохранённым маркером для ручной повторной попытки.",
-      "scenario_bound": "Сценарий найден и привязан без повторного создания.",
-      "scenario_created": "Сценарий создан после явного подтверждения риска дубликата."
+      "reauth_started": "Reauthentication started. Current credentials and cache are preserved until sign-in succeeds.",
+      "claim_unavailable": "No eligible speakers are available in this account's local snapshot for ownership transfer.",
+      "speaker_claimed": "Speaker ownership transferred to this account. Ordinary integration entry reload scheduled.",
+      "retry_started": "One ordinary integration entry reload has been scheduled.",
+      "recovery_runtime_missing": "The entry is not currently running. Use 'Retry entry setup'.",
+      "scenario_retry_unavailable": "No unbound scenarios with a saved marker are available for a manual retry.",
+      "scenario_bound": "Scenario found and bound without creating a duplicate.",
+      "scenario_created": "Scenario created after explicit duplicate-risk confirmation."
     },
     "error": {
-      "invalid_endpoint": "Некорректный адрес API или список резервных адресов. Используйте HTTPS без логина, пароля, fragment и посторонних query-параметров; для проверки cookies укажите validator.",
-      "reload_in_progress": "Выполняется операция с записью или перезагрузка интеграции. Изменения не сохранены; повторите после её завершения.",
-      "ownership_conflict": "Прежний владелец ещё включён, владение неоднозначно или у этого аккаунта нет собственного пригодного снимка колонки. Сначала отключите прежнего владельца.",
-      "entry_disabled": "Запись интеграции отключена. Это действие не включает её автоматически.",
-      "scenario_retry_unavailable": "Устройство больше не доступно для повторной попытки.",
-      "scenario_retry_failed": "Не удалось завершить ручную попытку. Маркер сценария сохранён.",
-      "scenarios_disabled": "Сценарии или облако отключены для записи.",
-      "scenarios_unavailable": "Каталог сценариев сейчас недоступен.",
-      "scenario_conflict": "Обнаружен неоднозначный или чужой сценарий; создание запрещено.",
-      "csrf_unavailable": "Нет подтверждённой готовности записи сценария.",
-      "marker_unavailable": "Локальный журнал сценариев недоступен.",
-      "marker_verification_failed": "Не удалось подтвердить сохранение маркера сценария.",
-      "unknown_device": "Устройство больше не принадлежит этой записи.",
-      "confirm_required": "Подтвердите риск возможного дубликата."
+      "invalid_endpoint": "Invalid API URL or fallback endpoint list. Use HTTPS without username, password, fragment, or extra query parameters; specify a validator for cookie probes.",
+      "reload_in_progress": "An entry operation or integration reload is in progress. Changes were not saved; try again after it finishes.",
+      "ownership_conflict": "The previous owner is still enabled, ownership is ambiguous, or this account lacks a valid local snapshot of the speaker. Disable the previous owner first.",
+      "entry_disabled": "The integration entry is disabled. This action does not enable it automatically.",
+      "scenario_retry_unavailable": "The device is no longer eligible for a manual retry.",
+      "scenario_retry_failed": "Manual retry failed. The scenario marker was preserved.",
+      "scenarios_disabled": "Scenarios or cloud access are disabled for this entry.",
+      "scenarios_unavailable": "Scenario catalog is currently unavailable.",
+      "scenario_conflict": "Ambiguous or foreign scenario detected; creation is blocked.",
+      "csrf_unavailable": "Scenario write readiness is not confirmed.",
+      "marker_unavailable": "Local scenario journal is unavailable.",
+      "marker_verification_failed": "Failed to verify durable scenario marker on disk.",
+      "unknown_device": "The device no longer belongs to this entry.",
+      "confirm_required": "Confirm the risk of a potential duplicate."
     },
     "step": {
       "init": {
-        "title": "Настройки Yandex.Station",
+        "title": "Yandex.Station Settings",
         "menu_options": {
-          "settings": "Настройки интеграции и режимы",
-          "devices": "Импорт устройств УДЯ",
-          "recovery": "Восстановление",
-          "reauth": "Обновить авторизацию (Reauth)"
+          "settings": "Integration settings and modes",
+          "devices": "Import Yandex Smart Home devices",
+          "recovery": "Recovery",
+          "reauth": "Reauthenticate (Reauth)"
         }
       },
       "recovery": {
-        "title": "Восстановление",
-        "description": "Причины из локального состояния (без облачных запросов): снимок {cache_reason}; запуск {setup_reason}; вход {auth_reason}; каталог {cloud_reason}; сценарии {scenario_reason}; владение {ownership_reason}.",
+        "title": "Recovery",
+        "description": "Local state reasons (no cloud requests): snapshot {cache_reason}; setup {setup_reason}; auth {auth_reason}; catalog {cloud_reason}; scenarios {scenario_reason}; ownership {ownership_reason}.",
         "menu_options": {
-          "retry_setup": "Повторить запуск записи",
-          "retry_scenario_creation": "Повторить создание сценария с подтверждением риска",
-          "claim_speaker": "Передать владение колонкой этому аккаунту"
+          "retry_setup": "Retry entry setup",
+          "retry_scenario_creation": "Retry scenario creation with risk confirmation",
+          "claim_speaker": "Transfer speaker ownership to this account"
         }
       },
       "retry_setup": {
-        "title": "Повторить запуск записи",
-        "description": "Запросить одну штатную перезагрузку этой записи без изменения настроек или включения отключённой записи.",
+        "title": "Retry entry setup",
+        "description": "Request one ordinary reload of this entry without changing settings or enabling a disabled entry.",
         "data": {
-          "confirm_retry": "Подтверждаю повторный запуск"
+          "confirm_retry": "Confirm setup retry"
         }
       },
       "retry_scenario_creation": {
-        "title": "Ручная попытка создания сценария",
-        "description": "Свежая проверка может найти и привязать сценарий без записи. Если создание уже произошло, но облако пока не показало его, повторная запись может создать дубликат. Действие делает не более одной подтверждённой попытки.",
+        "title": "Manual scenario creation retry",
+        "description": "A fresh check may find and bind an existing scenario without writing. If creation already succeeded but the cloud has not listed it yet, retrying may create a duplicate. This action performs at most one confirmed attempt.",
         "data": {
-          "device_id": "Колонка с непривязанным сценарием",
-          "confirm_risk": "Понимаю риск дубликата и подтверждаю попытку"
+          "device_id": "Speaker with an unbound scenario",
+          "confirm_risk": "I understand the duplicate risk and confirm the retry"
         }
       },
       "claim_speaker": {
-        "title": "Передача владения колонкой",
-        "description": "Действие доступно только после удаления или отключения прежнего владельца. Сущности этой колонки сохранят свои идентификаторы, имена, области и пользовательское отключение. Токены и сценарии другого аккаунта не переносятся.",
+        "title": "Transfer speaker ownership",
+        "description": "Available only after removing or disabling the previous owner. Speaker entities keep their entity IDs, names, areas, and user disabled state. Tokens and scenarios from another account are not transferred.",
         "data": {
-          "glagol_id": "Колонка из локального снимка этого аккаунта",
-          "confirm_claim": "Подтверждаю передачу владения"
+          "glagol_id": "Speaker from this account's local snapshot",
+          "confirm_claim": "Confirm ownership transfer"
         }
       },
       "settings": {
-        "title": "Настройки интеграции и режимы",
-        "description": "Управление оффлайн-режимами и устойчивостью интеграции. Внешний адрес API меняет доверенный узел, но не разрешает передачу на него OAuth, Passport track или расширение области cookies. Такое зеркало может остаться неавторизованным. YAML ssl: false по-прежнему отключает проверку сертификатов, в том числе для диагностического MiTM; при этом cookies, токены и команды доступны посреднику.",
+        "title": "Integration settings and modes",
+        "description": "Manage offline modes and resilience policy. A custom API base URL changes the trusted endpoint for its role, but never forwards OAuth, Passport track IDs, or expanded cookie scopes to an untrusted origin. YAML ssl: false still disables TLS certificate verification, including for diagnostic MiTM proxies; cookies, tokens, and commands are then exposed to the proxy.",
         "data": {
-          "force_offline_local": "Принудительный автономный режим (только локальное управление)",
-          "use_cached_devices": "Использовать только кэшированные устройства",
-          "enable_scenarios": "Включить интеграцию со сценариями",
-          "enable_diagnostic_sensors": "Включить диагностические сенсоры связи и статуса",
-          "quasar_base_url": "Базовый адрес Quasar API",
-          "account_base_url": "Базовый адрес аккаунта",
-          "passport_base_url": "Базовый адрес Паспорта",
-          "mobileproxy_base_url": "Базовый адрес MobileProxy",
-          "glagol_base_url": "Базовый адрес Glagol token API",
-          "rpc_base_url": "Базовый адрес RPC",
-          "cookie_storage_endpoints": "Резервные адреса проверки cookies (JSON)",
-          "csrf_endpoints": "Резервные адреса CSRF (JSON)"
+          "force_offline_local": "Force offline mode (local control only)",
+          "use_cached_devices": "Use cached devices only",
+          "enable_scenarios": "Enable scenario integration",
+          "enable_diagnostic_sensors": "Enable connectivity and status diagnostic sensors",
+          "quasar_base_url": "Quasar API base URL",
+          "account_base_url": "Account base URL",
+          "passport_base_url": "Passport base URL",
+          "mobileproxy_base_url": "MobileProxy base URL",
+          "glagol_base_url": "Glagol token API base URL",
+          "rpc_base_url": "RPC base URL",
+          "cookie_storage_endpoints": "Fallback cookie check endpoints (JSON)",
+          "csrf_endpoints": "Fallback CSRF endpoints (JSON)"
         },
         "data_description": {
-          "quasar_base_url": "HTTPS-адрес Quasar API; префикс пути сохраняется. Без userinfo, query и fragment. Текущий адрес: {current_quasar}. Пустое поле снимает override.",
-          "account_base_url": "HTTPS-адрес аккаунта; префикс пути сохраняется. Без userinfo, query и fragment. Текущий адрес: {current_account}. Пустое поле снимает override.",
-          "passport_base_url": "HTTPS-адрес Паспорта; префикс пути сохраняется. Credentials не отправляются чужому origin. Текущий адрес: {current_passport}. Пустое поле снимает override.",
-          "mobileproxy_base_url": "HTTPS-адрес MobileProxy; текущий адрес: {current_mobileproxy}. Пустое поле снимает override.",
-          "glagol_base_url": "HTTPS-адрес Glagol token API; текущий адрес: {current_glagol}. Пустое поле снимает override.",
-          "rpc_base_url": "HTTPS-адрес RPC; текущий адрес: {current_rpc}. Пустое поле снимает override.",
-          "cookie_storage_endpoints": "JSON-массив объектов url/validator (status_ok или uid_in_storage), не пустой; текущее значение: {current_cookie}. Пустое поле снимает override.",
-          "csrf_endpoints": "JSON-массив HTTPS-адресов, не пустой; текущее значение: {current_csrf}. Пустое поле снимает override."
+          "quasar_base_url": "HTTPS URL for Quasar API; path prefix is preserved. No userinfo, query, or fragment. Current URL: {current_quasar}. Leave empty to clear override.",
+          "account_base_url": "HTTPS URL for account endpoints; path prefix is preserved. No userinfo, query, or fragment. Current URL: {current_account}. Leave empty to clear override.",
+          "passport_base_url": "HTTPS URL for Passport; path prefix is preserved. Credentials are never sent to a foreign origin. Current URL: {current_passport}. Leave empty to clear override.",
+          "mobileproxy_base_url": "HTTPS URL for MobileProxy; current URL: {current_mobileproxy}. Leave empty to clear override.",
+          "glagol_base_url": "HTTPS URL for Glagol token API; current URL: {current_glagol}. Leave empty to clear override.",
+          "rpc_base_url": "HTTPS URL for RPC; current URL: {current_rpc}. Leave empty to clear override.",
+          "cookie_storage_endpoints": "Non-empty JSON array of url/validator objects (status_ok or uid_in_storage); current value: {current_cookie}. Leave empty to clear override.",
+          "csrf_endpoints": "Non-empty JSON array of HTTPS URLs; current value: {current_csrf}. Leave empty to clear override."
         }
       },
       "devices": {
-        "title": "Импорт устройств УДЯ",
-        "description": "Выберите устройства Умного дома Яндекса для добавления в Home Assistant",
+        "title": "Import Yandex Smart Home devices",
+        "description": "Select Yandex Smart Home devices to add to Home Assistant",
         "data": {
-          "include": "Устройства УДЯ"
+          "include": "Yandex Smart Home devices"
         }
       },
       "reauth": {
-        "title": "Предупреждение: повторная авторизация",
-        "description": "Этот шаг запускает вход заново, но не сбрасывает текущую сессию, credentials и кэш до успешного входа. Завершите авторизацию на карточке интеграции под тем же логином; после успеха будет запрошена обычная перезагрузка записи.",
+        "title": "Warning: reauthentication",
+        "description": "This step starts sign-in again without clearing the active session, credentials, or cache until sign-in succeeds. Complete authentication on the integration card with the same login; an ordinary entry reload will be requested upon success.",
         "data": {
-          "confirm_reauth": "Запустить повторную авторизацию без предварительного сброса"
+          "confirm_reauth": "Start reauthentication without preliminary reset"
         }
       }
     }
@@ -167,86 +167,86 @@
   "entity": {
     "sensor": {
       "cloud_health": {
-        "name": "Статус связи с облаком",
+        "name": "Cloud connection status",
         "state": {
-          "online": "В сети",
-          "degraded": "Ограниченная связь",
-          "offline": "Автономный режим",
-          "disabled": "Отключено",
-          "reauth_required": "Требуется повторный вход",
-          "unknown": "Неизвестно"
+          "online": "Online",
+          "degraded": "Degraded",
+          "offline": "Offline mode",
+          "disabled": "Disabled",
+          "reauth_required": "Reauthentication required",
+          "unknown": "Unknown"
         }
       },
       "inventory_source": {
-        "name": "Источник каталога",
+        "name": "Catalog source",
         "state": {
-          "cloud": "Облако",
-          "cache": "Локальный снимок",
-          "unknown": "Неизвестно"
+          "cloud": "Cloud",
+          "cache": "Local snapshot",
+          "unknown": "Unknown"
         }
       },
       "transport": {
-        "name": "Транспорт управления",
+        "name": "Control transport",
         "state": {
-          "local": "Локальная сеть",
-          "cloud": "Облако",
-          "unavailable": "Недоступен"
+          "local": "Local network",
+          "cloud": "Cloud",
+          "unavailable": "Unavailable"
         }
       },
       "alice_state": {
-        "name": "Состояние Алисы",
+        "name": "Alice state",
         "state": {
-          "idle": "Ожидает",
-          "listening": "Слушает",
-          "speaking": "Говорит"
+          "idle": "Idle",
+          "listening": "Listening",
+          "speaking": "Speaking"
         }
       }
     },
     "binary_sensor": {
       "local_connection": {
-        "name": "Локальное подключение"
+        "name": "Local connection"
       }
     },
     "select": {
       "equalizer": {
         "state": {
-          "off": "Выключен",
-          "lessbass": "Меньше басов",
-          "movie": "Кино",
-          "voice": "Голос",
-          "custom": "Своя настройка",
-          "pop": "Поп",
-          "hiphop": "Хип-хоп",
-          "dance": "Танцы",
-          "rock": "Рок",
-          "electro": "Электроника",
-          "metal": "Метал",
-          "rnb": "R’n’B",
-          "classic": "Классика",
-          "acoustics": "Акустика",
-          "jazz": "Джаз",
-          "concert": "Концерт",
-          "party": "Вечеринка",
-          "morebass": "Больше басов",
-          "morehigh": "Больше высоких",
-          "morebasshigh": "Больше басов и высоких",
-          "lesshigh": "Меньше высоких"
+          "off": "Off",
+          "lessbass": "Less bass",
+          "movie": "Movie",
+          "voice": "Voice",
+          "custom": "Custom",
+          "pop": "Pop",
+          "hiphop": "Hip-hop",
+          "dance": "Dance",
+          "rock": "Rock",
+          "electro": "Electronic",
+          "metal": "Metal",
+          "rnb": "R'n'B",
+          "classic": "Classical",
+          "acoustics": "Acoustic",
+          "jazz": "Jazz",
+          "concert": "Concert",
+          "party": "Party",
+          "morebass": "More bass",
+          "morehigh": "More treble",
+          "morebasshigh": "More bass and treble",
+          "lesshigh": "Less treble"
         }
       }
     },
     "water_heater": {
       "kettle": {
         "state": {
-          "off": "Выключено",
-          "on": "Включено",
-          "white_tea": "Белый чай",
-          "green_tea": "Зеленый чай",
-          "red_tea": "Красный чай",
-          "herbal_tea": "Травяной чай",
-          "flower_tea": "Цветочный чай",
-          "puerh_tea": "Чай пуэр",
-          "oolong_tea": "Чай улун",
-          "black_tea": "Черный чай"
+          "off": "Off",
+          "on": "On",
+          "white_tea": "White tea",
+          "green_tea": "Green tea",
+          "red_tea": "Red tea",
+          "herbal_tea": "Herbal tea",
+          "flower_tea": "Flower tea",
+          "puerh_tea": "Pu-erh tea",
+          "oolong_tea": "Oolong tea",
+          "black_tea": "Black tea"
         }
       }
     }

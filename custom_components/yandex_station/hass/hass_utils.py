@@ -68,8 +68,8 @@ def incluce_devices(
     includes = config_entry.options.get(CONF_INCLUDE, []) + config.get(CONF_INCLUDE, [])
     devices = []
 
-    # первый цикл по devices, второй по include, чтоб одинаковые include работали на
-    # разные devices
+    # Iterate over devices first, then includes, so duplicate include names match
+    # each corresponding device
     for device in quasar.devices:
         if (
             has_quasar(device)

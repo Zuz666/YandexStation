@@ -74,7 +74,7 @@ def test_unchanged_fingerprint_updates_in_place_without_reload():
         old = quasar.devices[0]
         old["entity"], old["host"], old["scenario_id"] = object(), "10.0.0.5", "scen-1"
 
-        # то же membership, но новые имя и состояние
+        # Same membership fingerprint, updated device name and state
         session.get = AsyncMock(return_value=devices_response(
             device_catalog(state="offline", name="Новое имя"),
         ))
@@ -116,7 +116,7 @@ def test_changed_fingerprint_saves_first_and_requests_single_ordinary_reload():
         assert reloads == ["entry-1"]
 
         assert applied is False
-        # снимок сохранён до всего остального, старые consumers не подменены
+        # Snapshot is saved before anything else; active consumers are not replaced
         saved = cache.async_save_devices.await_args[0][0]
         assert [d["id"] for d in saved] == ["cloud-1", "cloud-2"]
         assert len(quasar.devices) == 1 and quasar.devices[0] is old
@@ -142,7 +142,7 @@ def test_recovery_fetches_missing_tokens_once_and_reconnects_owner():
         session.request_glagol = AsyncMock(return_value=token_resp)
         async def fake_get(url, **kwargs):
             if "scenarios" in url:
-                # каталог сценариев недоступен: reconciliation пропускается
+                # Scenario catalog is unavailable: reconciliation is skipped
                 raise RuntimeError("scenarios unavailable")
             return devices_response(device_catalog())
 
@@ -157,7 +157,7 @@ def test_recovery_fetches_missing_tokens_once_and_reconnects_owner():
         )
         entity.init_local_mode.assert_awaited_once()
 
-        # второй проход не повторяет запрос: токен уже известен
+        # Second pass does not repeat the fetch when token is already known
         await quasar._async_recover_after_publication()
         assert session.request_glagol.call_count == 1
 
@@ -174,7 +174,7 @@ def test_cached_restore_keeps_cloud_entities_unavailable_until_event():
         device = device_catalog(state="online")
         entity = YandexEntity(quasar, device)
 
-        # восстановленный cached state не подтверждает online
+        # Restored cached state does not mark cloud entity as online
         assert entity.available is False
         assert quasar.fresh_device_ids == set()
 
@@ -201,7 +201,7 @@ def test_changed_membership_with_real_store_requests_one_reload_and_keeps_consum
             await cache.async_save_devices([device_catalog()])
             quasar = YandexQuasar(MagicMock(), policy=EntryPolicy(), cache_manager=cache)
             quasar.session.account_uid = entry.data["account_uid"]
-            await quasar.init()  # restore из настоящего Store
+            await quasar.init()  # Restore from a real Store instance
             old = quasar.devices[0]
             old["entity"] = sentinel = object()
 
@@ -221,16 +221,16 @@ def test_changed_membership_with_real_store_requests_one_reload_and_keeps_consum
 
             assert applied is False
             assert reloads == [entry.entry_id]
-            # старые consumers не подменены: dict identity и entity пережили sync
+            # Active consumers are preserved: dict identity and entity survive sync
             assert len(quasar.devices) == 1 and quasar.devices[0] is old
             assert old["entity"] is sentinel
-            # новый снимок уже надёжно на диске настоящего Store
+            # Updated snapshot is durably written to the real Store on disk
             on_disk = json_mod.loads(
                 Path(cache.path).read_text(encoding="utf-8")
             )["data"]["devices"]
             assert [d["id"] for d in on_disk] == ["cloud-1", "cloud-2"]
 
-            # admission закрыт: reload не запрашивается повторно, каталог не подменяется
+            # Admission is closed: reload is not re-requested and catalog stays untouched
             lifecycle.context.admission_open = False
             quasar.session.get = AsyncMock(return_value=devices_response(
                 device_catalog(), device_catalog().copy() | {"id": "cloud-2"},
