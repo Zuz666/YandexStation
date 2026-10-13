@@ -209,6 +209,7 @@
     },
     "select": {
       "equalizer": {
+        "name": "Эквалайзер",
         "state": {
           "off": "Выключен",
           "lessbass": "Меньше басов",
@@ -232,6 +233,21 @@
           "morebasshigh": "Больше басов и высоких",
           "lesshigh": "Меньше высоких"
         }
+      }
+    },
+    "calendar": {
+      "alarms": {
+        "name": "Будильники"
+      }
+    },
+    "camera": {
+      "lyrics": {
+        "name": "Текст"
+      }
+    },
+    "conversation": {
+      "alice": {
+        "name": "Алиса"
       }
     },
     "water_heater": {

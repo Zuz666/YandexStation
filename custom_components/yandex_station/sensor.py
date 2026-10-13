@@ -207,6 +207,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
             if instance["parameters"]["instance"] in instances:
                 entities.append(YandexCustomSensor(quasar, device, instance))
 
+    await hass_utils.async_translate_entity_names(hass, entities, "sensor")
     async_add_entities(entities)
 
 
@@ -238,7 +239,6 @@ class YandexCloudHealthSensor(SensorEntity):
     _attr_should_poll = False
     _attr_has_entity_name = True
     _attr_translation_key = "cloud_health"
-    _attr_name = "Статус связи с облаком"
     _attr_icon = "mdi:cloud-check"
 
     def __init__(self, quasar: YandexQuasar, entry, device_info: DeviceInfo):
@@ -282,7 +282,6 @@ class YandexInventorySourceSensor(SensorEntity):
     _attr_has_entity_name = True
     _attr_translation_key = "inventory_source"
     _attr_entity_registry_enabled_default = False
-    _attr_name = "Источник каталога"
     _attr_icon = "mdi:database-sync"
 
     def __init__(self, quasar: YandexQuasar, entry, device_info: DeviceInfo):
@@ -320,7 +319,6 @@ class YandexAliceStateSensor(SensorEntity):
     _attr_translation_key = "alice_state"
     _attr_entity_registry_enabled_default = False
     _attr_has_entity_name = True
-    _attr_name = "Состояние Алисы"
     _attr_icon = "mdi:microphone"
 
     def __init__(self, quasar: YandexQuasar, entry, device: dict):
@@ -365,7 +363,6 @@ class YandexTransportSensor(SensorEntity):
     _attr_translation_key = "transport"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_has_entity_name = True
-    _attr_name = "Транспорт управления"
     _attr_icon = "mdi:transit-connection-variant"
 
     def __init__(self, quasar: YandexQuasar, entry, device: dict):

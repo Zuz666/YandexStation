@@ -209,6 +209,7 @@
     },
     "select": {
       "equalizer": {
+        "name": "Equalizer",
         "state": {
           "off": "Off",
           "lessbass": "Less bass",
@@ -232,6 +233,21 @@
           "morebasshigh": "More bass and treble",
           "lesshigh": "Less treble"
         }
+      }
+    },
+    "calendar": {
+      "alarms": {
+        "name": "Alarms"
+      }
+    },
+    "camera": {
+      "lyrics": {
+        "name": "Lyrics"
+      }
+    },
+    "conversation": {
+      "alice": {
+        "name": "Alice"
       }
     },
     "water_heater": {
