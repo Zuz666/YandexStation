@@ -1,10 +1,12 @@
 import asyncio
+from contextlib import nullcontext
 import logging
 from unittest.mock import MagicMock
 
 import pytest
 
 from homeassistant.components.media_player import MediaPlayerEntityFeature
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.yandex_station.media_player import YandexMediaPlayer
 from custom_components.yandex_station.core.utils import YandexDebug
@@ -222,7 +224,12 @@ def test_unsupported_media_keeps_safe_diagnostic_context(
         station.entity_id = "media_player.synthetic_station"
         if local:
             station.local_state = {"playerState": {"isPlaying": False}}
-        with caplog.at_level(logging.DEBUG):
+        expectation = (
+            pytest.raises(HomeAssistantError)
+            if local and source == "url"
+            else nullcontext()
+        )
+        with caplog.at_level(logging.DEBUG), expectation:
             await station.async_play_media(media_type, media_id, extra={})
 
         messages = [record.getMessage() for record in caplog.records]
