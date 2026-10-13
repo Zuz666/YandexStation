@@ -288,6 +288,8 @@ class YandexQuasar(Dispatcher):
         self.updates_task: asyncio.Task | None = None
         self._recovery_task: asyncio.Task | None = None
         self._token_tasks: dict[str, asyncio.Task] = {}
+        self._scenario_worker_task: asyncio.Task | None = None
+        self._history_tasks: set[asyncio.Task] = set()
         self.fresh_device_ids: set[str] = set()
 
     def _restore_from_snapshot(self, snapshot: StationSnapshot):
@@ -461,92 +463,254 @@ class YandexQuasar(Dispatcher):
             if device["quasar_info"]["device_id"] in self.owned_glagol_ids
         ]
 
+    @staticmethod
+    def _created_scenario_steps(device_id: str) -> list[dict]:
+        """Steps создаваемой записи-пустышки: target известен на момент POST."""
+        return [{
+            "action": "scenarios.steps.actions.v2",
+            "parameters": {"items": [{
+                "type": "step.action.item.device",
+                "value": {"id": device_id},
+            }]},
+        }]
+
+
+    def _scenario_candidates(self, hash_code: str) -> list[dict]:
+        """Кандидаты по типизированному voice trigger и точному hash (§6).
+
+        Проверяются все triggers; поддержаны typed `scenario.trigger.voice`,
+        известный flat template и nested `trigger` из wire templates.
+        """
+        candidates = []
+        for scenario in self.scenarios or []:
+            if not isinstance(scenario, dict):
+                continue
+            for trigger in scenario.get("triggers") or []:
+                if not isinstance(trigger, dict):
+                    continue
+                value = None
+                if trigger.get("type") == "scenario.trigger.voice":
+                    value = trigger.get("value")
+                elif "value" in trigger and "type" not in trigger:
+                    value = trigger.get("value")
+                elif isinstance(trigger.get("trigger"), dict):
+                    value = trigger["trigger"].get("value")
+                if value == hash_code:
+                    candidates.append(scenario)
+                    break
+        return candidates
+
+    async def _scenario_detail(self, scenario_id: str) -> dict | None:
+        """GET `/m/v4/user/scenarios/{id}/edit` для кандидата без полных steps."""
+        try:
+            r = await self.session.get(
+                f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/{scenario_id}/edit",
+                role="quasar",
+            )
+            resp = await r.json()
+            if isinstance(resp, dict) and resp.get("status") == "ok":
+                return resp.get("scenario")
+        except Exception as e:
+            _LOGGER.debug(
+                "Scenario detail unavailable for %s: %s", scenario_id, type(e).__name__
+            )
+        return None
+
+    async def _verify_scenario_target(self, scenario: dict, device_id: str) -> bool | None:
+        """Полный target кандидата: True/False/None (неполный или неизвестный).
+
+        Проверяется `scenarios.steps.actions.v2` → `parameters.items` →
+        `step.action.item.device` и cloud device ID в item/value. Произвольное
+        имя сценария identity не является.
+        """
+        steps = scenario.get("steps")
+        if not isinstance(steps, list) or not steps:
+            scenario = await self._scenario_detail(scenario.get("id"))
+            if not isinstance(scenario, dict):
+                return None
+            steps = scenario.get("steps")
+            if not isinstance(steps, list) or not steps:
+                return None
+        found = False
+        for step in steps:
+            if not isinstance(step, dict) or step.get("action") != "scenarios.steps.actions.v2":
+                continue
+            items = (step.get("parameters") or {}).get("items")
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict) or item.get("type") != "step.action.item.device":
+                    continue
+                value = item.get("value")
+                if value == device_id or (
+                    isinstance(value, dict) and value.get("id") == device_id
+                ):
+                    found = True
+        return found
+
+    async def _resolve_speaker_scenario(self, speaker: dict, *, allow_creation: bool = True) -> None:
+        """Binding только при единственном полном совпадении trigger+target.
+
+        Несколько совпадений, чужой target, неполный candidate/detail или
+        неизвестная структура — unresolved и запрет POST для этого устройства,
+        а не доказательство отсутствия. Вызывается под reconciliation lock.
+        """
+        device_id: str = speaker["id"]
+        hash_code = encode(device_id)
+        speaker.pop("scenario_unresolved", None)
+
+        candidates = self._scenario_candidates(hash_code)
+        if candidates:
+            verified = [c for c in candidates if await self._verify_scenario_target(c, device_id) is True]
+            if len(candidates) == 1 and len(verified) == 1:
+                speaker["scenario_id"] = candidates[0]["id"]
+                if self.cache_manager:
+                    await self.cache_manager.async_save_scenario_marker(
+                        device_id, hash_code, SCENARIO_STATE_CONFIRMED
+                    )
+                return
+            speaker["scenario_id"] = None
+            speaker["scenario_unresolved"] = True
+            _LOGGER.warning(
+                "Scenario binding unresolved for %s: candidates=%d verified=%d; POST banned",
+                device_id, len(candidates), len(verified),
+            )
+            return
+
+        speaker["scenario_id"] = None
+
+        if self.cache_manager and not self.cache_manager.scenario_creation_trusted:
+            _LOGGER.warning(
+                "Scenario creation journal is untrusted on disk for %s; skipping creation",
+                device_id,
+            )
+            return
+
+        journal = {}
+        if self.cache_manager and self.cache_manager.snapshot:
+            journal = self.cache_manager.snapshot.scenario_creation
+        existing = journal.get(device_id)
+        existing_state = existing.get("state") if isinstance(existing, dict) else None
+        if existing_state in (SCENARIO_STATE_PENDING, SCENARIO_STATE_CONFIRMED):
+            _LOGGER.info(
+                "Scenario for %s has marker %s; GET-only reconciliation",
+                device_id, existing_state,
+            )
+            return
+
+        if not allow_creation:
+            return
+
+        # write readiness: без CSRF автоматического POST нет
+        if not await self.session.ensure_csrf():
+            _LOGGER.warning("CSRF unavailable; scenario creation for %s aborted", device_id)
+            return
+
+        if self.cache_manager:
+            verified = await self.cache_manager.async_save_and_verify_scenario_marker(
+                device_id, hash_code, SCENARIO_STATE_PENDING
+            )
+            if not verified:
+                _LOGGER.warning(
+                    "Durable pending marker verification failed on disk for %s; aborting POST",
+                    device_id,
+                )
+                return
+
+        try:
+            sid = await self.add_scenario(device_id, hash_code)
+            speaker["scenario_id"] = sid
+            if self.scenarios is not None:
+                self.scenarios.append(
+                    {"id": sid, "name": f"ХА {device_id}", "triggers": [{"value": hash_code}],
+                     "steps": self._created_scenario_steps(device_id)}
+                )
+            if self.cache_manager:
+                await self.cache_manager.async_save_scenario_marker(
+                    device_id, hash_code, SCENARIO_STATE_CONFIRMED
+                )
+        except Exception as e:
+            _LOGGER.warning(
+                "Failed to create scenario for %s: %s; pending marker retained",
+                device_id, type(e).__name__,
+            )
+            speaker["scenario_id"] = None
+
     async def load_speakers(self):
         if self.scenarios is None:
             _LOGGER.warning(
                 "Cannot reconcile speaker scenarios: catalog is unpopulated (None)"
             )
             return
-
         async with self._reconciliation_lock:
-            hashes = {}
-            if self.scenarios:
-                for scenario in self.scenarios:
-                    try:
-                        h = scenario["triggers"][0]["value"]
-                        hashes[h] = scenario["id"]
-                    except Exception:
-                        pass
-
-            creation_journal = {}
-            if self.cache_manager and self.cache_manager.snapshot:
-                creation_journal = self.cache_manager.snapshot.scenario_creation
-
             for speaker in self.owned_speakers:
-                device_id: str = speaker["id"]
-                hash_code = encode(device_id)
+                await self._resolve_speaker_scenario(speaker)
 
-                if hash_code in hashes:
-                    speaker["scenario_id"] = hashes[hash_code]
-                    if self.cache_manager:
-                        await self.cache_manager.async_save_scenario_marker(
-                            device_id, hash_code, SCENARIO_STATE_CONFIRMED
-                        )
-                else:
-                    if self.cache_manager and not self.cache_manager.scenario_creation_trusted:
-                        _LOGGER.warning(
-                            "Scenario creation journal is untrusted on disk for %s; skipping creation",
-                            device_id,
-                        )
-                        speaker["scenario_id"] = None
-                        continue
+    async def retry_scenario_creation(self, device_id: str, *, confirm_risk: bool = False) -> str:
+        """Ручное Recovery: одна подтверждённая попытка на устройство (§6).
 
-                    existing_entry = creation_journal.get(device_id)
-                    existing_state = (
-                        existing_entry.get("state")
-                        if isinstance(existing_entry, dict)
-                        else None
-                    )
+        Свежий GET и detail resolution под тем же lock. Найден match — привязка
+        без POST; конфликт/unavailable — отказ; подтверждённого match нет и
+        пользователь принял риск — marker заменяется новой revision и выполняется
+        ровно один POST. Промежуточного удаления marker нет.
+        """
+        speaker = next(
+            (s for s in self.owned_speakers if s.get("id") == device_id), None
+        )
+        if speaker is None:
+            raise ValueError("unknown_device")
+        if not (self.policy.effective_cloud_allowed and self.policy.enable_scenarios):
+            raise RuntimeError("scenarios_disabled")
+        async with self._reconciliation_lock:
+            await self.load_scenarios()
+            if self.readiness.scenarios_state != ScenariosState.READY:
+                raise RuntimeError("scenarios_unavailable")
+            self.scenarios = self.scenarios if self.scenarios is not None else []
+            await self._resolve_speaker_scenario(speaker, allow_creation=False)
+            if speaker.get("scenario_id"):
+                return "bound"
+            if speaker.get("scenario_unresolved"):
+                raise RuntimeError("scenario_conflict")
 
-                    if existing_state in (SCENARIO_STATE_PENDING, SCENARIO_STATE_CONFIRMED):
-                        _LOGGER.info(
-                            "Scenario for %s has marker %s; skipping duplicate POST",
-                            device_id,
-                            existing_state,
-                        )
-                        if not speaker.get("scenario_id"):
-                            speaker["scenario_id"] = None
-                    else:
-                        if self.cache_manager:
-                            verified = await self.cache_manager.async_save_and_verify_scenario_marker(
-                                device_id, hash_code, SCENARIO_STATE_PENDING
-                            )
-                            if not verified:
-                                _LOGGER.warning(
-                                    "Durable pending marker verification failed on disk for %s; aborting POST",
-                                    device_id,
-                                )
-                                speaker["scenario_id"] = None
-                                continue
+            journal = {}
+            if self.cache_manager and self.cache_manager.snapshot:
+                journal = self.cache_manager.snapshot.scenario_creation
+            existing = journal.get(device_id)
+            has_marker = (
+                isinstance(existing, dict)
+                and existing.get("state") in (SCENARIO_STATE_PENDING, SCENARIO_STATE_CONFIRMED)
+            )
+            if has_marker and not confirm_risk:
+                raise RuntimeError("confirm_required")
 
-                        try:
-                            sid = await self.add_scenario(device_id, hash_code)
-                            speaker["scenario_id"] = sid
-                            if self.scenarios is not None:
-                                self.scenarios.append(
-                                    {"id": sid, "name": f"ХА {device_id}", "triggers": [{"value": hash_code}]}
-                                )
-                            if self.cache_manager:
-                                await self.cache_manager.async_save_scenario_marker(
-                                    device_id, hash_code, SCENARIO_STATE_CONFIRMED
-                                )
-                        except Exception as e:
-                            _LOGGER.warning(
-                                "Failed to create scenario for %s: %r; pending marker retained",
-                                device_id,
-                                e,
-                            )
-                            speaker["scenario_id"] = None
+            hash_code = encode(device_id)
+            if not await self.session.ensure_csrf():
+                raise RuntimeError("csrf_unavailable")
+            if self.cache_manager:
+                verified = await self.cache_manager.async_save_and_verify_scenario_marker(
+                    device_id, hash_code, SCENARIO_STATE_PENDING
+                )
+                if not verified:
+                    raise RuntimeError("marker_verification_failed")
+            try:
+                sid = await self.add_scenario(device_id, hash_code)
+            except Exception:
+                _LOGGER.warning(
+                    "Manual scenario creation failed for %s; pending marker retained",
+                    device_id,
+                )
+                raise
+            speaker["scenario_id"] = sid
+            if self.scenarios is not None:
+                self.scenarios.append(
+                    {"id": sid, "name": f"ХА {device_id}", "triggers": [{"value": hash_code}],
+                     "steps": self._created_scenario_steps(device_id)}
+                )
+            if self.cache_manager:
+                await self.cache_manager.async_save_scenario_marker(
+                    device_id, hash_code, SCENARIO_STATE_CONFIRMED
+                )
+            return "created"
     async def load_speaker_config(self, device: dict):
         """Загружаем device_id и platform для колонок. Они не приходят с полным
         списком устройств.
@@ -561,18 +725,76 @@ class YandexQuasar(Dispatcher):
         device.update(resp["quasar_info"])
 
     async def load_scenarios(self):
-        """Получает список сценариев, которые мы ранее создали."""
+        """Получает список сценариев; failed GET очищает executable bindings."""
+        if not (self.policy.effective_cloud_allowed and self.policy.enable_scenarios):
+            self.scenarios = None
+            self.readiness.scenarios_state = ScenariosState.DISABLED
+            for speaker in self.owned_speakers:
+                speaker["scenario_id"] = None
+
+            return
         try:
             r = await self.session.get(
                 "https://iot.quasar.yandex.ru/m/user/scenarios", role="quasar"
             )
             resp = await r.json()
             assert resp["status"] == "ok", resp
-            self.scenarios = resp["scenarios"]
+            scenarios = resp["scenarios"]
+            if not isinstance(scenarios, list):
+                raise RuntimeError("scenarios_unavailable")
+            self.scenarios = scenarios
             self.readiness.scenarios_state = ScenariosState.READY
         except Exception as e:
             _LOGGER.debug(f"Ошибка загрузки сценариев: {e!r}")
+            # старый список допустим только в diagnostics: bindings очищаются
+            self.scenarios = None
             self.readiness.scenarios_state = ScenariosState.UNAVAILABLE
+            for speaker in self.owned_speakers:
+                speaker["scenario_id"] = None
+
+    def _ensure_scenario_worker(self):
+        """Отдельный worker: старт при разрешённом cloud/recovery (§6)."""
+        if self.stopping or self._scenario_worker_task is not None:
+            return
+        if not (self.policy.effective_cloud_allowed and self.policy.enable_scenarios):
+            self.readiness.scenarios_state = ScenariosState.DISABLED
+            return
+        self._scenario_worker_task = asyncio.create_task(self._scenario_worker())
+
+    async def _scenario_worker(self):
+        """GET по backoff до полного согласования; завершается после него."""
+        backoff = RecoveryBackoff()
+        current = asyncio.current_task()
+        try:
+            while not self.stopping:
+                await self.load_scenarios()
+                state = self.readiness.scenarios_state
+                if state == ScenariosState.READY:
+                    await self.load_speakers()
+                    return
+                if state == ScenariosState.DISABLED:
+                    return
+                delay = backoff.next_delay(self.session.retry_after.get("quasar"))
+                _LOGGER.debug("Scenario worker retry in %.1fs", delay)
+                await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            _LOGGER.warning("Scenario worker stopped: %s", safe_error_summary(e))
+        finally:
+            if self._scenario_worker_task is current:
+                self._scenario_worker_task = None
+
+    def _schedule_history(self):
+        """History задача tracked: disabled/offline отменяет и дожидается (§6)."""
+        if self.stopping or not (
+            self.policy.effective_cloud_allowed
+            and not self.policy.effective_use_cached_devices
+        ):
+            return
+        task = asyncio.create_task(self.get_voice_trigger(3))
+        self._history_tasks.add(task)
+        task.add_done_callback(self._history_tasks.discard)
     async def update_scenario(self, name: str):
         # check if we known scenario name
         sid = next((i["id"] for i in self.scenarios if i["name"] == name), None)
@@ -915,7 +1137,7 @@ class YandexQuasar(Dispatcher):
 
             elif operation == "update_scenario_list":
                 if '"source":"create_scenario_launch"' in resp["message"]:
-                    _ = asyncio.create_task(self.get_voice_trigger(3))
+                    self._schedule_history()
 
     async def devices_passive_update(self, *args):
         if self.policy.effective_use_cached_devices or not self.policy.effective_cloud_allowed:
@@ -938,6 +1160,11 @@ class YandexQuasar(Dispatcher):
             _LOGGER.debug(f"Devices forceupdate problem: {repr(e)}")
 
     async def get_voice_trigger(self, retries: int = 0):
+        if self.stopping or not (
+            self.policy.effective_cloud_allowed
+            and not self.policy.effective_use_cached_devices
+        ):
+            return
         try:
             # 1. Get all scenarios history
             r = await self.session.get(
@@ -1026,23 +1253,10 @@ class YandexQuasar(Dispatcher):
             if not self.policy.effective_use_cached_devices:
                 if not await self._sync_cloud_devices():
                     return
-            elif not (
-                self.policy.enable_scenarios and self.policy.effective_cloud_allowed
-            ):
-                self.readiness.scenarios_state = ScenariosState.DISABLED
             if self.stopping:
                 return
-            if self.owned_glagol_ids and self.policy.enable_scenarios:
-                await self.load_scenarios()
-                if self.readiness.scenarios_state == ScenariosState.READY:
-                    await self.load_speakers()
-                else:
-                    _LOGGER.warning(
-                        "Scenarios catalog is %s; skipping speaker scenario reconciliation",
-                        self.readiness.scenarios_state,
-                    )
-            elif not self.policy.enable_scenarios:
-                self.readiness.scenarios_state = ScenariosState.DISABLED
+            # сценарный worker: свой backoff, завершается после полного согласования
+            self._ensure_scenario_worker()
             if self.stopping:
                 return
             # single-flight token-fetch только для колонок без известного токена
@@ -1117,6 +1331,19 @@ class YandexQuasar(Dispatcher):
         if token_tasks:
             await asyncio.gather(*token_tasks, return_exceptions=True)
         self._token_tasks.clear()
+        if self._scenario_worker_task is not None:
+            self._scenario_worker_task.cancel()
+            try:
+                await self._scenario_worker_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._scenario_worker_task = None
+        history_tasks = tuple(self._history_tasks)
+        for task in history_tasks:
+            task.cancel()
+        if history_tasks:
+            await asyncio.gather(*history_tasks, return_exceptions=True)
+        self._history_tasks.clear()
         if self.updates_task:
             self.updates_task.cancel()
             try:
