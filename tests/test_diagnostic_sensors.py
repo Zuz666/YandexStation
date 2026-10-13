@@ -200,11 +200,18 @@ def test_quasar_sync_scenarios_failure_degrades_readiness():
         readiness = Readiness()
         quasar = YandexQuasar(session, policy=policy, readiness=readiness)
 
+        speaker_device = {
+            "id": "speaker_dev_1",
+            "name": "Станция Спальня",
+            "quasar_info": {"device_id": "sp_1", "platform": "yandexstation"},
+            "capabilities": [{"type": "devices.capabilities.quasar.server_action"}],
+        }
         mock_resp_devices = AsyncMock()
         mock_resp_devices.json.return_value = {
             "status": "ok",
-            "households": [{"name": "Home", "all": []}],
+            "households": [{"name": "Home", "all": [speaker_device]}],
         }
+        quasar.add_scenario = AsyncMock()
 
         async def fake_get(url, **kwargs):
             if "scenarios" in url:
@@ -218,7 +225,9 @@ def test_quasar_sync_scenarios_failure_degrades_readiness():
         assert readiness.auth_state == AuthState.VALID
         assert readiness.devices_state == DevicesState.READY
         assert readiness.scenarios_state == ScenariosState.UNAVAILABLE
-
+        # Assert that zero scenario creation POSTs were attempted when catalog is unavailable
+        quasar.add_scenario.assert_not_called()
+        assert speaker_device.get("scenario_id") is None
         entry = MagicMock()
         entry.entry_id = "test_e3"
         service_device = DeviceInfo(
