@@ -1,16 +1,15 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.core import HomeAssistant
 
-from custom_components.yandex_station.core.cache import StationSnapshot
+from custom_components.yandex_station.core.cache import CacheManager, StationSnapshot
 from custom_components.yandex_station.core.const import DOMAIN
 from custom_components.yandex_station.core.lifecycle import get_lifecycle
-from custom_components.yandex_station.core.policy import (
-    EntryPolicy, Readiness, AuthState, DevicesState,
-)
+from custom_components.yandex_station.core.policy import EntryPolicy, DevicesState
 from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
 from .test_cache import config_entry
+from .test_ownership import ownership_runtime
 
 
 def device_catalog(state="online", name="Станция Зал"):
@@ -185,5 +184,68 @@ def test_cached_restore_keeps_cloud_entities_unavailable_until_event():
         })
         assert entity.available is True
         assert quasar.fresh_device_ids == {"cloud-1"}
+
+    asyncio.run(scenario())
+
+def test_changed_membership_with_real_store_requests_one_reload_and_keeps_consumers(tmp_path):
+    async def scenario():
+        import json as json_mod
+        from pathlib import Path
+
+        async with ownership_runtime(tmp_path) as (hass, entries, client, lifecycle):
+            entry = entries["a"]
+            cache = CacheManager(
+                hass, entry.entry_id, account_login=entry.unique_id,
+                account_uid=entry.data["account_uid"],
+            )
+            await cache.async_save_devices([device_catalog()])
+            quasar = YandexQuasar(MagicMock(), policy=EntryPolicy(), cache_manager=cache)
+            quasar.session.account_uid = entry.data["account_uid"]
+            await quasar.init()  # restore из настоящего Store
+            old = quasar.devices[0]
+            old["entity"] = sentinel = object()
+
+            quasar.session.get = AsyncMock(return_value=devices_response(
+                device_catalog(), device_catalog().copy() | {"id": "cloud-2"},
+            ))
+            reloads = []
+
+            async def reload(eid):
+                reloads.append(eid)
+                return True
+
+            with patch.object(hass.config_entries, "async_reload", side_effect=reload):
+                requester = asyncio.create_task(quasar._sync_cloud_devices())
+                applied = await requester
+                await hass.async_block_till_done()
+
+            assert applied is False
+            assert reloads == [entry.entry_id]
+            # старые consumers не подменены: dict identity и entity пережили sync
+            assert len(quasar.devices) == 1 and quasar.devices[0] is old
+            assert old["entity"] is sentinel
+            # новый снимок уже надёжно на диске настоящего Store
+            on_disk = json_mod.loads(
+                Path(cache.path).read_text(encoding="utf-8")
+            )["data"]["devices"]
+            assert [d["id"] for d in on_disk] == ["cloud-1", "cloud-2"]
+
+            # admission закрыт: reload не запрашивается повторно, каталог не подменяется
+            lifecycle.context.admission_open = False
+            quasar.session.get = AsyncMock(return_value=devices_response(
+                device_catalog(), device_catalog().copy() | {"id": "cloud-2"},
+                device_catalog().copy() | {"id": "cloud-3"},
+            ))
+            with patch.object(hass.config_entries, "async_reload", side_effect=reload):
+                requester = asyncio.create_task(quasar._sync_cloud_devices())
+                applied = await requester
+                await hass.async_block_till_done()
+            assert applied is False and reloads == [entry.entry_id]
+            assert quasar.devices[0] is old and old["entity"] is sentinel
+            on_disk = json_mod.loads(
+                Path(cache.path).read_text(encoding="utf-8")
+            )["data"]["devices"]
+            assert [d["id"] for d in on_disk] == ["cloud-1", "cloud-2", "cloud-3"]
+            await cache.async_close()
 
     asyncio.run(scenario())
