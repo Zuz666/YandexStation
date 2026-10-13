@@ -19,6 +19,15 @@ from custom_components.yandex_station.core.yandex_session import CloudRequestErr
 from custom_components.yandex_station.core.yandex_station import YandexStation
 from .test_cache import device_record
 
+def scenario_steps(device_id):
+    return [{
+        "action": "scenarios.steps.actions.v2",
+        "parameters": {"items": [{
+            "type": "step.action.item.device",
+            "value": {"id": device_id},
+        }]},
+    }]
+
 
 class ScenarioCommandPeer:
     """A stateful scenario endpoint: actions execute the last stored configuration."""
@@ -88,7 +97,8 @@ def test_scenario_match_binds_and_saves_confirmed(tmp_path):
         }
         quasar.devices = [speaker]
         quasar.scenarios = [
-            {"id": "scen_existing_id", "triggers": [{"value": hash_code}]}
+            {"id": "scen_existing_id", "triggers": [{"value": hash_code}],
+             "steps": scenario_steps(device_id)}
         ]
 
         quasar.add_scenario = AsyncMock()
@@ -270,6 +280,7 @@ def test_station_failed_cloud_commands_preserve_state(method, args, lost_action,
 def test_failed_durable_marker_verification_aborts_post():
     async def scenario():
         session = MagicMock()
+        session.ensure_csrf = AsyncMock(return_value=True)
         cache = MagicMock(spec=CacheManager)
         cache.snapshot = StationSnapshot(entry_id="e1", account_login="u1")
         # Verification returns False (e.g. disk write failed)
@@ -298,6 +309,7 @@ def test_failed_durable_marker_verification_aborts_post():
 def test_concurrent_load_speakers_calls_are_serialized():
     async def scenario():
         session = MagicMock()
+        session.ensure_csrf = AsyncMock(return_value=True)
         cache = MagicMock(spec=CacheManager)
         snapshot = StationSnapshot(entry_id="e1", account_login="u1")
         cache.snapshot = snapshot
