@@ -28,9 +28,9 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass, entry, async_add_entities):
     quasar: YandexQuasar = hass.data[DOMAIN][entry.unique_id]
 
-    async_add_entities(
-        [YandexLyrics(quasar, speaker) for speaker in quasar.owned_speakers], False
-    )
+    lyrics = [YandexLyrics(quasar, speaker) for speaker in quasar.owned_speakers]
+    await hass_utils.async_translate_entity_names(hass, lyrics, "camera")
+    async_add_entities(lyrics, False)
 
     entities = []
 
@@ -93,6 +93,8 @@ class YandexSnapshotCamera(Camera, YandexEntity):
 
 class YandexLyrics(Camera):
     _attr_entity_registry_enabled_default = False
+    _attr_has_entity_name = True
+    _attr_translation_key = "lyrics"
 
     stream_clients: int = 0
 
@@ -105,7 +107,6 @@ class YandexLyrics(Camera):
             identifiers={(DOMAIN, device["quasar_info"]["device_id"])},
             name=self.device["name"],
         )
-        self._attr_name = device["name"] + " Текст"
         self._attr_unique_id = device["quasar_info"]["device_id"] + f"_lyrics"
 
         self.entity_id = f"camera.yandex_station_{slugify(self._attr_unique_id)}"

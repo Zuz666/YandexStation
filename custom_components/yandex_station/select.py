@@ -52,14 +52,13 @@ EQUALIZER_PLATFORMS = (
 
 async def async_setup_entry(hass, entry, async_add_entities):
     quasar: YandexQuasar = hass.data[DOMAIN][entry.unique_id]
-    async_add_entities(
-        [
-            YandexEqualizer(quasar, sp)
-            for sp in quasar.owned_speakers
-            if sp["quasar_info"]["platform"] in EQUALIZER_PLATFORMS
-        ],
-        True,
-    )
+    equalizers = [
+        YandexEqualizer(quasar, sp)
+        for sp in quasar.owned_speakers
+        if sp["quasar_info"]["platform"] in EQUALIZER_PLATFORMS
+    ]
+    await hass_utils.async_translate_entity_names(hass, equalizers, "select")
+    async_add_entities(equalizers, True)
 
     entities = []
 
@@ -81,6 +80,7 @@ class YandexEqualizer(SelectEntity):
     _attr_icon = "mdi:equalizer"
     _attr_options = list(PRESETS.keys())
     _attr_translation_key = "equalizer"
+    _attr_has_entity_name = True
 
     def __init__(self, quasar: YandexQuasar, device: dict):
         self.quasar = quasar
@@ -90,7 +90,6 @@ class YandexEqualizer(SelectEntity):
             identifiers={(DOMAIN, device["quasar_info"]["device_id"])},
             name=self.device["name"],
         )
-        self._attr_name = device["name"] + " Эквалайзер"
         self._attr_unique_id = device["quasar_info"]["device_id"] + f"_equalizer"
 
         self.entity_id = f"select.yandex_station_{slugify(self._attr_unique_id)}"

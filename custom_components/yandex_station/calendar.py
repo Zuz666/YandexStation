@@ -14,6 +14,7 @@ from homeassistant.util import slugify
 from .core.const import DOMAIN
 from .core.lifecycle import guard_quasar_entity
 from .core.yandex_quasar import YandexQuasar
+from .hass import hass_utils
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -21,11 +22,15 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass, entry, async_add_entities):
     quasar: YandexQuasar = hass.data[DOMAIN][entry.unique_id]
     # can't use update_before_add because it works for disabled entities
-    async_add_entities([YandexCalendar(quasar, sp) for sp in quasar.owned_speakers])
+    entities = [YandexCalendar(quasar, sp) for sp in quasar.owned_speakers]
+    await hass_utils.async_translate_entity_names(hass, entities, "calendar")
+    async_add_entities(entities)
 
 
 class YandexCalendar(CalendarEntity):
     _attr_entity_registry_enabled_default = False
+    _attr_has_entity_name = True
+    _attr_translation_key = "alarms"
     _attr_supported_features = (
         CalendarEntityFeature.CREATE_EVENT
         | CalendarEntityFeature.UPDATE_EVENT
@@ -40,7 +45,6 @@ class YandexCalendar(CalendarEntity):
             identifiers={(DOMAIN, device["quasar_info"]["device_id"])},
             name=self.device["name"],
         )
-        self._attr_name = device["name"] + " Будильники"
         self._attr_unique_id = device["quasar_info"]["device_id"] + f"_calendar"
 
         self.entity_id = f"calendar.yandex_station_{slugify(self._attr_unique_id)}"
