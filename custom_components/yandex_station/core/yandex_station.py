@@ -185,6 +185,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         self.quasar = quasar
         self.device = device
         self.requests = {}
+        self._hdmi_refresh_task = None
 
         self._attr_available = False
         self._attr_assumed_state = True
@@ -385,7 +386,9 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             self.glagol.update_handler = self.async_set_state
         await self.glagol.start_or_restart()
 
-        await self.init_hdmi_audio()
+        # HDMI cloud refresh не блокирует подключение: позже по policy
+        if self.quasar.policy.effective_cloud_allowed:
+            self._hdmi_refresh_task = asyncio.create_task(self.init_hdmi_audio())
 
     def _apply_hdmi_audio(self, enabled: bool):
         self.hdmi_audio = enabled
@@ -813,6 +816,9 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             await self.init_local_mode()
 
     async def async_will_remove_from_hass(self):
+        if self._hdmi_refresh_task is not None:
+            self._hdmi_refresh_task.cancel()
+            self._hdmi_refresh_task = None
         if self.glagol:
             await self.glagol.stop()
 
