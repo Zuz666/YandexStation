@@ -36,7 +36,7 @@ from .core.yandex_quasar import YandexQuasar
 from .core.yandex_session import YandexSession, safe_error_summary
 from .core.yandex_station import YandexStationBase
 from .hass import hass_utils
-from .core.policy import AuthState, DevicesState, ScenariosState, EntryPolicy, SessionConfig
+from .core.policy import AuthState, DevicesState, EntryPolicy, SessionConfig
 from .core.lifecycle import StableStreamDispatcher, get_lifecycle
 from .core.cache import CacheManager
 
@@ -247,15 +247,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                     )
             await _setup_devices(hass, quasar)
 
-            if (
-                quasar.owned_speakers and policy.enable_scenarios
-                and policy.effective_cloud_allowed
-            ):
-                await quasar.load_scenarios()
-                if quasar.readiness.scenarios_state == ScenariosState.READY:
-                    await quasar.load_speakers()
-            if policy.effective_cloud_updates:
-                quasar.start()
             if hass_utils.incluce_devices(hass, entry):
                 quasar.platforms = platforms = PLATFORMS
                 entry.async_on_unload(async_track_time_interval(
@@ -263,7 +254,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 ))
             else:
                 quasar.platforms = platforms = SPEAKER_PLATFORMS
+            # сначала публикация всех платформ, затем cloud recovery/token-fetch
             await hass.config_entries.async_forward_entry_setups(entry, platforms)
+            if policy.effective_cloud_allowed:
+                quasar.start()
             return True
         except BaseException as error:
             lifecycle.setup_reasons[entry.entry_id] = safe_error_summary(error)

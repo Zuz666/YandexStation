@@ -42,9 +42,14 @@ class YandexEntity(Entity):
         self.quasar = quasar
         self.device = device
         self.config = config
-
-        # "online", "unknown" or key not exist
-        self._attr_available = device.get("state") != "offline"
+        # Metadata defines entity composition; a restored cached state is never
+        # confirmation the device is online (RFC v2 §5). Availability appears
+        # only after a fresh response or event for this device.
+        cloud_fresh = device["id"] in getattr(quasar, "fresh_device_ids", ()) or (
+            getattr(getattr(quasar, "readiness", None), "inventory_source", "cloud")
+            != "cache"
+        )
+        self._attr_available = cloud_fresh and device.get("state") != "offline"
         self._attr_name = device["name"]
         self._attr_should_poll = False
         self._attr_unique_id = device["id"].replace("-", "")
@@ -77,8 +82,9 @@ class YandexEntity(Entity):
         self.quasar.subscribe_update(device["id"], self.on_update)
 
     def on_update(self, device: dict):
+        if getattr(self.quasar, "fresh_device_ids", None) is not None:
+            self.quasar.fresh_device_ids.add(device["id"])
         self._attr_available = device["state"] in ("online", "unknown")
-
         self.internal_update(
             extract_state(device["capabilities"]) if "capabilities" in device else {},
             extract_state(device["properties"]) if "properties" in device else {},
