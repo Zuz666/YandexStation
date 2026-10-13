@@ -182,8 +182,17 @@ async def async_setup_entry(hass, entry, async_add_entities):
         entities.append(YandexInventorySourceSensor(quasar, entry, service_device))
 
         for speaker in quasar.owned_speakers + quasar.owned_modules:
-            entities.append(YandexTransportSensor(quasar, speaker))
-            entities.append(YandexAliceStateSensor(quasar, speaker))
+            did = speaker.get("quasar_info", {}).get("device_id") or speaker.get("id")
+            transport = YandexTransportSensor(quasar, entry, speaker)
+            if hass_utils.migrate_diagnostic_unique_id(
+                hass, entry, "sensor", f"{did}_transport", transport.unique_id
+            ):
+                entities.append(transport)
+            alice = YandexAliceStateSensor(quasar, entry, speaker)
+            if hass_utils.migrate_diagnostic_unique_id(
+                hass, entry, "sensor", f"{did}_alice_state", alice.unique_id
+            ):
+                entities.append(alice)
     for quasar, device, config in hass_utils.incluce_devices(hass, entry):
         if "properties" in config:
             instances = config["properties"]
@@ -226,6 +235,9 @@ class YandexCloudHealthSensor(SensorEntity):
     """Diagnostic sensor reporting the computed cloud readiness state."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_translation_key = "cloud_health"
     _attr_name = "Статус связи с облаком"
     _attr_icon = "mdi:cloud-check"
 
@@ -244,6 +256,7 @@ class YandexCloudHealthSensor(SensorEntity):
     def _handle_readiness_update(self, message):
         if self.hass:
             self.async_write_ha_state()
+
     @property
     def native_value(self) -> str:
         return str(self.quasar.readiness.computed_cloud_state(self.quasar.policy))
@@ -265,6 +278,9 @@ class YandexInventorySourceSensor(SensorEntity):
     """Diagnostic sensor reporting whether catalog is from cloud or cache."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_translation_key = "inventory_source"
     _attr_entity_registry_enabled_default = False
     _attr_name = "Источник каталога"
     _attr_icon = "mdi:database-sync"
@@ -300,30 +316,34 @@ class YandexAliceStateSensor(SensorEntity):
     """Diagnostic sensor reporting speaker Alice voice state."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_should_poll = False
+    _attr_translation_key = "alice_state"
     _attr_entity_registry_enabled_default = False
     _attr_has_entity_name = True
     _attr_name = "Состояние Алисы"
     _attr_icon = "mdi:microphone"
 
-    def __init__(self, quasar: YandexQuasar, device: dict):
+    def __init__(self, quasar: YandexQuasar, entry, device: dict):
         self.quasar = quasar
         self.device = device
         did = device.get("quasar_info", {}).get("device_id") or device.get("id")
         self._did = did
-        self._attr_unique_id = f"{did}_alice_state"
+        self._attr_unique_id = f"{entry.entry_id}_{did}_alice_state"
         self.entity_id = f"sensor.yandex_station_{slugify(self._attr_unique_id)}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, did)},
             name=device["name"],
         )
         self._state = None
-        self._unsub = quasar.subscribe_update(f"{self._did}_glagol", self._on_glagol_update)
+        # Subscribe only after HA has added the entity.
 
     async def async_added_to_hass(self):
         entity = self.device.get("entity")
         if entity and getattr(entity, "local_state", None):
             self._state = entity.local_state.get("aliceState", "IDLE")
-        self.async_on_remove(self._unsub)
+        self.async_on_remove(
+            self.quasar.subscribe_update(f"{self._did}_glagol", self._on_glagol_update)
+        )
 
     def _on_glagol_update(self, data: dict | None):
         if data and "state" in data:
@@ -341,26 +361,32 @@ class YandexAliceStateSensor(SensorEntity):
 class YandexTransportSensor(SensorEntity):
     """Diagnostic sensor reporting current control transport for a speaker (local / cloud / unavailable)."""
 
+    _attr_should_poll = False
+    _attr_translation_key = "transport"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_has_entity_name = True
     _attr_name = "Транспорт управления"
     _attr_icon = "mdi:transit-connection-variant"
 
-    def __init__(self, quasar: YandexQuasar, device: dict):
+    def __init__(self, quasar: YandexQuasar, entry, device: dict):
         self.quasar = quasar
         self.device = device
         did = device.get("quasar_info", {}).get("device_id") or device.get("id")
         self._did = did
-        self._attr_unique_id = f"{did}_transport"
+        self._attr_unique_id = f"{entry.entry_id}_{did}_transport"
         self.entity_id = f"sensor.yandex_station_{slugify(self._attr_unique_id)}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, did)},
             name=device["name"],
         )
-        self._unsub = quasar.subscribe_update(f"{self._did}_glagol", lambda _: self._on_update())
 
     async def async_added_to_hass(self):
-        self.async_on_remove(self._unsub)
+        self.async_on_remove(
+            self.quasar.subscribe_update(f"{self._did}_glagol", lambda _: self._on_update())
+        )
+        self.async_on_remove(
+            self.quasar.subscribe_update("readiness", lambda _: self._on_update())
+        )
 
     def _on_update(self):
         if self.hass:

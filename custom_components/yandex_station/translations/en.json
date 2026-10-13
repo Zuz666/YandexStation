@@ -165,6 +165,48 @@
     }
   },
   "entity": {
+    "sensor": {
+      "cloud_health": {
+        "name": "Статус связи с облаком",
+        "state": {
+          "online": "В сети",
+          "degraded": "Ограниченная связь",
+          "offline": "Автономный режим",
+          "disabled": "Отключено",
+          "reauth_required": "Требуется повторный вход",
+          "unknown": "Неизвестно"
+        }
+      },
+      "inventory_source": {
+        "name": "Источник каталога",
+        "state": {
+          "cloud": "Облако",
+          "cache": "Локальный снимок",
+          "unknown": "Неизвестно"
+        }
+      },
+      "transport": {
+        "name": "Транспорт управления",
+        "state": {
+          "local": "Локальная сеть",
+          "cloud": "Облако",
+          "unavailable": "Недоступен"
+        }
+      },
+      "alice_state": {
+        "name": "Состояние Алисы",
+        "state": {
+          "IDLE": "Ожидает",
+          "LISTENING": "Слушает",
+          "SPEAKING": "Говорит"
+        }
+      }
+    },
+    "binary_sensor": {
+      "local_connection": {
+        "name": "Локальное подключение"
+      }
+    },
     "select": {
       "equalizer": {
         "state": {
