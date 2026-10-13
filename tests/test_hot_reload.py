@@ -25,6 +25,13 @@ SOURCE = Path(__file__).resolve().parents[1] / "custom_components" / "yandex_sta
 def _run_isolated(tmp_path, mode, expected_reason=None):
     target = tmp_path / "custom_components" / "yandex_station"
     shutil.copytree(SOURCE, target)
+    if mode == "entries_storage_indirect_version":
+        path = target / "core" / "cache.py"
+        path.write_text(path.read_text().replace(
+            "SNAPSHOT_VERSION = 1\n",
+            "_NEXT_SNAPSHOT_VERSION = 1\nSNAPSHOT_VERSION = _NEXT_SNAPSHOT_VERSION\n",
+            1,
+        ))
     result = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), mode,
          *([expected_reason] if expected_reason else [])],
@@ -51,6 +58,11 @@ def test_full_reload_changes_real_http_and_core_service(tmp_path, mode):
     ("anchor", "stable_contract_changed"),
     ("module_set", "module_set_changed"),
     ("registration", "registration_or_storage_schema_changed"),
+    ("entries_storage_version", "registration_or_storage_schema_changed"),
+    ("entries_storage_indirect_version", "registration_or_storage_schema_changed"),
+    ("entries_todo_version", "registration_or_storage_schema_changed"),
+    ("entries_todo_key", "registration_or_storage_schema_changed"),
+    ("entries_domain_dependency", "registration_or_storage_schema_changed"),
     ("mid_import", "import_failed"),
     ("rebind", "rebind_failed"),
     ("changed_during_drain", "source_changed_during_reload"),
@@ -174,7 +186,11 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
                 "synthetic-glagol", "yandexstation", "synthetic-candidate"
             )
         else:
-            await cache.async_save_devices([])
+            await cache.async_save_devices(
+                quasar.devices if mode in {
+                    "entries_storage_version", "entries_storage_indirect_version",
+                } else []
+            )
         await cache.async_close()
         hass.config.components.add(DOMAIN)
         from homeassistant.helpers import aiohttp_client
@@ -188,6 +204,11 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
         assert await hass.config_entries.async_setup(entry.entry_id)
         assert entry.state is ConfigEntryState.LOADED, entry.state
         print("Core loaded entry state:", entry.state)
+        if mode in {"entries_todo_version", "entries_todo_key"}:
+            from homeassistant.helpers.storage import Store
+            from custom_components.yandex_station.hass import todo_list
+            todo_store = Store(hass, todo_list.STORE_VERSION, todo_list.STORE_KEY)
+            await todo_store.async_save({"todo.synthetic": ["synthetic-item"]})
         if mode == "entries_retry_mix":
             await hass.config_entries.async_setup("entry-secondary")
             assert hass.config_entries.async_get_entry(
@@ -368,6 +389,31 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
                 _append(root / "core" / "stream.py", "\ndel StreamImplementation\n")
             elif mode == "changed_during_drain":
                 _change_behavior(root, "v2")
+            elif mode == "entries_storage_version":
+                path = root / "core" / "cache.py"
+                path.write_text(path.read_text().replace(
+                    "SNAPSHOT_VERSION = 1\n", "SNAPSHOT_VERSION = 2\n", 1
+                ))
+            elif mode == "entries_storage_indirect_version":
+                path = root / "core" / "cache.py"
+                path.write_text(path.read_text().replace(
+                    "_NEXT_SNAPSHOT_VERSION = 1\n",
+                    "_NEXT_SNAPSHOT_VERSION = 2\n", 1
+                ))
+            elif mode == "entries_domain_dependency":
+                path = root / "core" / "const.py"
+                path.write_text(path.read_text().replace(
+                    'DOMAIN = "yandex_station"\n', 'DOMAIN = "changed_station"\n', 1
+                ))
+            elif mode in {"entries_todo_version", "entries_todo_key"}:
+                path = root / "hass" / "todo_list.py"
+                before, after = (
+                    ("STORE_VERSION = 1\n", "STORE_VERSION = 2\n")
+                    if mode == "entries_todo_version" else
+                    ('STORE_KEY = "yandex_station.todo"\n',
+                     'STORE_KEY = "yandex_station.todo-v2"\n')
+                )
+                path.write_text(path.read_text().replace(before, after, 1))
             if mode == "entries_rollback":
                 async def unload_and_change(*args):
                     _append(root / "core" / "stream.py", "\n# edited during Core unload\n")
@@ -508,6 +554,34 @@ if not builtins.hot_reload_release.wait(10):
             expected = expected_reason
             if expected:
                 assert result["reason"] == expected, result
+                if mode in {
+                    "entries_storage_version", "entries_storage_indirect_version",
+                    "entries_todo_version", "entries_todo_key",
+                    "entries_domain_dependency",
+                }:
+                    assert result["status"] == "restart_required", result
+                    assert entry.state is ConfigEntryState.LOADED
+                    hass.config_entries.async_unload_platforms.assert_not_awaited()
+                    restored = CacheManager(
+                        hass, entry.entry_id, account_login=entry.unique_id
+                    )
+                    try:
+                        snapshot = await restored.async_load()
+                        assert snapshot is not None
+                        if mode in {
+                            "entries_storage_version", "entries_storage_indirect_version",
+                        }:
+                            assert snapshot.devices[0]["id"] == "ordinary-id"
+                            assert snapshot.devices[0]["properties"][0]["state"]["value"] == 23
+                    finally:
+                        await restored.async_close()
+                    if mode in {"entries_todo_version", "entries_todo_key"}:
+                        old_store = Store(
+                            hass, todo_list.STORE_VERSION, todo_list.STORE_KEY
+                        )
+                        assert await old_store.async_load() == {
+                            "todo.synthetic": ["synthetic-item"]
+                        }
                 if expected in {"import_failed", "rebind_failed", "unload_failed"}:
                     assert result["status"] == "restart_required", (result, entry.state)
                     async with client.get(signed) as denied:
