@@ -37,19 +37,17 @@ def update_ha_state(cls, device: dict, **kwargs) -> State:
     device.setdefault("capabilities", [])
     device.setdefault("properties", [])
 
-    asyncio.get_running_loop = lambda: asyncio.new_event_loop()
+    async def update():
+        entity: YandexEntity = cls(FakeQuasar(device), device, **kwargs)
+        try:
+            entity.hass = HomeAssistant("")
+        except TypeError:
+            entity.hass = HomeAssistant()
+        entity.entity_id = "domain.object_id"
+        await entity.async_update_ha_state(True)
+        return entity.hass.states.get(entity.entity_id)
 
-    entity: YandexEntity = cls(FakeQuasar(device), device, **kwargs)
-    try:
-        entity.hass = HomeAssistant("")
-    except TypeError:
-        entity.hass = HomeAssistant()
-    entity.entity_id = "domain.object_id"
-
-    coro = entity.async_update_ha_state(True)
-    entity.hass.loop.run_until_complete(coro)
-
-    return entity.hass.states.get(entity.entity_id)
+    return asyncio.run(update())
 
 
 # JSON => Python
