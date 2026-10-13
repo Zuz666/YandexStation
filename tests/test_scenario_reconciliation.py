@@ -14,19 +14,13 @@ from custom_components.yandex_station.core.cache import (
 from custom_components.yandex_station.core.policy import (
     EntryPolicy, Readiness, ScenariosState, SendOutcome,
 )
-from custom_components.yandex_station.core.yandex_quasar import YandexQuasar, encode
+from custom_components.yandex_station.core.yandex_quasar import (
+    YandexQuasar, encode, scenario_speaker_tts,
+)
 from custom_components.yandex_station.core.yandex_session import CloudRequestError
 from custom_components.yandex_station.core.yandex_station import YandexStation
 from .test_cache import device_record
 
-def scenario_steps(device_id):
-    return [{
-        "action": "scenarios.steps.actions.v2",
-        "parameters": {"items": [{
-            "type": "step.action.item.device",
-            "value": {"id": device_id},
-        }]},
-    }]
 
 
 class ScenarioCommandPeer:
@@ -98,7 +92,7 @@ def test_scenario_match_binds_and_saves_confirmed(tmp_path):
         quasar.devices = [speaker]
         quasar.scenarios = [
             {"id": "scen_existing_id", "triggers": [{"value": hash_code}],
-             "steps": scenario_steps(device_id)}
+             "steps": scenario_speaker_tts("ХА dev_123", hash_code, device_id, "пустышка")["steps"]}
         ]
 
         quasar.add_scenario = AsyncMock()
