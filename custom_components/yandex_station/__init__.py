@@ -183,6 +183,17 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
 async def async_rebind_runtime(hass: HomeAssistant):
     """Rebind reloadable targets without replacing stable service dispatchers."""
     lifecycle = get_lifecycle(hass)
+    for item in tuple(hass.data.values()):
+        cache_data = getattr(item, "cache_data", None)
+        if cache_data is not None:
+            for loaded in getattr(cache_data, "loaded", {}).values():
+                if isinstance(loaded, set):
+                    loaded.discard(DOMAIN)
+            for categories in getattr(cache_data, "cache", {}).values():
+                if isinstance(categories, dict):
+                    for by_domain in categories.values():
+                        if isinstance(by_domain, dict):
+                            by_domain.pop(DOMAIN, None)
 
     def import_conversation():
         try:
