@@ -235,6 +235,14 @@ class YandexCloudHealthSensor(SensorEntity):
         self.entity_id = f"sensor.yandex_station_{slugify(self._attr_unique_id)}"
         self._attr_device_info = device_info
 
+    async def async_added_to_hass(self):
+        self.async_on_remove(
+            self.quasar.subscribe_update("readiness", self._handle_readiness_update)
+        )
+
+    def _handle_readiness_update(self, message):
+        if self.hass:
+            self.async_write_ha_state()
     @property
     def native_value(self) -> str:
         return str(self.quasar.readiness.computed_cloud_state(self.quasar.policy))
@@ -266,6 +274,15 @@ class YandexInventorySourceSensor(SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_inventory_source"
         self.entity_id = f"sensor.yandex_station_{slugify(self._attr_unique_id)}"
         self._attr_device_info = device_info
+
+    async def async_added_to_hass(self):
+        self.async_on_remove(
+            self.quasar.subscribe_update("readiness", self._handle_readiness_update)
+        )
+
+    def _handle_readiness_update(self, message):
+        if self.hass:
+            self.async_write_ha_state()
 
     @property
     def native_value(self) -> str:

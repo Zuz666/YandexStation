@@ -7,7 +7,13 @@ from aiohttp import WSMsgType
 
 from .quasar_info import has_quasar
 from .yandex_session import YandexSession
-from .policy import DevicesState, EntryPolicy, Readiness
+from .policy import (
+    AuthState,
+    DevicesState,
+    EntryPolicy,
+    Readiness,
+    ScenariosState,
+)
 from .cache import (
     CacheManager,
     SCENARIO_STATE_CONFIRMED,
@@ -293,7 +299,7 @@ class YandexQuasar(Dispatcher):
             self.devices.extend(
                 {**device, "house_name": house["name"]} for device in house["all"]
             )
-
+        self.readiness.auth_state = AuthState.VALID
         self.readiness.devices_state = DevicesState.READY
         self.readiness.inventory_source = "cloud"
 
@@ -303,6 +309,10 @@ class YandexQuasar(Dispatcher):
         if self.policy.enable_scenarios and self.policy.effective_cloud_allowed:
             await self.load_scenarios()
             await self.load_speakers()
+        else:
+            self.readiness.scenarios_state = ScenariosState.DISABLED
+
+        self.dispatch_update("readiness", {})
     @property
     def speakers(self):
         return [i for i in self.devices if has_quasar(i) and i.get("capabilities")]
@@ -406,12 +416,15 @@ class YandexQuasar(Dispatcher):
 
     async def load_scenarios(self):
         """Получает список сценариев, которые мы ранее создали."""
-        r = await self.session.get(f"https://iot.quasar.yandex.ru/m/user/scenarios")
-        resp = await r.json()
-        assert resp["status"] == "ok", resp
-
-        self.scenarios = resp["scenarios"]
-
+        try:
+            r = await self.session.get("https://iot.quasar.yandex.ru/m/user/scenarios")
+            resp = await r.json()
+            assert resp["status"] == "ok", resp
+            self.scenarios = resp["scenarios"]
+            self.readiness.scenarios_state = ScenariosState.READY
+        except Exception as e:
+            _LOGGER.debug(f"Ошибка загрузки сценариев: {e!r}")
+            self.readiness.scenarios_state = ScenariosState.UNAVAILABLE
     async def update_scenario(self, name: str):
         # check if we known scenario name
         sid = next((i["id"] for i in self.scenarios if i["name"] == name), None)
