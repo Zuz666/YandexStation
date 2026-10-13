@@ -118,6 +118,9 @@ def safe_error_summary(error: Exception) -> str:
         "cloud_ws_credentials_not_allowed",
         "local_ws_credentials_not_allowed", "csrf_unavailable",
         "x_token_required", "music_token_unavailable", "inventory_unavailable",
+        "device_token_unavailable", "cache_unavailable", "cache_write_failed",
+        "cache_closed", "cache_account_mismatch",
+        "hdmi_config_unavailable",
     }:
         return str(error)
     return name
