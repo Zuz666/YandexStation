@@ -238,6 +238,9 @@ class YandexQuasar(Dispatcher):
         self.scenarios = None
         self.device_tokens = {}
         self.stopping = False
+        self.owned_glagol_ids: set[str] = set()
+        self.cached_glagol_ids: set[str] = set()
+        self.yaml_glagol_hosts: set[str] = set()
         self._device_command_locks = {}
         self._reconciliation_lock = asyncio.Lock()
         self.online_updated = asyncio.Event()
@@ -258,6 +261,7 @@ class YandexQuasar(Dispatcher):
         if self.session is not None and self.session.account_uid is None:
             self.session.account_uid = snapshot.account_uid
         for dev in self.speakers + self.modules:
+            self.cached_glagol_ids.add(dev["quasar_info"]["device_id"])
             did = dev.get("quasar_info", {}).get("device_id")
             if did and did in snapshot.local_config:
                 cfg = snapshot.local_config[did]
@@ -275,7 +279,7 @@ class YandexQuasar(Dispatcher):
             snapshot = await self.cache_manager.async_load()
 
         if snapshot is not None:
-            # Cache-first: publish local entities immediately before network (RFC v2 §3.1)
+            # Restore the last-known-good account catalog and local metadata.
             self._restore_from_snapshot(snapshot)
             if self.policy.effective_cloud_allowed and not self.policy.effective_use_cached_devices:
                 try:
@@ -342,7 +346,10 @@ class YandexQuasar(Dispatcher):
         self.readiness.devices_state = DevicesState.READY
         self.readiness.inventory_source = "cloud"
 
-        if self.policy.enable_scenarios and self.policy.effective_cloud_allowed:
+        if (
+            self.owned_glagol_ids and self.policy.enable_scenarios
+            and self.policy.effective_cloud_allowed
+        ):
             await self.load_scenarios()
             if self.readiness.scenarios_state == ScenariosState.READY:
                 await self.load_speakers()
@@ -351,7 +358,7 @@ class YandexQuasar(Dispatcher):
                     "Scenarios catalog is %s; skipping speaker scenario reconciliation",
                     self.readiness.scenarios_state,
                 )
-        else:
+        elif not self.policy.enable_scenarios or not self.policy.effective_cloud_allowed:
             self.readiness.scenarios_state = ScenariosState.DISABLED
 
         self.dispatch_update("readiness", {})
@@ -363,6 +370,20 @@ class YandexQuasar(Dispatcher):
     def modules(self):
         # modules don't have cloud scenarios
         return [i for i in self.devices if has_quasar(i) and not i.get("capabilities")]
+
+    @property
+    def owned_speakers(self):
+        return [
+            device for device in self.speakers
+            if device["quasar_info"]["device_id"] in self.owned_glagol_ids
+        ]
+
+    @property
+    def owned_modules(self):
+        return [
+            device for device in self.modules
+            if device["quasar_info"]["device_id"] in self.owned_glagol_ids
+        ]
 
     async def load_speakers(self):
         if self.scenarios is None:
@@ -385,7 +406,7 @@ class YandexQuasar(Dispatcher):
             if self.cache_manager and self.cache_manager.snapshot:
                 creation_journal = self.cache_manager.snapshot.scenario_creation
 
-            for speaker in self.speakers:
+            for speaker in self.owned_speakers:
                 device_id: str = speaker["id"]
                 hash_code = encode(device_id)
 
@@ -529,7 +550,11 @@ class YandexQuasar(Dispatcher):
             async with lock:
                 phase = "admission"
                 sid = device.get("scenario_id")
-                if not self.policy.effective_cloud_allowed:
+                if self.stopping or device.get("quasar_info", {}).get(
+                    "device_id"
+                ) not in self.owned_glagol_ids:
+                    reason = "speaker_not_owned"
+                elif not self.policy.effective_cloud_allowed:
                     reason = "cloud_blocked_by_policy"
                 elif not self.policy.enable_scenarios:
                     reason = "scenarios_disabled"

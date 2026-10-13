@@ -20,7 +20,7 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass, entry, async_add_entities):
     quasar: YandexQuasar = hass.data[DOMAIN][entry.unique_id]
     # can't use update_before_add because it works for disabled entities
-    async_add_entities([YandexCalendar(quasar, sp) for sp in quasar.speakers])
+    async_add_entities([YandexCalendar(quasar, sp) for sp in quasar.owned_speakers])
 
 
 class YandexCalendar(CalendarEntity):

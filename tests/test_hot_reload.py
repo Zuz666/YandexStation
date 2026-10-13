@@ -128,6 +128,9 @@ def test_lifecycle_manager_opt_in():
 def test_hot_reload_two_entries_success():
     async def scenario():
         hass = MagicMock()
+        hass.data = {"yandex_station": {"config": {}, "speakers": {}}}
+        hass.services = MagicMock()
+        hass.async_add_executor_job = AsyncMock(side_effect=lambda fn, *args: fn(*args))
         entry1 = MagicMock(entry_id="e1", disabled_by=None)
         entry1.state = "loaded"
         entry2 = MagicMock(entry_id="e2", disabled_by=None)
@@ -138,8 +141,10 @@ def test_hot_reload_two_entries_success():
 
         context = StreamContext(hass=hass, hass_url="http://127.0.0.1:8123")
         mgr = LifecycleManager(context=context)
-        with patch("importlib.reload", side_effect=lambda m: m):
-            res = await mgr.async_hot_reload(hass, enable_code_reload=True)
+        with patch("custom_components.yandex_station.core.utils.get_zeroconf_singleton", AsyncMock(return_value=MagicMock())):
+            with patch("custom_components.yandex_station.core.yandex_glagol.YandexIOListener.start"):
+                with patch("importlib.reload", side_effect=lambda m: m):
+                    res = await mgr.async_hot_reload(hass, enable_code_reload=True)
         assert res.get("success") is True
         assert res.get("setup_results") == {"e1": True, "e2": True}
         assert hass.config_entries.async_unload.call_count == 2
