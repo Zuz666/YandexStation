@@ -1223,9 +1223,8 @@ yandex_station:
 
 | Сенсор | Тип | Состояния | По умолчанию | Описание и атрибуты |
 |---|---|---|---|---|
-| `sensor.yandex_station_cloud_health` | Enum | `online`, `degraded`, `offline`, `reauth_required`, `unknown` | **Включен** | Сводный статус здоровья облачного слоя. Атрибуты: `auth_state` (статус кук/токена), `csrf_state`, `devices_state`, `scenarios_state`, `inventory_source`. |
+| `sensor.yandex_station_cloud_health` | Enum | `online`, `degraded`, `offline`, `reauth_required`, `unknown` | **Включен** | Сводный статус здоровья облачного слоя. Атрибуты:<br>• `auth_state`: `valid` (сессия авторизована), `reauth_required` (нужен повторный вход), `unknown`.<br>• `csrf_state`: `unknown` (штатно при старте: токен запрашивается **лениво** только при отправке первой изменяющей команды в облако), `candidate` (токен успешно получен со страницы и готов к командам), `unavailable` (сбой получения токена).<br>• `devices_state`: `ready` (каталог устройств готов), `unavailable`.<br>• `scenarios_state`: `ready` (сценарии загружены), `disabled` (отключены в настройках), `unavailable`.<br>• `inventory_source`: `cloud` (загружено из сети) или `cache` (поднято из локального снимка). |
 | `sensor.yandex_station_inventory_source` | Текст | `cloud`, `cache` | *Отключен в реестре* | Источник текущего каталога устройств: загружен из сети (`cloud`) или поднят из аварийного локального снимка (`cache`). Атрибуты: `last_snapshot_at`. |
-
 #### Примеры автоматизаций с новыми сенсорами
 
 **1. Оповещение в Telegram при потере локальной связи с колонкой:**

@@ -161,6 +161,76 @@ def test_quasar_sync_transitions_readiness_to_online():
         assert health_sensor.native_value == "online"
 
     asyncio.run(scenario())
+def test_sensor_subscribes_to_readiness_updates_and_writes_state():
+    async def scenario():
+        session = MagicMock()
+        policy = EntryPolicy()
+        readiness = Readiness()
+        quasar = YandexQuasar(session, policy=policy, readiness=readiness)
+
+        entry = MagicMock()
+        entry.entry_id = "test_e2"
+        service_device = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name="Яндекс",
+            entry_type=DeviceEntryType.SERVICE,
+        )
+        health_sensor = YandexCloudHealthSensor(quasar, entry, service_device)
+        health_sensor.hass = MagicMock()
+        health_sensor.async_write_ha_state = MagicMock()
+
+        await health_sensor.async_added_to_hass()
+
+        # Dispatching readiness update must trigger async_write_ha_state
+        readiness.auth_state = AuthState.VALID
+        readiness.devices_state = DevicesState.READY
+        readiness.scenarios_state = ScenariosState.READY
+        quasar.dispatch_update("readiness", {})
+
+        health_sensor.async_write_ha_state.assert_called_once()
+        assert health_sensor.native_value == "online"
+
+    asyncio.run(scenario())
+
+
+def test_quasar_sync_scenarios_failure_degrades_readiness():
+    async def scenario():
+        session = MagicMock()
+        policy = EntryPolicy()
+        readiness = Readiness()
+        quasar = YandexQuasar(session, policy=policy, readiness=readiness)
+
+        mock_resp_devices = AsyncMock()
+        mock_resp_devices.json.return_value = {
+            "status": "ok",
+            "households": [{"name": "Home", "all": []}],
+        }
+
+        async def fake_get(url, **kwargs):
+            if "scenarios" in url:
+                raise RuntimeError("500 Internal Server Error")
+            return mock_resp_devices
+
+        session.get = AsyncMock(side_effect=fake_get)
+
+        await quasar.init()
+
+        assert readiness.auth_state == AuthState.VALID
+        assert readiness.devices_state == DevicesState.READY
+        assert readiness.scenarios_state == ScenariosState.UNAVAILABLE
+
+        entry = MagicMock()
+        entry.entry_id = "test_e3"
+        service_device = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name="Яндекс",
+            entry_type=DeviceEntryType.SERVICE,
+        )
+        health_sensor = YandexCloudHealthSensor(quasar, entry, service_device)
+        assert health_sensor.native_value == "degraded"
+
+    asyncio.run(scenario())
+
 
 def test_speaker_transport_and_alice_sensors():
     async def scenario():
