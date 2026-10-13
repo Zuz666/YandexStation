@@ -60,6 +60,12 @@ def test_diagnostics_account_device_and_missing_runtime_are_json_safe(tmp_path):
             runtime.readiness.auth_state = AuthState.VALID
             runtime.readiness.devices_state = DevicesState.READY
             lifecycle.runtimes[entry.entry_id] = runtime
+            lifecycle.last_reload_result = {
+                "status": "partial", "reason": "entry_setup_failed",
+                "entries": {"SYNTHETIC_ACCOUNT_SECRET": "setup_retry"},
+                "applied_modules": ["SYNTHETIC_MODULE_SECRET"],
+                "timings_ms": {"drain_ms": 1200, "unexpected": "SYNTHETIC_VALUE_SECRET"},
+            }
             hass.data["system_log"] = MagicMock(records={
                 ("SYNTHETIC_LOG_SECRET",): MagicMock(
                     to_dict=lambda: {"message": "SYNTHETIC_LOG_SECRET"}
@@ -72,6 +78,14 @@ def test_diagnostics_account_device_and_missing_runtime_are_json_safe(tmp_path):
                 assert account["scenario_journal"]["pending_unknown"] == 1
                 assert account["devices"][0]["scenario_journal_state"] == "pending_unknown"
                 assert account["devices"][0]["kind"] == "smart_speaker"
+                assert account["reload"] == {
+                    "status": "partial", "reason": "entry_setup_failed",
+                    "entry_state_counts": {
+                        "loaded": 0, "setup_retry": 1, "setup_error": 0,
+                        "not_loaded": 0, "membership_changed": 0,
+                    },
+                    "timings_ms": {"drain_ms": 1200},
+                }
                 service = await async_get_device_diagnostics(hass, entry, account_device)
                 assert service == account
                 speaker = await async_get_device_diagnostics(hass, entry, physical)
@@ -97,6 +111,8 @@ def test_diagnostics_account_device_and_missing_runtime_are_json_safe(tmp_path):
                     for secret in (
                         "SECRET", "synthetic-cloud-id", "synthetic-glagol-id",
                         "previous", "music", "uid-1", "10.0.0.2",
+                        "SYNTHETIC_ACCOUNT_SECRET", "SYNTHETIC_MODULE_SECRET",
+                        "SYNTHETIC_VALUE_SECRET",
                     ):
                         assert secret not in serialized
 
