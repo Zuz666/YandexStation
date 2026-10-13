@@ -68,26 +68,25 @@ class YandexGlagol:
             "device_id": self.device["quasar_info"]["device_id"],
             "platform": self.device["quasar_info"]["platform"],
         }
-        r = await self.session.get(
+        r = await self.session.request_glagol(
             "https://quasar.yandex.net/glagol/token",
             role="glagol_token",
             params=payload,
         )
         # @dext0r: fix bug with wrong content-type
         resp = json.loads(await r.text())
-        assert resp["status"] == "ok", resp
-        self.device_token = resp["token"]
+        token = resp.get("token") if isinstance(resp, dict) else None
+        if not isinstance(token, str) or not token or resp.get("status") != "ok":
+            raise RuntimeError("device_token_unavailable")
         if self.quasar:
-            did = self.device.get("quasar_info", {}).get("device_id")
-            if did:
-                self.quasar.device_tokens[did] = self.device_token
-                if getattr(self.quasar, "cache_manager", None):
-                    asyncio.create_task(
-                        self.quasar.cache_manager.async_save_device_token(
-                            did, self.device_token
-                        )
-                    )
-        return self.device_token
+            did, platform = payload["device_id"], payload["platform"]
+            if self.quasar.cache_manager:
+                await self.quasar.cache_manager.async_save_device_token(
+                    did, platform, token
+                )
+            self.quasar.device_tokens.setdefault(did, {})[platform] = token
+        self.device_token = token
+        return token
     async def start_or_restart(self):
         # first time
         if not self.url:

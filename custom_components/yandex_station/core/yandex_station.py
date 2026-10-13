@@ -40,6 +40,7 @@ from .quasar_info import QUASAR_INFO, is_tv
 from .yandex_glagol import YandexGlagol
 from .yandex_music import get_file_info
 from .yandex_quasar import YandexQuasar
+from .yandex_session import safe_error_summary
 from ..hass import shopping_list, todo_list
 
 _LOGGER = logging.getLogger(__name__)
@@ -219,6 +220,12 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         self.entity_id += f"_{slugify(self._attr_unique_id)}"
 
         self.internal_update_is_on(device)
+        self.hdmi_audio = None
+        if (
+            self.device_platform in ("yandexstation", "yandexstation_2")
+            and isinstance(device.get("hdmi_audio"), bool)
+        ):
+            self._apply_hdmi_audio(device["hdmi_audio"])
 
         quasar.subscribe_update(device["id"], self.on_update)
 
@@ -349,8 +356,10 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
     async def init_local_mode(self):
         # self.debug(f"Init local mode (hass: {self.hass is not None})")
         if not self.glagol:
-            did = self.device.get("quasar_info", {}).get("device_id")
-            token = self.quasar.device_tokens.get(did) if did else None
+            info = self.device["quasar_info"]
+            token = self.quasar.device_tokens.get(info["device_id"], {}).get(
+                info["platform"]
+            )
             self.glagol = YandexGlagol(
                 self.quasar.session, self.device, token=token, quasar=self.quasar
             )
@@ -358,6 +367,14 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         await self.glagol.start_or_restart()
 
         await self.init_hdmi_audio()
+
+    def _apply_hdmi_audio(self, enabled: bool):
+        self.hdmi_audio = enabled
+        self.device["hdmi_audio"] = enabled
+        # for HomeKit source list support
+        self._attr_device_class = MediaPlayerDeviceClass.TV
+        self._attr_source = SOURCE_HDMI if enabled else SOURCE_STATION
+        self._attr_source_list = [SOURCE_STATION, SOURCE_HDMI]
 
     async def init_hdmi_audio(self):
         if self._attr_source_list:
@@ -370,15 +387,20 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
 
         try:
             config, _ = await self.quasar.get_device_config(self.device)
-            self.hdmi_audio = config.get("hdmiAudio", False)
-        except:
-            _LOGGER.warning("Не получается получить настройки HDMI")
+            enabled = config.get("hdmiAudio", False)
+            if not isinstance(enabled, bool):
+                raise ValueError("hdmi_config_unavailable")
+        except Exception as error:
+            _LOGGER.warning(
+                "Не получается получить настройки HDMI (%s)", safe_error_summary(error)
+            )
             return
 
-        # for HomeKit source list support
-        self._attr_device_class = MediaPlayerDeviceClass.TV
-        self._attr_source = SOURCE_HDMI if self.hdmi_audio else SOURCE_STATION
-        self._attr_source_list = [SOURCE_STATION, SOURCE_HDMI]
+        self._apply_hdmi_audio(enabled)
+        if self.quasar.cache_manager:
+            await self.quasar.cache_manager.async_save_local_config(
+                self.device["quasar_info"]["device_id"], hdmi_audio=enabled
+            )
 
     async def sync_hdmi_audio(self):
         # if HDMI supported and state loaded
@@ -403,11 +425,17 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             else:
                 config.pop("hdmiAudio", None)
             await self.quasar.set_device_config(self.device, config, version)
-        except:
-            _LOGGER.warning("Не получается изменить настройки HDMI")
+        except Exception as error:
+            _LOGGER.warning(
+                "Не получается изменить настройки HDMI (%s)", safe_error_summary(error)
+            )
             return
 
-        self.hdmi_audio = enabled
+        self._apply_hdmi_audio(enabled)
+        if self.quasar.cache_manager:
+            await self.quasar.cache_manager.async_save_local_config(
+                self.device["quasar_info"]["device_id"], hdmi_audio=enabled
+            )
 
     async def response(self, card: dict, request_id: str):
         if not card:

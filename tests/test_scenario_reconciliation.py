@@ -347,7 +347,7 @@ def test_untrusted_journal_aborts_creation():
     async def scenario():
         session = MagicMock()
         cache = MagicMock(spec=CacheManager)
-        cache.is_untrusted = True
+        cache.scenario_creation_trusted = False
         cache.snapshot = None
 
         quasar = YandexQuasar(session, cache_manager=cache)

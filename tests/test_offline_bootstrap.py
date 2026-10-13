@@ -70,8 +70,8 @@ def test_offline_bootstrap_from_snapshot(tmp_path):
                 "glagol_did_2": {"host": "127.0.0.1", "port": 1961},
             },
             device_tokens={
-                "glagol_did_1": {"token": "token_for_1", "state": "valid"},
-                "glagol_did_2": {"token": "token_for_2", "state": "valid"},
+                "glagol_did_1": {"yandexstation": {"token": "token_for_1", "state": "valid"}},
+                "glagol_did_2": {"yandexmodule": {"token": "token_for_2", "state": "valid"}},
             },
         )
         mock_session = MagicMock()
@@ -90,8 +90,8 @@ def test_offline_bootstrap_from_snapshot(tmp_path):
                     assert len(quasar.modules) == 1
                     assert quasar.policy.force_offline_local is True
                     assert quasar.policy.effective_cloud_allowed is False
-                    assert quasar.device_tokens["glagol_did_1"] == "token_for_1"
-                    assert quasar.device_tokens["glagol_did_2"] == "token_for_2"
+                    assert quasar.device_tokens["glagol_did_1"]["yandexstation"] == "token_for_1"
+                    assert quasar.device_tokens["glagol_did_2"]["yandexmodule"] == "token_for_2"
                     mock_refresh.assert_not_called()
 
     asyncio.run(scenario())
@@ -234,7 +234,7 @@ def test_offline_acceptance_a1_full_lifecycle(tmp_path):
             revision=1,
             devices=snapshot_devices,
             local_config={"glagol_1": {"host": "127.0.0.1", "port": 1961}},
-            device_tokens={"glagol_1": {"token": "glagol_token_1", "state": "valid"}},
+            device_tokens={"glagol_1": {"yandexstation": {"token": "glagol_token_1", "state": "valid"}}},
         )
 
         mock_session = MagicMock()
@@ -275,5 +275,88 @@ def test_offline_acceptance_a1_full_lifecycle(tmp_path):
                     )
                 mock_session.get.assert_not_called()
                 mock_session.ws_connect.assert_not_called()
+
+    asyncio.run(scenario())
+
+
+def test_issued_glagol_token_is_authenticated_and_saved_before_use(tmp_path):
+    from custom_components.yandex_station.core.yandex_glagol import YandexGlagol
+    from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
+    from custom_components.yandex_station.core.yandex_session import YandexSession
+    from .test_cache import cache_runtime, device_record, read_storage
+    from .test_session_resilience import make_client, make_response
+
+    async def scenario():
+        async with cache_runtime(tmp_path) as (manager, _):
+            cache = manager()
+            device = device_record()
+            await cache.async_save_devices([device])
+            client = make_client()
+
+            async def token_peer(url, **kwargs):
+                if kwargs.get("headers", {}).get("Authorization") != "OAuth synthetic-music":
+                    return make_response(401)
+                assert kwargs["params"] == {
+                    "device_id": "glagol-1", "platform": "yandexstation",
+                }
+                return make_response(200, text='{"status":"ok","token":"issued-candidate"}')
+
+            client.get = AsyncMock(side_effect=token_peer)
+            session = YandexSession(client, music_token="synthetic-music")
+            quasar = YandexQuasar(session, cache_manager=cache)
+            glagol = YandexGlagol(session, device, quasar=quasar)
+            saving, release = asyncio.Event(), asyncio.Event()
+            original_save = cache.async_save_device_token
+
+            async def held_save(*args):
+                saving.set()
+                await release.wait()
+                return await original_save(*args)
+
+            with patch.object(cache, "async_save_device_token", side_effect=held_save):
+                issuing = asyncio.create_task(glagol.get_device_token())
+                try:
+                    await asyncio.wait_for(saving.wait(), 2)
+                    assert glagol.device_token is None
+                    assert quasar.device_tokens == {}
+                    release.set()
+                    assert await issuing == "issued-candidate"
+                finally:
+                    release.set()
+                    issuing.cancel()
+                    await asyncio.gather(issuing, return_exceptions=True)
+            assert quasar.device_tokens == {"glagol-1": {"yandexstation": "issued-candidate"}}
+            assert read_storage(cache)["device_tokens"]["glagol-1"]["yandexstation"]["token"] == "issued-candidate"
+            await session.async_stop()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("hdmi_audio", [True, False, None])
+def test_cached_hdmi_state_restores_without_cloud_read(tmp_path, hdmi_audio):
+    from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
+    from custom_components.yandex_station.core.yandex_station import (
+        SOURCE_HDMI, SOURCE_STATION, YandexStation,
+    )
+    from .test_cache import cache_runtime, device_record
+
+    async def scenario():
+        async with cache_runtime(tmp_path) as (manager, _):
+            cache = manager()
+            await cache.async_save_devices([device_record()])
+            if hdmi_audio is not None:
+                await cache.async_save_local_config("glagol-1", hdmi_audio=hdmi_audio)
+                await cache.async_flush()
+            restored = await manager().async_load()
+            quasar = YandexQuasar(None, policy=EntryPolicy(force_offline_local=True))
+            quasar._restore_from_snapshot(restored)
+            quasar.get_device_config = AsyncMock(side_effect=AssertionError("offline cloud fetch"))
+            station = YandexStation(quasar, quasar.speakers[0])
+            await station.init_hdmi_audio()
+            assert station.hdmi_audio is hdmi_audio
+            assert station.source == (
+                None if hdmi_audio is None else SOURCE_HDMI if hdmi_audio else SOURCE_STATION
+            )
+            quasar.get_device_config.assert_not_awaited()
 
     asyncio.run(scenario())
