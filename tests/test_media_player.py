@@ -1,6 +1,15 @@
+import asyncio
+import logging
+from unittest.mock import MagicMock
+
+import pytest
+
 from homeassistant.components.media_player import MediaPlayerEntityFeature
 
 from custom_components.yandex_station.media_player import YandexMediaPlayer
+from custom_components.yandex_station.core.utils import YandexDebug
+from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
+from custom_components.yandex_station.core.yandex_station import YandexStation
 from . import false, null, true, update_ha_state
 
 
@@ -180,3 +189,60 @@ def test_tv_lg():
             | MediaPlayerEntityFeature.PLAY
         ),
     }
+
+
+@pytest.mark.parametrize("local", [True, False])
+@pytest.mark.parametrize(
+    ("media_type", "media_id", "source"),
+    [
+        ("application/unknown", "PRIVATE_PHRASE", "text"),
+        (
+            "audio/unknown:PRIVATE_SKILL",
+            "custom://user:PRIVATE_PASSWORD@example.invalid/asset.bin?token=PRIVATE_QUERY",
+            "url",
+        ),
+    ],
+)
+def test_unsupported_media_keeps_safe_diagnostic_context(
+    local, media_type, media_id, source, caplog
+):
+    async def scenario():
+        station = YandexStation(
+            YandexQuasar(MagicMock()),
+            {
+                "id": "cloud-device",
+                "name": "Synthetic station",
+                "capabilities": [],
+                "quasar_info": {
+                    "device_id": "glagol-device",
+                    "platform": "yandexstation",
+                },
+            },
+        )
+        station.entity_id = "media_player.synthetic_station"
+        if local:
+            station.local_state = {"playerState": {"isPlaying": False}}
+        with caplog.at_level(logging.DEBUG):
+            await station.async_play_media(media_type, media_id, extra={})
+
+        messages = [record.getMessage() for record in caplog.records]
+        warning = next(
+            record for record in caplog.records if record.levelno == logging.WARNING
+        )
+        message = warning.getMessage()
+        assert f"transport={'local' if local else 'cloud'}" in message
+        assert f"media_type={media_type.partition(':')[0]}" in message
+        assert f"source={source}" in message
+        assert station.entity_id in message
+        for secret in ("PRIVATE_PHRASE", "PRIVATE_PASSWORD", "PRIVATE_QUERY", "PRIVATE_SKILL"):
+            assert all(secret not in message for message in messages)
+
+        # The integration's debug page must render parameterized log fields too.
+        handler = object.__new__(YandexDebug)
+        handler.text = ""
+        handler.handle(warning)
+        assert f"source={source}" in handler.text
+        assert f"media_type={media_type.partition(':')[0]}" in handler.text
+        assert "%s" not in handler.text
+
+    asyncio.run(scenario())

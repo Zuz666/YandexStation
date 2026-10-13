@@ -16,6 +16,7 @@ from .core.entity import YandexEntity
 from .core.image import draw_cover, draw_lyrics, draw_none
 from .core.yandex_music import get_lyrics
 from .core.yandex_quasar import YandexQuasar
+from .core.yandex_session import safe_error_summary
 from .core.yandex_station import YandexStation
 from .hass import hass_utils
 
@@ -78,10 +79,13 @@ class YandexSnapshotCamera(Camera, YandexEntity):
     ) -> bytes | None:
         try:
             url = self.device["parameters"]["snapshot_url"] + "/current.jpg"
-            r = await self.quasar.session.get(url, timeout=15)
+            r = await self.quasar.session.get(url, role="music")
             return await r.read()
-        except Exception as e:
-            _LOGGER.debug(f"Can't get snapshot: {repr(e)}")
+        except Exception as error:
+            _LOGGER.debug(
+                "Camera snapshot unavailable: entity=%s role=music reason=%s",
+                self.entity_id, safe_error_summary(error),
+            )
             return None
 
 

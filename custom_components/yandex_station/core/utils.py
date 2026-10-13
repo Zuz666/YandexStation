@@ -81,7 +81,7 @@ class YandexDebug(logging.Handler, HomeAssistantView):
         dt = datetime.fromtimestamp(rec.created).strftime("%Y-%m-%d %H:%M:%S")
         module = "main" if rec.module == "__init__" else rec.module
         # remove private data
-        msg = RE_PRIVATE.sub("...", str(rec.msg))
+        msg = RE_PRIVATE.sub("...", rec.getMessage())
         self.text += f"{dt}  {rec.levelname:7}  {module:13}  {msg}\n"
 
     async def get(self, request: web.Request):
@@ -231,6 +231,7 @@ async def get_media_payload(session: YandexSession, media_id: str) -> dict | Non
                     r = await session.get(
                         "https://ott-widget.kinopoisk.ru/ott/api/kp-film-status/",
                         params={"kpFilmId": m[1]},
+                        role="music",
                     )
                     resp = await r.json()
                     return play_video_by_descriptor("kinopoisk", resp["uuid"])
@@ -243,6 +244,7 @@ async def get_media_payload(session: YandexSession, media_id: str) -> dict | Non
                     r = await session.post(
                         "https://api-gateway-rest.bookmate.yandex.net/audiobook/album",
                         json={"audiobook_uuid": m[1]},
+                        role="music",
                     )
                     resp = await r.json()
                     return {
@@ -390,8 +392,9 @@ async def get_playlist_uid(
     session: YandexSession, username: str, playlist_id: str
 ) -> int | None:
     try:
-        r = await session.get(
+        r = await session.request_glagol(
             f"https://api.music.yandex.net/users/{username}/playlists/{playlist_id}",
+            role="music",
         )
         resp = await r.json()
         return resp["result"]["owner"]["uid"]

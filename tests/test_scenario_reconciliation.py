@@ -1,14 +1,60 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from homeassistant.components.media_player import MediaPlayerState
+from homeassistant.exceptions import HomeAssistantError
+
 from custom_components.yandex_station.core.cache import (
     CacheManager,
     SCENARIO_STATE_CONFIRMED,
     SCENARIO_STATE_PENDING,
     StationSnapshot,
 )
-from custom_components.yandex_station.core.policy import EntryPolicy
+from custom_components.yandex_station.core.policy import (
+    EntryPolicy, Readiness, ScenariosState, SendOutcome,
+)
 from custom_components.yandex_station.core.yandex_quasar import YandexQuasar, encode
+from custom_components.yandex_station.core.yandex_session import CloudRequestError
+from custom_components.yandex_station.core.yandex_station import YandexStation
+
+
+class ScenarioCommandPeer:
+    """A stateful scenario endpoint: actions execute the last stored configuration."""
+
+    def __init__(self):
+        self.policy = EntryPolicy()
+        self.readiness = Readiness(scenarios_state=ScenariosState.READY)
+        self.configured = None
+        self.executed = []
+        self.put_failure = False
+        self.lose_action_response = False
+        self.action_started = asyncio.Event()
+        self.release_action = None
+
+    async def ensure_csrf(self):
+        return "synthetic-csrf"
+
+    async def json(self):
+        return {"status": "ok"}
+
+    async def put(self, url, *, role, json):
+        if self.put_failure:
+            raise CloudRequestError(role, 403)
+        value = json["steps"][0]["parameters"]["items"][0]["value"]
+        self.configured = value["capabilities"][0]["state"]["value"]
+        await asyncio.sleep(0)
+        return self
+
+    async def post(self, url, *, role):
+        self.executed.append(self.configured)
+        self.action_started.set()
+        if self.release_action:
+            await self.release_action.wait()
+        if self.lose_action_response:
+            raise asyncio.TimeoutError
+        await asyncio.sleep(0)
+        return self
 
 
 def test_scenario_match_binds_and_saves_confirmed(tmp_path):
@@ -87,46 +133,15 @@ def test_scenario_creation_blocked_when_marker_exists(tmp_path):
 
 def test_send_serialized_per_device():
     async def scenario():
-        session = MagicMock()
-        quasar = YandexQuasar(session)
-
-        device = {"id": "dev1", "name": "Колонка", "scenario_id": "scen1"}
-
-        order = []
-
-        async def mock_put(url, **kwargs):
-            text = kwargs.get("json", {}).get("steps", [{}])[0].get("parameters", {}).get("items", [{}])[0].get("value", {}).get("capabilities", [{}])[0].get("state", {}).get("value", {}).get("text", "")
-            order.append(f"put_{text}")
-            await asyncio.sleep(0.02)
-            resp = MagicMock()
-            resp.json = AsyncMock(return_value={"status": "ok"})
-            return resp
-
-        async def mock_post(url, **kwargs):
-            order.append("post_action")
-            await asyncio.sleep(0.01)
-            resp = MagicMock()
-            resp.json = AsyncMock(return_value={"status": "ok"})
-            return resp
-
-        session.put = AsyncMock(side_effect=mock_put)
-        session.post = AsyncMock(side_effect=mock_post)
-
-        # Run 2 concurrent send calls on the same device
-        res1, res2 = await asyncio.gather(
+        peer = ScenarioCommandPeer()
+        quasar = YandexQuasar(peer)
+        device = {"id": "dev1", "name": "Synthetic speaker", "scenario_id": "scen1"}
+        outcomes = await asyncio.gather(
             quasar.send(device, "cmd1", is_tts=True),
             quasar.send(device, "cmd2", is_tts=True),
         )
-
-        assert res1 is True
-        assert res2 is True
-        # Verify strict order without interleaving PUTs and POSTs:
-        # Either [put_cmd1, post_action, put_cmd2, post_action]
-        # or [put_cmd2, post_action, put_cmd1, post_action]
-        assert order in (
-            ["put_cmd1", "post_action", "put_cmd2", "post_action"],
-            ["put_cmd2", "post_action", "put_cmd1", "post_action"],
-        )
+        assert outcomes == [SendOutcome.SENT, SendOutcome.SENT]
+        assert peer.executed == [{"text": "cmd1"}, {"text": "cmd2"}]
 
     asyncio.run(scenario())
 
@@ -142,9 +157,113 @@ def test_send_missing_scenario_id_fails_cleanly():
         device = {"id": "dev1", "name": "Колонка", "scenario_id": None}
 
         ok = await quasar.send(device, "продолжить")
-        assert ok is False
+        assert ok == SendOutcome.UNAVAILABLE
         session.put.assert_not_called()
         session.post.assert_not_called()
+
+    asyncio.run(scenario())
+
+
+def test_failed_put_and_lost_action_response_never_replay(caplog):
+    async def scenario():
+        peer = ScenarioCommandPeer()
+        quasar = YandexQuasar(peer)
+        device = {"id": "dev1", "scenario_id": "scen1"}
+        secret = "synthetic-secret-spoken-phrase"
+        peer.put_failure = True
+        assert await quasar.send(device, secret) == SendOutcome.UNAVAILABLE
+        assert peer.executed == []
+        assert "scenario_update" in caplog.text
+        assert "quasar: HTTP 403" in caplog.text
+        peer.put_failure = False
+        peer.lose_action_response = True
+        assert await quasar.send(device, secret) == SendOutcome.UNKNOWN_OUTCOME
+        assert peer.executed == [secret]
+        assert device["last_command_outcome"] == "unknown_outcome"
+        assert "scenario_action" in caplog.text
+        assert "TimeoutError" in caplog.text
+        assert secret not in caplog.text
+
+    asyncio.run(scenario())
+
+
+def test_command_deadline_includes_lock_wait(monkeypatch):
+    async def scenario():
+        from custom_components.yandex_station.core import yandex_quasar
+
+        monkeypatch.setattr(yandex_quasar, "COMMAND_TIMEOUT", 0.01)
+        peer = ScenarioCommandPeer()
+        quasar = YandexQuasar(peer)
+        device = {"id": "dev1", "scenario_id": "scen1"}
+        lock = asyncio.Lock()
+        await lock.acquire()
+        quasar._device_command_locks["dev1"] = lock
+        try:
+            assert await quasar.send(device, "expired") == SendOutcome.UNAVAILABLE
+        finally:
+            lock.release()
+        await asyncio.sleep(0)
+        assert peer.configured is None
+        assert peer.executed == []
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_action_records_unknown_outcome_without_replay():
+    async def scenario():
+        peer = ScenarioCommandPeer()
+        peer.release_action = asyncio.Event()
+        quasar = YandexQuasar(peer)
+        device = {"id": "dev1", "scenario_id": "scen1"}
+        task = asyncio.create_task(quasar.send(device, "one-effect"))
+        await peer.action_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert peer.executed == ["one-effect"]
+        assert device["last_command_outcome"] == "unknown_outcome"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("lost_action", [False, True])
+@pytest.mark.parametrize(
+    ("method", "args"),
+    [
+        ("async_set_volume_level", (0.7,)),
+        ("async_media_play", ()),
+        ("async_media_pause", ()),
+        ("async_media_stop", ()),
+        ("async_media_previous_track", ()),
+        ("async_media_next_track", ()),
+        ("async_play_media", ("text", "synthetic-secret-phrase")),
+        ("async_play_media", ("command", "synthetic-secret-phrase")),
+        ("async_play_media", ("text:synthetic-skill", "synthetic-secret-phrase")),
+    ],
+)
+def test_station_failed_cloud_commands_preserve_state(method, args, lost_action, caplog):
+    async def scenario():
+        peer = ScenarioCommandPeer()
+        peer.put_failure = not lost_action
+        peer.lose_action_response = lost_action
+        quasar = YandexQuasar(peer)
+        device = {
+            "id": "dev1", "name": "Synthetic speaker", "scenario_id": "scen1",
+            "capabilities": [{"type": "devices.capabilities.on_off"}],
+            "quasar_info": {"device_id": "glagol1", "platform": "yandexstation"},
+        }
+        station = YandexStation(quasar, device)
+        station._attr_state = MediaPlayerState.PAUSED
+        station._attr_volume_level = 0.4
+        with pytest.raises(HomeAssistantError):
+            await getattr(station, method)(*args)
+        assert station.state == MediaPlayerState.PAUSED
+        assert station.volume_level == 0.4
+        assert len(peer.executed) == int(lost_action)
+        assert device["last_command_outcome"] == (
+            "unknown_outcome" if lost_action else "unavailable"
+        )
+        assert "synthetic-secret-phrase" not in caplog.text
 
     asyncio.run(scenario())
 
