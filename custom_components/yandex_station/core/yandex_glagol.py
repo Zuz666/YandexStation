@@ -59,6 +59,11 @@ class YandexGlagol:
         return self.device["name"]
 
     async def get_device_token(self):
+        if self.quasar and (
+            self.quasar.stopping
+            or self.device["quasar_info"]["device_id"] not in self.quasar.owned_glagol_ids
+        ):
+            raise RuntimeError("speaker_not_owned")
         if getattr(self.session, "policy", None) and not self.session.policy.effective_cloud_allowed:
             self.debug("Облачное получение токена заблокировано force_offline_local")
             return None
@@ -304,8 +309,9 @@ class YandexIOListener:
         )
 
     def stop(self, *args):
-        self.browser.cancel()
-        self.browser.zc.close()
+        if self.browser is not None:
+            self.browser.cancel()
+            self.browser = None
 
     def _zeroconf_handler(
         self,

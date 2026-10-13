@@ -24,7 +24,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     quasar: YandexQuasar | None = hass.data.get(DOMAIN, {}).get(entry.unique_id)
 
     if quasar and quasar.policy.enable_diagnostic_sensors:
-        for speaker in quasar.speakers + quasar.modules:
+        for speaker in quasar.owned_speakers + quasar.owned_modules:
             entities.append(YandexStationLocalConnection(quasar, speaker))
 
     for quasar, device, config in hass_utils.incluce_devices(hass, entry):

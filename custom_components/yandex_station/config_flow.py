@@ -15,13 +15,16 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import AbortFlow
+from homeassistant.exceptions import HomeAssistantError
 
 from .core import utils
 from .core.const import DATA_CONFIG, DOMAIN
+from .core.lifecycle import get_lifecycle
 from .core.policy import EntryPolicy, SessionConfig
 from .core.yandex_quasar import YandexQuasar
 from .core.yandex_session import LoginResponse, YandexSession
 from .core.cache import CacheManager
+from .hass import hass_utils
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -200,7 +203,42 @@ class OptionsFlowHandler(OptionsFlow):
         """Show main menu with options (RFC v2 §6.1)."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["settings", "devices", "reauth"],
+            menu_options=["settings", "devices", "recovery", "reauth"],
+        )
+
+    async def async_step_recovery(self, user_input: dict = None):
+        return self.async_show_menu(
+            step_id="recovery", menu_options=["claim_speaker"]
+        )
+
+    async def async_step_claim_speaker(self, user_input: dict = None):
+        choices = await hass_utils.async_claimable_speakers(self.hass, self.config_entry)
+        if not choices:
+            return self.async_abort(reason="claim_unavailable")
+        errors = {}
+        if user_input is not None:
+            if not user_input.get("confirm_claim"):
+                return await self.async_step_recovery()
+            try:
+                await hass_utils.async_claim_speaker(
+                    self.hass, self.config_entry, user_input.get("glagol_id")
+                )
+            except (ValueError, RuntimeError, HomeAssistantError) as error:
+                reason = str(error)
+                errors["base"] = (
+                    reason if reason in {
+                        "ownership_conflict", "reload_in_progress", "entry_disabled"
+                    } else "ownership_conflict"
+                )
+            else:
+                return self.async_abort(reason="speaker_claimed")
+        return self.async_show_form(
+            step_id="claim_speaker",
+            data_schema=vol.Schema({
+                vol.Required("glagol_id"): vol.In(choices),
+                vol.Required("confirm_claim", default=False): cv.boolean,
+            }),
+            errors=errors,
         )
 
     async def async_step_settings(self, user_input: dict = None):
@@ -308,6 +346,11 @@ class OptionsFlowHandler(OptionsFlow):
     async def async_step_reauth(self, user_input: dict = None):
         """Confirm and start reauthorization flow."""
         if user_input is not None:
+            lifecycle = get_lifecycle(self.hass)
+            if not lifecycle.entry_admitted(self.config_entry.entry_id):
+                result = await self.async_step_reauth()
+                result["errors"] = {"base": "reload_in_progress"}
+                return result
             if user_input.get("confirm_reauth"):
                 self.config_entry.async_start_reauth(self.hass)
                 return self.async_abort(reason="reauth_started")
@@ -321,6 +364,11 @@ class OptionsFlowHandler(OptionsFlow):
         )
     async def _async_save_options(self, user_input: dict):
         """Synchronously commit options to entry and schedule reload (RFC v2 §6.2)."""
+        lifecycle = get_lifecycle(self.hass)
+        if not lifecycle.entry_admitted(self.config_entry.entry_id):
+            result = await self.async_step_settings()
+            result["errors"] = {"base": "reload_in_progress"}
+            return result
         new_options = dict(self.config_entry.options)
         for k, v in user_input.items():
             if v == "":
@@ -337,13 +385,13 @@ class OptionsFlowHandler(OptionsFlow):
             result["errors"] = {"base": "invalid_endpoint"}
             return result
 
-        self.hass.config_entries.async_update_entry(
-            self.config_entry, options=new_options
-        )
-        self.hass.async_create_task(
-            self.hass.config_entries.async_reload(self.config_entry.entry_id)
-        )
-        return self.async_create_entry(title="", data=new_options)
+        if new_options != self.config_entry.options:
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, options=new_options
+            )
+            if lifecycle.entry_enabled(self.config_entry):
+                lifecycle.request_entry_reload(self.config_entry.entry_id)
+        return self.async_create_entry(title="", data=None)
 
 def vol_schema(schema: dict, defaults: dict | None) -> vol.Schema:
     if defaults:
