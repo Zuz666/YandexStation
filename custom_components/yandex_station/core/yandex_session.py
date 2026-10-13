@@ -366,6 +366,7 @@ class YandexSession(BasicSession):
                     if m:
                         self.csrf_token = m.group(1)
                         self.readiness.csrf_state = CsrfState.CANDIDATE
+                        self.readiness.auth_state = AuthState.VALID
                         return self.csrf_token
                 except Exception as e:
                     _LOGGER.debug(f"CSRF probe error on {resolved_url}: {e!r}")
@@ -426,6 +427,8 @@ class YandexSession(BasicSession):
 
         r = await self._request(method, url, **kwargs)
         if r.status == 200:
+            if self._is_cloud_url(url):
+                self.readiness.auth_state = AuthState.VALID
             return r
         elif r.status == 400:
             retry = 0
