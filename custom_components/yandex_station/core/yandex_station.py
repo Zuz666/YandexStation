@@ -656,10 +656,21 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
     def update_device_info(self, sw_version: str):
         try:
             device_registry = dr.async_get(self.hass)
-            device_entry = device_registry.async_get_device_by_identifier(
-                (DOMAIN, self._attr_unique_id), self.platform.config_entry.entry_id
-            )
-            device_registry.async_update_device(device_entry.id, sw_version=sw_version)
+            if "async_get_device_by_identifier" in getattr(
+                type(device_registry), "__dict__", {}
+            ):
+                device_entry = device_registry.async_get_device_by_identifier(
+                    (DOMAIN, self._attr_unique_id),
+                    self.platform.config_entry.entry_id,
+                )
+            else:
+                device_entry = device_registry.async_get_device(
+                    identifiers={(DOMAIN, self._attr_unique_id)}
+                )
+            if device_entry is not None:
+                device_registry.async_update_device(
+                    device_entry.id, sw_version=sw_version
+                )
         except:  # noqa
             pass
 
