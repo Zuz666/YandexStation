@@ -102,7 +102,17 @@ def test_options_flow_reauth_trigger():
         flow = OptionsFlowHandler(entry)
         flow.hass = hass
 
-        res = await flow.async_step_reauth()
+        # 1. Shows confirmation form with warning
+        form = await flow.async_step_reauth()
+        assert form["type"] == "form"
+        assert form["step_id"] == "reauth"
+
+        # 2. Cancel / unconfirmed returns to menu
+        menu = await flow.async_step_reauth({"confirm_reauth": False})
+        assert menu["type"] == "menu"
+
+        # 3. Confirmed triggers start_reauth and aborts with reauth_started
+        res = await flow.async_step_reauth({"confirm_reauth": True})
         assert res["type"] == "abort"
         assert res["reason"] == "reauth_started"
         entry.async_start_reauth.assert_called_once_with(hass)
