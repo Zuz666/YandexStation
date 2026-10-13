@@ -7,19 +7,15 @@ from homeassistant.const import CONF_INCLUDE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from ..climate import INCLUDE_TYPES as CLIMATE
 from ..core.cache import CacheManager
-from ..core.const import DATA_CONFIG, DOMAIN
+from ..core.const import (
+    CLIMATE_TYPES, COVER_TYPES, DATA_CONFIG, DOMAIN, HUMIDIFIER_TYPES,
+    LIGHT_TYPES, MEDIA_PLAYER_TYPES, VACUUM_TYPES, WATER_HEATER_TYPES,
+)
 from ..core.entity import extract_instance
 from ..core.lifecycle import get_lifecycle
 from ..core.quasar_info import has_quasar
 from ..core.yandex_quasar import YandexQuasar
-from ..cover import INCLUDE_TYPES as COVER
-from ..humidifier import INCLUDE_TYPES as HUMIDIFIER
-from ..light import INCLUDE_TYPES as LIGHT
-from ..media_player import INCLUDE_TYPES as MEDIA_PLAYER
-from ..vacuum import INCLUDE_TYPES as VACUUM
-from ..water_heater import INCLUDE_TYPES as WATER_HEATER
 
 INCLUDE_KEYS = ("id", "name", "type", "room_name", "skill_id", "house_name")
 _LOGGER = logging.getLogger(__name__)
@@ -39,7 +35,7 @@ INCLUDE_TYPES_UNKNOWN = (
     "devices.types.washing_machine",
 )
 INCLUDE_SKIP_INSTANCES = {
-    CLIMATE: [
+    CLIMATE_TYPES: [
         "on",
         "thermostat",
         "program",
@@ -49,12 +45,12 @@ INCLUDE_SKIP_INSTANCES = {
         "humidity",
         "fan_speed",
     ],
-    COVER: ["on", "open", "pause"],
-    HUMIDIFIER: ["on", "fan_speed", "work_speed", "humidity"],
-    LIGHT: ["on", "brightness", "color"],
-    MEDIA_PLAYER: ["on", "pause", "volume", "mute", "channel", "input_source"],
-    VACUUM: ["on", "pause", "work_speed"],
-    WATER_HEATER: ["on", "tea_mode", "temperature"],
+    COVER_TYPES: ["on", "open", "pause"],
+    HUMIDIFIER_TYPES: ["on", "fan_speed", "work_speed", "humidity"],
+    LIGHT_TYPES: ["on", "brightness", "color"],
+    MEDIA_PLAYER_TYPES: ["on", "pause", "volume", "mute", "channel", "input_source"],
+    VACUUM_TYPES: ["on", "pause", "work_speed"],
+    WATER_HEATER_TYPES: ["on", "tea_mode", "temperature"],
     INCLUDE_TYPES_UNKNOWN: [],
 }
 

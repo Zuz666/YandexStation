@@ -1,26 +1,15 @@
 from homeassistant.components.light import ColorMode, LightEntity, LightEntityFeature
 
+from .core.const import LIGHT_TYPES
 from .core.entity import YandexEntity
 from .hass import hass_utils
-
-INCLUDE_TYPES = (
-    "devices.types.light",
-    "devices.types.light.ceiling",
-    "devices.types.light.dimmable",
-    "devices.types.light.garland",
-    "devices.types.light.lamp",
-    "devices.types.light.sconce",
-    "devices.types.light.strip",
-    "devices.types.light.torchere",
-    "devices.types.smart_speaker.yandex.station.orion",
-)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(
         YandexLight(quasar, device, config)
         for quasar, device, config in hass_utils.incluce_devices(hass, entry)
-        if device["type"] in INCLUDE_TYPES
+        if device["type"] in LIGHT_TYPES
     )
 
 

@@ -2,12 +2,11 @@ import logging
 
 from homeassistant.components.vacuum import StateVacuumEntity, VacuumEntityFeature
 
+from .core.const import VACUUM_TYPES
 from .core.entity import YandexEntity
 from .hass import hass_utils
 
 _LOGGER = logging.getLogger(__name__)
-
-INCLUDE_TYPES = ("devices.types.vacuum_cleaner",)
 
 
 try:
@@ -43,7 +42,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(
         YandexVacuum(quasar, device, config)
         for quasar, device, config in hass_utils.incluce_devices(hass, entry)
-        if device["type"] in INCLUDE_TYPES
+        if device["type"] in VACUUM_TYPES
     )
 
 

@@ -6,19 +6,18 @@ from homeassistant.components.water_heater import (
 )
 from homeassistant.const import UnitOfTemperature
 
+from .core.const import WATER_HEATER_TYPES
 from .core.entity import YandexEntity
 from .hass import hass_utils
 
 _LOGGER = logging.getLogger(__name__)
-
-INCLUDE_TYPES = ("devices.types.cooking.kettle",)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(
         YandexKettle(quasar, device, config)
         for quasar, device, config in hass_utils.incluce_devices(hass, entry)
-        if device["type"] in INCLUDE_TYPES
+        if device["type"] in WATER_HEATER_TYPES
     )
 
 

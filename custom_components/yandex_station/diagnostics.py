@@ -28,6 +28,24 @@ _SETUP_REASONS = frozenset({
     "cloud_blocked_by_policy", "x_token_required", "ConfigEntryAuthFailed",
     "ConfigEntryNotReady",
 })
+_RELOAD_STATUSES = frozenset({"success", "partial", "failed", "restart_required"})
+_RELOAD_REASONS = frozenset({
+    "completed", "entry_setup_failed", "hot_reload_disabled",
+    "reload_already_in_progress", "entry_operation_in_progress",
+    "runtime_not_initialized", "unsupported_runtime", "baseline_missing",
+    "flow_in_progress", "source_preflight_failed", "module_set_changed",
+    "stable_contract_changed", "registration_or_storage_schema_changed",
+    "top_level_binding_removed", "membership_changed", "drain_timeout",
+    "unload_failed", "source_changed_during_reload", "import_failed",
+    "rebind_failed", "discovery_stop_failed",
+})
+_ENTRY_RELOAD_STATES = frozenset({
+    "loaded", "setup_retry", "setup_error", "not_loaded", "membership_changed",
+})
+_TIMING_PHASES = frozenset({
+    "preflight_ms", "drain_ms", "unload_ms", "import_ms", "rebind_ms",
+    "code_swap_ms", "local_ready_ms", "cloud_ready_ms", "total_ms",
+})
 
 
 def _state(value, allowed: frozenset[str]) -> str:
@@ -119,6 +137,24 @@ async def _account_diagnostics(hass: HomeAssistant, entry: ConfigEntry):
             },
             "scenario_journal": state_counts,
         }
+        if last := lifecycle.last_reload_result:
+            entry_states = last.get("entries", {})
+            durations = last.get("timings_ms", {})
+            result["reload"] = {
+                "status": _state(last.get("status"), _RELOAD_STATUSES),
+                "reason": _state(last.get("reason"), _RELOAD_REASONS),
+                "entry_state_counts": {
+                    state: sum(
+                        1 for value in entry_states.values() if value == state
+                    )
+                    for state in _ENTRY_RELOAD_STATES
+                },
+                "timings_ms": {
+                    phase: value for phase, value in durations.items()
+                    if phase in _TIMING_PHASES
+                    and (value is None or type(value) in (int, float))
+                },
+            }
         if runtime is not None:
             readiness = runtime.readiness
             result["readiness"] = {

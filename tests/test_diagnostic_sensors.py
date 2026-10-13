@@ -296,7 +296,7 @@ def test_speaker_transport_and_alice_sensors():
             "state": {"aliceState": "LISTENING", "volume": 0.4},
         })
         assert trans_sensor.native_value == "local"
-        assert alice_sensor.native_value == "LISTENING"
+        assert alice_sensor.native_value == "listening"
 
         # On Glagol disconnect: transport becomes cloud (or unavailable if offline)
         station.async_set_state(None)
@@ -482,7 +482,7 @@ def test_diagnostics_opt_in_preserves_ordinary_sensor_and_owned_registry(tmp_pat
             assert local.is_on
             assert next(
                 e for e in sensor_entities if isinstance(e, YandexAliceStateSensor)
-            ).native_value == "SPEAKING"
+            ).native_value == "speaking"
             for entity in diagnostic_entities:
                 await entity.async_remove(force_remove=True)
             assert not quasar.dispatcher[signal]

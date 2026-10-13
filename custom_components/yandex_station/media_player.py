@@ -10,7 +10,7 @@ from homeassistant.components.media_player import (
 )
 
 from .core import utils
-from .core.const import DOMAIN
+from .core.const import DOMAIN, MEDIA_PLAYER_TYPES
 from .core.entity import YandexEntity
 from .core.yandex_quasar import YandexQuasar
 from .core.yandex_station import YandexModule, YandexStation
@@ -20,13 +20,6 @@ _LOGGER = logging.getLogger(__name__)
 
 # update speaker online state once per 5 minutes
 SCAN_INTERVAL = timedelta(minutes=5)
-
-INCLUDE_TYPES = (
-    "devices.types.media_device",
-    "devices.types.media_device.receiver",
-    "devices.types.media_device.tv",
-    "devices.types.media_device.tv_box",
-)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -46,7 +39,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(
         YandexMediaPlayer(quasar, device, config)
         for quasar, device, config in hass_utils.incluce_devices(hass, entry)
-        if device["type"] in INCLUDE_TYPES
+        if device["type"] in MEDIA_PLAYER_TYPES
     )
 
 
