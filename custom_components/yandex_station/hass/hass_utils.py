@@ -167,7 +167,12 @@ async def _async_account_speakers(hass, entry, *, snapshot_only=False):
 def _speaker_registry_entries(hass, glagol_id):
     """The media identity is canonical; companion identities share its device."""
     registry = er.async_get(hass)
-    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, glagol_id)})
+    device_registry = dr.async_get(hass)
+    if "async_get_devices" in getattr(type(device_registry), "__dict__", {}):
+        matches = device_registry.async_get_devices(identifiers={(DOMAIN, glagol_id)})
+        device = matches[0] if matches else None
+    else:
+        device = device_registry.async_get_device(identifiers={(DOMAIN, glagol_id)})
     suffixes = {
         "camera": ("lyrics",), "calendar": ("calendar",),
         "select": ("equalizer",), "conversation": ("conversation",),
@@ -312,9 +317,14 @@ async def async_claim_speaker(hass, entry, glagol_id: str) -> None:
                     )
             if device is not None:
                 devices = dr.async_get(hass)
-                devices.async_update_device(device.id, add_config_entry_id=entry.entry_id)
-                for owner in owners - {entry.entry_id}:
-                    devices.async_update_device(device.id, remove_config_entry_id=owner)
+                if "async_get_devices" in getattr(type(devices), "__dict__", {}):
+                    devices.async_update_device(
+                        device.id, new_config_entry_id=entry.entry_id
+                    )
+                else:
+                    devices.async_update_device(device.id, add_config_entry_id=entry.entry_id)
+                    for owner in owners - {entry.entry_id}:
+                        devices.async_update_device(device.id, remove_config_entry_id=owner)
             lifecycle.speaker_owners[glagol_id] = entry.entry_id
             lifecycle.ownership_conflicts.get(entry.entry_id, set()).discard(glagol_id)
 

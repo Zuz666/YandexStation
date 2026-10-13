@@ -31,6 +31,7 @@ _ROOT = "custom_components.yandex_station"
 _PINNED_CORES = frozenset({
     ("2023.2.0", (3, 10, 7)),
     ("2026.6.1", (3, 14, 5)),
+    ("2026.9.4", (3, 14, 6)),
 })
 
 
