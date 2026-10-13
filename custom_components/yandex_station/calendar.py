@@ -12,6 +12,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.util import slugify
 
 from .core.const import DOMAIN
+from .core.lifecycle import guard_quasar_entity
 from .core.yandex_quasar import YandexQuasar
 
 _LOGGER = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class YandexCalendar(CalendarEntity):
 
         self.events: list[CalendarEvent] = []
         self.next_event: CalendarEvent | None = None
+        guard_quasar_entity(quasar, self)
 
     @property
     def event(self) -> CalendarEvent | None:

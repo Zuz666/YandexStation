@@ -6,19 +6,18 @@ from homeassistant.components.humidifier import (
 )
 
 from .core import utils
+from .core.const import HUMIDIFIER_TYPES
 from .core.entity import YandexEntity
 from .hass import hass_utils
 
 _LOGGER = logging.getLogger(__name__)
-
-INCLUDE_TYPES = ("devices.types.humidifier",)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(
         YandexHumidifier(quasar, device, config)
         for quasar, device, config in hass_utils.incluce_devices(hass, entry)
-        if device["type"] in INCLUDE_TYPES
+        if device["type"] in HUMIDIFIER_TYPES
     )
 
 

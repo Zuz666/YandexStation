@@ -3,7 +3,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import WSMsgType
+from aiohttp import ClientSession, WSMsgType, web
 
 from custom_components.yandex_station.core.cache import CacheManager
 from custom_components.yandex_station.core.policy import EntryPolicy, TokenState
@@ -208,5 +208,66 @@ def test_quasar_token_fetch_is_single_flight():
         assert await first == "token-once"
         assert await second == "token-once"
         assert quasar._token_tasks == {}
+
+    asyncio.run(scenario())
+
+
+def test_discovery_port_change_reconnects_to_new_loopback_peer():
+    async def scenario():
+        events = {}
+        connections = []
+
+        async def peer(request):
+            port = request.transport.get_extra_info("sockname")[1]
+            connections.append(port)
+            events[port].set()
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.send_json({"state": {"aliceState": "IDLE"}})
+            async for _ in ws:
+                pass
+            return ws
+
+        app = web.Application()
+        app.router.add_route("GET", "/", peer)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        first = web.TCPSite(runner, "127.0.0.1", 0)
+        second = web.TCPSite(runner, "127.0.0.1", 0)
+        await first.start()
+        await second.start()
+        first_port = first._server.sockets[0].getsockname()[1]
+        second_port = second._server.sockets[0].getsockname()[1]
+        events[first_port] = asyncio.Event()
+        events[second_port] = asyncio.Event()
+        device = {
+            "id": "synthetic-cloud", "name": "Synthetic",
+            "host": "127.0.0.1", "port": first_port,
+            "quasar_info": {
+                "device_id": "synthetic-glagol", "platform": "yandexstation",
+            },
+        }
+        try:
+            async with ClientSession() as client:
+                class LocalSession:
+                    async def ws_connect(self, url, **kwargs):
+                        kwargs.pop("role")
+                        return await client.ws_connect(
+                            url.replace("wss://", "ws://"), **kwargs
+                        )
+                glagol = YandexGlagol(
+                    LocalSession(), device, token="synthetic-candidate"
+                )
+                try:
+                    await glagol.start_or_restart()
+                    await asyncio.wait_for(events[first_port].wait(), 3)
+                    device["port"] = second_port
+                    await glagol.start_or_restart()
+                    await asyncio.wait_for(events[second_port].wait(), 3)
+                    assert connections == [first_port, second_port]
+                finally:
+                    await glagol.stop()
+        finally:
+            await runner.cleanup()
 
     asyncio.run(scenario())

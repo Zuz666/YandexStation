@@ -9,6 +9,7 @@ from homeassistant.components.climate import (
 from homeassistant.const import MAJOR_VERSION, MINOR_VERSION, UnitOfTemperature
 
 from .core import utils
+from .core.const import CLIMATE_TYPES
 from .core.entity import YandexEntity
 from .hass import hass_utils
 
@@ -21,19 +22,12 @@ ONOFF = (
     else 0
 )
 
-INCLUDE_TYPES = (
-    "devices.types.purifier",
-    "devices.types.thermostat",
-    "devices.types.thermostat.ac",
-    "devices.types.thermostat.heater",
-)
-
 
 async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(
         YandexClimate(quasar, device, config)
         for quasar, device, config in hass_utils.incluce_devices(hass, entry)
-        if device["type"] in INCLUDE_TYPES
+        if device["type"] in CLIMATE_TYPES
     )
     # this should be fixed someday
     async_add_entities(

@@ -196,9 +196,9 @@
       "alice_state": {
         "name": "Состояние Алисы",
         "state": {
-          "IDLE": "Ожидает",
-          "LISTENING": "Слушает",
-          "SPEAKING": "Говорит"
+          "idle": "Ожидает",
+          "listening": "Слушает",
+          "speaking": "Говорит"
         }
       }
     },

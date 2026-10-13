@@ -25,7 +25,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import ServiceCall
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers import config_validation as cv, device_registry as dr, service
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
@@ -128,6 +128,7 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Optional("cookie_storage_endpoints"): cv.ensure_list,
                 vol.Optional("csrf_endpoints"): cv.ensure_list,
                 vol.Optional("enable_diagnostic_sensors"): cv.boolean,
+                vol.Optional("enable_code_reload"): cv.boolean,
             },
             extra=vol.ALLOW_EXTRA,
         ), _validate_session_config),
@@ -140,6 +141,7 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
     config: dict = hass_config.get(DOMAIN) or {}
     lifecycle = get_lifecycle(hass)
     hass.data[DOMAIN][DATA_CONFIG] = config
+    await lifecycle.async_capture_baseline(hass)
     hass.data[DOMAIN].setdefault(DATA_SPEAKERS, {})
     context = lifecycle.context
     try:
@@ -162,30 +164,37 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
     await async_rebind_runtime(hass)
     await _setup_entry_from_config(hass)
 
-    def import_conversation():
-        try:
-            from . import conversation
-
-            SPEAKER_PLATFORMS.append("conversation")
-            PLATFORMS.append("conversation")
-        except ImportError as e:
-            _LOGGER.warning(repr(e))
-
-    # using executor, because bug with "Detected blocking call"
-    await hass.async_add_executor_job(import_conversation)
-
-    async def reload_code_service(call: ServiceCall):
-        enable = hass.data[DOMAIN].get(DATA_CONFIG, {}).get("enable_code_reload", False)
-        return await lifecycle.async_hot_reload(hass, enable_code_reload=enable)
-
-    hass.services.async_register(DOMAIN, "reload_code", reload_code_service)
+    service_options = {}
+    try:
+        from homeassistant.core import SupportsResponse
+    except ImportError:
+        pass
+    else:
+        service_options["supports_response"] = SupportsResponse.OPTIONAL
+    service.async_register_admin_service(
+        hass, DOMAIN, "reload_code", lifecycle.reload_service_handler(),
+        **service_options,
+    )
 
     return True
+
 
 
 async def async_rebind_runtime(hass: HomeAssistant):
     """Rebind reloadable targets without replacing stable service dispatchers."""
     lifecycle = get_lifecycle(hass)
+
+    def import_conversation():
+        try:
+            from . import conversation
+        except ImportError as error:
+            _LOGGER.warning("Conversation platform unavailable: %s", type(error).__name__)
+            return False
+        return True
+
+    lifecycle.conversation_available = await hass.async_add_executor_job(
+        import_conversation
+    )
     await _init_services(hass)
     if hass.data[DOMAIN][DATA_CONFIG].get(CONF_LOCAL_UPDATES, True):
         await _init_local_discovery(hass)
@@ -193,6 +202,14 @@ async def async_rebind_runtime(hass: HomeAssistant):
         lifecycle.stop_unsubscribe = hass.bus.async_listen_once(
             EVENT_HOMEASSISTANT_STOP, lifecycle.async_stop
         )
+
+
+def _platforms(lifecycle, include_devices: bool):
+    platforms = PLATFORMS if include_devices else SPEAKER_PLATFORMS
+    return (
+        [*platforms, "conversation"]
+        if lifecycle.conversation_available else list(platforms)
+    )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
@@ -245,12 +262,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             await _setup_devices(hass, quasar)
 
             if hass_utils.incluce_devices(hass, entry):
-                quasar.platforms = platforms = PLATFORMS
+                quasar.platforms = platforms = _platforms(lifecycle, True)
                 entry.async_on_unload(async_track_time_interval(
                     hass, quasar.devices_passive_update, timedelta(minutes=5)
                 ))
             else:
-                quasar.platforms = platforms = SPEAKER_PLATFORMS
+                quasar.platforms = platforms = _platforms(lifecycle, False)
             # сначала публикация всех платформ, затем cloud recovery/token-fetch
             await hass.config_entries.async_forward_entry_setups(entry, platforms)
             if policy.effective_cloud_allowed:
@@ -274,7 +291,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
         quasar = lifecycle.runtimes.get(entry.entry_id)
         if quasar is not None:
             await quasar.async_stop()
-        platforms = getattr(quasar, "platforms", None) or PLATFORMS
+        platforms = getattr(quasar, "platforms", None) or _platforms(lifecycle, True)
         unloaded = await hass.config_entries.async_unload_platforms(entry, platforms)
         if unloaded:
             lifecycle.runtimes.pop(entry.entry_id, None)
@@ -379,40 +396,33 @@ async def _init_services(hass: HomeAssistant):
         return speakers
 
     try:
-        # starting from Home Assistant 2023.7
-        from homeassistant.core import ServiceResponse, SupportsResponse
-        from homeassistant.helpers import service
+        from homeassistant.core import SupportsResponse
+    except ImportError:
+        response_options = {}
+    else:
+        response_options = {"supports_response": SupportsResponse.OPTIONAL}
 
-        async def send_command(call: ServiceCall) -> ServiceResponse:
-            try:
-                # from HA 2025.10
-                entity_ids = await service.async_extract_entity_ids(call)
-            except TypeError:
-                # for HA before 2025.10
-                entity_ids = await service.async_extract_entity_ids(hass, call)
-            for dev in get_all_speakers():
-                entity: YandexStationBase = dev.get("entity")
-                if (
-                    not entity
-                    or entity.entity_id not in entity_ids
-                    or not entity.glagol
-                ):
-                    continue
-                data = service.remove_entity_service_fields(call)
-                data.setdefault("command", "sendText")
-                if external := data.get("external"):
-                    data = utils.external_command(**external)
-                return await entity.glagol.send(data)
-            return {"error": "Entity not found"}
+    async def send_command(call: ServiceCall):
+        try:
+            entity_ids = await service.async_extract_entity_ids(call)
+        except TypeError:
+            entity_ids = await service.async_extract_entity_ids(hass, call)
+        for dev in get_all_speakers():
+            entity: YandexStationBase = dev.get("entity")
+            if (
+                not entity
+                or entity.entity_id not in entity_ids
+                or not entity.glagol
+            ):
+                continue
+            data = service.remove_entity_service_fields(call)
+            data.setdefault("command", "sendText")
+            if external := data.get("external"):
+                data = utils.external_command(**external)
+            return await entity.glagol.send(data)
+        return {"error": "Entity not found"}
 
-        register(
-            DOMAIN,
-            "send_command",
-            send_command,
-            supports_response=SupportsResponse.OPTIONAL,
-        )
-    except ImportError as e:
-        _LOGGER.warning(repr(e))
+    register(DOMAIN, "send_command", send_command, **response_options)
 
     async def yandex_station_say(call: ServiceCall):
         entity_ids = call.data.get(ATTR_ENTITY_ID) or utils.find_station(
