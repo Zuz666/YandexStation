@@ -1,198 +1,421 @@
 import asyncio
+import json
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry
 
-from custom_components.yandex_station.config_flow import OptionsFlowHandler, YandexStationFlowHandler
-from custom_components.yandex_station.core.cache import CacheManager, StationSnapshot
-from custom_components.yandex_station.core.const import DOMAIN
-from custom_components.yandex_station.core.yandex_session import LoginResponse
+from custom_components.yandex_station.config_flow import YandexStationFlowHandler
+from custom_components.yandex_station.core.cache import CacheManager
+from custom_components.yandex_station.core.const import DATA_CONFIG, DOMAIN
+from custom_components.yandex_station.core.lifecycle import get_lifecycle
+from custom_components.yandex_station.core.policy import EntryPolicy, ScenariosState
+from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
+from custom_components.yandex_station.core.yandex_session import LoginResponse, YandexSession
+from .test_cache import config_entry, device_record
+from .test_scenario_recovery import wire_scenario
 
 
-def test_options_flow_opens_when_quasar_missing(tmp_path):
+@asynccontextmanager
+async def core_flow(tmp_path, *, options=None, disabled=False):
+    try:
+        hass = HomeAssistant(str(tmp_path))
+    except TypeError:
+        hass = HomeAssistant()
+    hass.config.config_dir = str(tmp_path)
+    hass.data.setdefault("components", set()).add("yandex_station.config_flow")
+    await issue_registry.async_load(hass)
+    hass.config_entries = ConfigEntries(hass, {})
+    record = config_entry("entry-1", "synthetic-login").as_dict()
+    record["data"] = {"x_token": "previous", "music_token": "music", "account_uid": "uid-1"}
+    record["options"] = options or {}
+    if disabled:
+        record["disabled_by"] = "user"
+    await hass.config_entries._store.async_save({"entries": [record]})
+    await hass.config_entries.async_initialize()
+    hass.data[DOMAIN] = {DATA_CONFIG: {}}
+    entry = hass.config_entries.async_get_entry("entry-1")
+    lifecycle = get_lifecycle(hass)
+    try:
+        yield hass, entry, lifecycle
+    finally:
+        await lifecycle.async_stop()
+        await hass.async_stop()
+
+
+async def options_step(hass, step):
+    menu = await hass.config_entries.options.async_init("entry-1")
+    return await hass.config_entries.options.async_configure(
+        menu["flow_id"], {"next_step_id": step}
+    )
+
+
+def test_settings_round_trip_and_invalid_endpoint_leave_other_options(tmp_path):
     async def scenario():
-        hass = MagicMock(spec=HomeAssistant)
-        hass.data = {DOMAIN: {}}
-        hass.config = MagicMock()
-        hass.config.path = lambda *args: str(tmp_path.joinpath(*args))
+        initial = {"include": ["offline-1"], "force_offline_local": False,
+                   "csrf_endpoints": ["https://yandex.ru/iot"]}
+        async with core_flow(tmp_path, options=initial) as (hass, entry, lifecycle):
+            seen = []
 
-        entry = MagicMock()
-        entry.entry_id = "entry_1"
-        entry.unique_id = "test_user"
-        entry.options = {"include": ["offline_dev_1"]}
+            async def reload_entry(entry_id):
+                seen.append((entry_id, dict(entry.options)))
+                return True
 
-        # Prepare snapshot
-        snapshot = StationSnapshot(
-            entry_id="entry_1",
-            account_login="test_user",
-            devices=[{
-                "id": "cached_dev_1",
-                "name": "Колонка",
-                "house_name": "Дом",
-                "capabilities": [],
-                "properties": [],
-                "quasar_info": {"device_id": "did1", "platform": "yandexstation"},
-            }],
-        )
+            with patch.object(hass.config_entries, "async_reload", side_effect=reload_entry):
+                settings = await options_step(hass, "settings")
+                schema = settings["data_schema"]
+                assert {"quasar_base_url", "account_base_url", "passport_base_url",
+                        "mobileproxy_base_url", "glagol_base_url", "rpc_base_url",
+                        "cookie_storage_endpoints", "csrf_endpoints",
+                        "enable_diagnostic_sensors"} <= {
+                            key.schema for key in schema.schema
+                        }
+                for value in (
+                    "[]", "{bad", json.dumps([{"url": "https://example.invalid/probe",
+                                               "validator": "not-a-validator"}]),
+                    json.dumps([{"url": "http://example.invalid/probe",
+                                 "validator": "status_ok"}]),
+                ):
+                    invalid = await hass.config_entries.options.async_configure(
+                        settings["flow_id"], {"cookie_storage_endpoints": value}
+                    )
+                    assert invalid["errors"] == {"base": "invalid_endpoint"}
+                    assert dict(entry.options) == initial
 
-        with patch("custom_components.yandex_station.core.cache.CacheManager.async_load", AsyncMock(return_value=snapshot)):
-            flow = OptionsFlowHandler(entry)
+                cookies = json.dumps([{
+                    "url": "https://quasar.yandex.ru/get_account_config",
+                    "validator": "status_ok",
+                }])
+                submit = asyncio.create_task(hass.config_entries.options.async_configure(
+                    settings["flow_id"], {
+                        "csrf_endpoints": "", "cookie_storage_endpoints": cookies,
+                        "force_offline_local": True, "enable_scenarios": False,
+                    }
+                ))
+                result = await submit
+                assert result["type"] == "create_entry"
+                assert entry.options["force_offline_local"] is True
+                assert entry.options["enable_scenarios"] is False
+                assert "csrf_endpoints" not in entry.options
+                assert entry.options["include"] == ["offline-1"]
+                assert entry.options["cookie_storage_endpoints"][0]["validator"] == "status_ok"
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                assert seen == [(entry.entry_id, dict(entry.options))]
+
+    asyncio.run(scenario())
+
+
+def test_unchanged_options_closed_gate_and_disabled_retry(tmp_path):
+    async def scenario():
+        async with core_flow(tmp_path, disabled=True) as (hass, entry, lifecycle):
+            settings = await options_step(hass, "settings")
+            unchanged = await hass.config_entries.options.async_configure(
+                settings["flow_id"], {}
+            )
+            assert unchanged["type"] == "create_entry"
+            assert dict(entry.options) == {}
+            retry = await options_step(hass, "recovery")
+            assert "retry_setup" in retry["menu_options"]
+            assert retry["description_placeholders"]["cache_reason"] == "cache_missing"
+            form = await hass.config_entries.options.async_configure(
+                retry["flow_id"], {"next_step_id": "retry_setup"}
+            )
+            declined = await hass.config_entries.options.async_configure(
+                form["flow_id"], {"confirm_retry": True}
+            )
+            assert declined["errors"] == {"base": "entry_disabled"}
+            assert dict(entry.options) == {}
+
+        async with core_flow(tmp_path / "closed") as (hass, entry, lifecycle):
+            settings = await options_step(hass, "settings")
+            lifecycle.context.admission_open = False
+            result = await hass.config_entries.options.async_configure(
+                settings["flow_id"], {"force_offline_local": True}
+            )
+            assert result["errors"] == {"base": "reload_in_progress"}
+            assert dict(entry.options) == {}
+
+    asyncio.run(scenario())
+
+
+def test_recovery_devices_and_retry_setup_use_local_snapshot(tmp_path):
+    async def scenario():
+        async with core_flow(tmp_path, options={"include": ["offline-1"]}) as (hass, entry, lifecycle):
+            cache = CacheManager(hass, entry.entry_id, account_login=entry.unique_id,
+                                 account_uid=entry.data["account_uid"])
+            device = device_record("cloud-1")
+            device["house_name"] = "Synthetic home"
+            await cache.async_save_devices([device])
+            await cache.async_close()
+            lifecycle.setup_reasons[entry.entry_id] = "inventory_unavailable"
+            recovery = await options_step(hass, "recovery")
+            assert recovery["description_placeholders"]["cache_reason"] == "cache_ready"
+            assert recovery["description_placeholders"]["setup_reason"] == "inventory_unavailable"
+            devices = await options_step(hass, "devices")
+            assert devices["data_schema"]({
+                "include": ["cloud-1", "offline-1"],
+            })["include"] == ["cloud-1", "offline-1"]
+
+            calls = []
+            async def reload_entry(entry_id):
+                calls.append(entry_id)
+                return True
+            with patch.object(hass.config_entries, "async_reload", side_effect=reload_entry):
+                form = await hass.config_entries.options.async_configure(
+                    recovery["flow_id"], {"next_step_id": "retry_setup"}
+                )
+                outcome = await asyncio.create_task(hass.config_entries.options.async_configure(
+                    form["flow_id"], {"confirm_retry": True}
+                ))
+                assert outcome["reason"] == "retry_started"
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                assert calls == [entry.entry_id]
+                assert dict(entry.options) == {"include": ["offline-1"]}
+
+    asyncio.run(scenario())
+
+
+def test_reauth_requires_target_and_offline_blocks_every_network_stage(tmp_path):
+    async def scenario():
+        async with core_flow(tmp_path, options={"force_offline_local": True}) as (hass, entry, _):
+            missing = YandexStationFlowHandler()
+            missing.hass = hass
+            missing.context = {"source": "reauth"}
+            assert (await missing.async_step_reauth())["reason"] == "reauth_target_missing"
+
+            flow = YandexStationFlowHandler()
             flow.hass = hass
-
-            # Step init should display menu with options
-            menu = await flow.async_step_init()
-            assert menu["type"] == "menu"
-            assert menu["step_id"] == "init"
-            assert "settings" in menu["menu_options"]
-            assert "devices" in menu["menu_options"]
-            assert "reauth" in menu["menu_options"]
-
-            # Step devices should display form with cached devices + preserved offline devices
-            result = await flow.async_step_devices()
-            assert result["type"] == "form"
-            assert result["step_id"] == "devices"
-    asyncio.run(scenario())
-
-
-def test_options_flow_commit_and_reload():
-    async def scenario():
-        hass = MagicMock(spec=HomeAssistant)
-        hass.data = {DOMAIN: {}}
-        hass.config_entries = MagicMock()
-        hass.config_entries.async_update_entry = MagicMock()
-        hass.config_entries.async_reload = AsyncMock()
-        created_tasks = []
-        def mock_create_task(coro):
-            created_tasks.append(coro)
-            coro.close()
-            return MagicMock()
-        hass.async_create_task = mock_create_task
-        entry = MagicMock()
-        entry.entry_id = "entry_1"
-        entry.unique_id = "test_user"
-        entry.options = {"force_offline_local": False, "enable_scenarios": True}
-        entry.disabled_by = None
-        entry.source = "user"
-        hass.config_entries.async_get_entry = MagicMock(return_value=entry)
-
-        flow = OptionsFlowHandler(entry)
-        flow.hass = hass
-
-        user_input = {
-            "force_offline_local": True,
-            "enable_scenarios": False,
-        }
-
-        # Submit from its own task: the deferred reload observes that requester.
-        submit = asyncio.create_task(flow.async_step_settings(user_input))
-        result = await submit
-        assert result["type"] == "create_entry"
-
-        # Verify synchronous update before reload
-        hass.config_entries.async_update_entry.assert_called_once()
-        call_options = hass.config_entries.async_update_entry.call_args[1]["options"]
-        assert call_options["force_offline_local"] is True
-        assert call_options["enable_scenarios"] is False
-
-        # Reload reserved, but dispatched only after the options task returned
-        assert created_tasks == []
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        assert len(created_tasks) == 1
-
-    asyncio.run(scenario())
-def test_options_flow_reauth_trigger():
-    async def scenario():
-        hass = MagicMock(spec=HomeAssistant)
-        hass.data = {DOMAIN: {}}
-        entry = MagicMock()
-        entry.async_start_reauth = MagicMock()
-
-        flow = OptionsFlowHandler(entry)
-        flow.hass = hass
-
-        # 1. Shows confirmation form with warning
-        form = await flow.async_step_reauth()
-        assert form["type"] == "form"
-        assert form["step_id"] == "reauth"
-
-        # 2. Cancel / unconfirmed returns to menu
-        menu = await flow.async_step_reauth({"confirm_reauth": False})
-        assert menu["type"] == "menu"
-
-        # 3. Confirmed triggers start_reauth and aborts with reauth_started
-        res = await flow.async_step_reauth({"confirm_reauth": True})
-        assert res["type"] == "abort"
-        assert res["reason"] == "reauth_started"
-        entry.async_start_reauth.assert_called_once_with(hass)
+            flow.context = {"source": "reauth", "entry_id": entry.entry_id}
+            confirm = await flow.async_step_reauth()
+            assert confirm["step_id"] == "reauth_confirm"
+            assert (await flow.async_step_reauth_confirm({"confirm_reauth": False}))["reason"] == "reauth_cancelled"
+            await flow.async_step_reauth_confirm({"confirm_reauth": True})
+            with patch.object(YandexSession, "get_qr", new_callable=AsyncMock) as qr, \
+                 patch.object(YandexSession, "login_qr", new_callable=AsyncMock) as poll, \
+                 patch.object(YandexSession, "login_cookies", new_callable=AsyncMock) as cookies, \
+                 patch.object(YandexSession, "validate_token", new_callable=AsyncMock) as token:
+                for invoke in (
+                    flow.async_step_user({"method": "qr"}),
+                    flow.async_step_qr(None),
+                    flow.async_step_cookies({"cookies": "synthetic"}),
+                    flow.async_step_token({"token": "synthetic"}),
+                ):
+                    result = await invoke
+                    assert result["errors"] == {"base": "offline_reauth_blocked"}
+                qr.assert_not_awaited()
+                poll.assert_not_awaited()
+                cookies.assert_not_awaited()
+                token.assert_not_awaited()
+            assert entry.data["x_token"] == "previous"
 
     asyncio.run(scenario())
 
 
-
-def test_reauth_same_account_updates_and_reloads():
+def test_reauth_same_account_and_ordinary_login_preserve_entry_uid(tmp_path):
     async def scenario():
-        hass = MagicMock(spec=HomeAssistant)
-        hass.data = {DOMAIN: {}}
-        hass.config_entries = MagicMock()
-        hass.config_entries.async_update_entry = MagicMock()
-        hass.config_entries.async_reload = AsyncMock()
-        created_tasks = []
-        def mock_create_task(coro):
-            created_tasks.append(coro)
-            coro.close()
-            return MagicMock()
-        hass.async_create_task = mock_create_task
-        reauth_entry = MagicMock()
-        reauth_entry.entry_id = "entry_1"
-        reauth_entry.unique_id = "alice_login"
-
-        flow = YandexStationFlowHandler()
-        flow.hass = hass
-        flow.context = {"entry_id": "entry_1"}
-        flow._reauth_entry = reauth_entry
-
-        # Mock login response with same account
-        resp = LoginResponse({
-            "status": "ok",
-            "display_login": "alice_login",
-            "x_token": "new_token_123",
-        })
-
-        result = await flow._check_yandex_response(resp)
-        assert result["type"] == "abort"
-        assert result["reason"] == "reauth_successful"
-        hass.config_entries.async_update_entry.assert_called_once_with(
-            reauth_entry, data={"x_token": "new_token_123"}
-        )
-        assert len(created_tasks) == 1
+        async with core_flow(tmp_path) as (hass, entry, lifecycle):
+            reloads = []
+            async def reload_entry(entry_id):
+                reloads.append((entry_id, dict(entry.data)))
+                return True
+            with patch.object(hass.config_entries, "async_reload", side_effect=reload_entry):
+                flow = YandexStationFlowHandler()
+                flow.hass = hass
+                flow.context = {"source": "reauth", "entry_id": entry.entry_id}
+                await flow.async_step_reauth()
+                wrong = LoginResponse({"status": "ok", "display_login": entry.unique_id,
+                                       "uid": "uid-other", "x_token": "foreign"})
+                assert (await flow._check_yandex_response(wrong))["reason"] == "account_mismatch"
+                assert entry.data["x_token"] == "previous"
+                success = LoginResponse({"status": "ok", "display_login": entry.unique_id,
+                                         "uid": "uid-1", "x_token": "fresh"})
+                outcome = await asyncio.create_task(flow._check_yandex_response(success))
+                assert outcome["reason"] == "reauth_successful"
+                assert dict(entry.data) == {"x_token": "fresh", "music_token": "music",
+                                            "account_uid": "uid-1"}
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                assert reloads == [(entry.entry_id, dict(entry.data))]
 
     asyncio.run(scenario())
 
 
-def test_reauth_different_account_aborts():
+def test_core_config_flow_reauth_and_existing_account_login(tmp_path):
     async def scenario():
-        hass = MagicMock(spec=HomeAssistant)
-        hass.data = {DOMAIN: {}}
+        for source in ("reauth", "user"):
+            async with core_flow(tmp_path / source) as (hass, entry, lifecycle):
+                loaded = MagicMock()
+                loaded.single_config_entry = False
+                loaded.get_platform.return_value = YandexStationFlowHandler
+                expected = LoginResponse({
+                    "status": "ok", "display_login": entry.unique_id,
+                    "uid": entry.data["account_uid"], "x_token": "refreshed",
+                })
+                reloads = []
 
-        reauth_entry = MagicMock()
-        reauth_entry.entry_id = "entry_1"
-        reauth_entry.unique_id = "alice_login"
+                async def reload_entry(entry_id):
+                    reloads.append((entry_id, dict(entry.data)))
+                    return True
+                client = MagicMock()
+                client.close = AsyncMock()
 
-        flow = YandexStationFlowHandler()
-        flow.hass = hass
-        flow.context = {"entry_id": "entry_1"}
-        flow._reauth_entry = reauth_entry
+                with patch("homeassistant.loader.async_get_integration",
+                           new_callable=AsyncMock, return_value=loaded), \
+                     patch("homeassistant.config_entries.async_process_deps_reqs",
+                           new_callable=AsyncMock, create=True), \
+                     patch("custom_components.yandex_station.config_flow.utils.async_create_clientsession",
+                           return_value=client), \
+                     patch.object(YandexSession, "validate_token",
+                                  new_callable=AsyncMock, return_value=expected), \
+                     patch.object(hass.config_entries, "async_reload",
+                                  side_effect=reload_entry):
+                    context = {"source": source}
+                    if source == "reauth":
+                        context["entry_id"] = entry.entry_id
+                    first = await hass.config_entries.flow.async_init(DOMAIN, context=context)
+                    if source == "reauth":
+                        assert first["step_id"] == "reauth_confirm"
+                        first = await hass.config_entries.flow.async_configure(
+                            first["flow_id"], {"confirm_reauth": True}
+                        )
+                    assert first.get("step_id") == "user", (
+                        source, first.get("type"), first.get("reason")
+                    )
+                    credential = await hass.config_entries.flow.async_configure(
+                        first["flow_id"], {"method": "token"}
+                    )
+                    outcome = await asyncio.create_task(hass.config_entries.flow.async_configure(
+                        credential["flow_id"], {"token": "replacement"}
+                    ))
+                    assert outcome["reason"] == (
+                        "reauth_successful" if source == "reauth" else "account_updated"
+                    )
+                    assert dict(entry.data) == {
+                        "x_token": "refreshed", "music_token": "music", "account_uid": "uid-1",
+                    }
+                    assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                    assert reloads == [(entry.entry_id, dict(entry.data))]
 
-        # Mock login response with different account
-        resp = LoginResponse({
-            "status": "ok",
-            "display_login": "bob_login",
-            "x_token": "bobs_token",
-        })
+    asyncio.run(scenario())
 
-        result = await flow._check_yandex_response(resp)
-        assert result["type"] == "abort"
-        assert result["reason"] == "account_mismatch"
+
+def test_recovery_scenario_retry_binds_without_duplicate_creation(tmp_path):
+    async def scenario():
+        async with core_flow(tmp_path) as (hass, entry, lifecycle):
+            cache = CacheManager(hass, entry.entry_id, account_login=entry.unique_id,
+                                 account_uid=entry.data["account_uid"])
+            device = device_record("dev_123", "did1")
+            await cache.async_save_devices([device])
+            await cache.async_save_scenario_marker("dev_123", "saved-trigger", "pending_unknown")
+            runtime = YandexQuasar(MagicMock(), policy=EntryPolicy(), cache_manager=cache)
+            runtime.devices = [device]
+            runtime.owned_glagol_ids = {"did1"}
+            runtime.readiness.scenarios_state = ScenariosState.READY
+            runtime.load_scenarios = AsyncMock(
+                side_effect=lambda: setattr(runtime, "scenarios", [wire_scenario("late")])
+            )
+            runtime.add_scenario = AsyncMock()
+            lifecycle.runtimes[entry.entry_id] = runtime
+            try:
+                recovery = await options_step(hass, "recovery")
+                assert runtime.load_scenarios.await_count == 0
+                form = await hass.config_entries.options.async_configure(
+                    recovery["flow_id"], {"next_step_id": "retry_scenario_creation"}
+                )
+                assert form["step_id"] == "retry_scenario_creation"
+                assert runtime.load_scenarios.await_count == 0
+                result = await hass.config_entries.options.async_configure(
+                    form["flow_id"], {"device_id": "dev_123", "confirm_risk": True}
+                )
+                assert result["reason"] == "scenario_bound"
+                assert device["scenario_id"] == "late"
+                runtime.add_scenario.assert_not_awaited()
+                assert runtime.load_scenarios.await_count == 1
+                assert dict(entry.options) == {}
+            finally:
+                lifecycle.runtimes.pop(entry.entry_id, None)
+                await cache.async_close()
+
+    asyncio.run(scenario())
+
+
+def test_reauth_timeout_and_account_mismatch_keep_credentials(tmp_path):
+    async def scenario():
+        async with core_flow(tmp_path) as (hass, entry, lifecycle):
+            flow = YandexStationFlowHandler()
+            flow.hass = hass
+            flow.context = {"source": "reauth", "entry_id": entry.entry_id}
+            await flow.async_step_reauth()
+            await flow.async_step_reauth_confirm({"confirm_reauth": True})
+            client = MagicMock()
+            client.close = AsyncMock()
+            with patch("custom_components.yandex_station.config_flow.utils.async_create_clientsession",
+                       return_value=client), \
+                 patch.object(YandexSession, "validate_token",
+                              new_callable=AsyncMock, side_effect=asyncio.TimeoutError):
+                with pytest.raises(asyncio.TimeoutError):
+                    await flow.async_step_token({"token": "synthetic"})
+            assert entry.data["x_token"] == "previous"
+            assert entry.data["account_uid"] == "uid-1"
+            await flow._close_flow_session()
+            mismatch = LoginResponse({
+                "status": "ok", "display_login": "synthetic-login",
+                "uid": "other-uid", "x_token": "wrong-account",
+            })
+            assert (await flow._check_yandex_response(mismatch))["reason"] == "account_mismatch"
+            assert entry.data["x_token"] == "previous"
+            assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+
+    asyncio.run(scenario())
+
+
+def test_broken_saved_endpoints_can_be_repaired_from_settings(tmp_path):
+    async def scenario():
+        async with core_flow(tmp_path, options={
+            "cookie_storage_endpoints": [],
+            "include": ["synthetic-device"],
+        }) as (hass, entry, lifecycle):
+            with patch.object(hass.config_entries, "async_reload", new_callable=AsyncMock,
+                              return_value=True):
+                settings = await options_step(hass, "settings")
+                assert settings["type"] == "form"
+                assert "некорректная" in settings["description_placeholders"]["current_cookie"]
+                restored = await asyncio.create_task(hass.config_entries.options.async_configure(
+                    settings["flow_id"], {
+                        "cookie_storage_endpoints": json.dumps([{
+                            "url": "https://quasar.yandex.ru/get_account_config",
+                            "validator": "status_ok",
+                        }]),
+                    }
+                ))
+                assert restored["type"] == "create_entry"
+                assert entry.options["include"] == ["synthetic-device"]
+                assert entry.options["cookie_storage_endpoints"][0]["validator"] == "status_ok"
+
+    asyncio.run(scenario())
+
+
+def test_empty_valid_snapshot_keeps_offline_selection(tmp_path):
+    async def scenario():
+        async with core_flow(tmp_path, options={"include": ["unavailable-1"]}) as (
+            hass, entry, lifecycle
+        ):
+            cache = CacheManager(hass, entry.entry_id, account_login=entry.unique_id,
+                                 account_uid=entry.data["account_uid"])
+            await cache.async_save_devices([])
+            await cache.async_close()
+            recovery = await options_step(hass, "recovery")
+            assert recovery["description_placeholders"]["cache_reason"] == "cache_ready"
+            devices = await options_step(hass, "devices")
+            assert devices["data_schema"]({
+                "include": ["unavailable-1"],
+            })["include"] == ["unavailable-1"]
 
     asyncio.run(scenario())
