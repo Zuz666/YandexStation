@@ -464,15 +464,11 @@ class YandexQuasar(Dispatcher):
         ]
 
     @staticmethod
-    def _created_scenario_steps(device_id: str) -> list[dict]:
-        """Steps создаваемой записи-пустышки: target известен на момент POST."""
-        return [{
-            "action": "scenarios.steps.actions.v2",
-            "parameters": {"items": [{
-                "type": "step.action.item.device",
-                "value": {"id": device_id},
-            }]},
-        }]
+    def _created_scenario_record(sid: str, device_id: str, hash_code: str) -> dict:
+        """Runtime-запись созданной пустышки в фактической wire-форме builder."""
+        record = scenario_speaker_tts(f"ХА {device_id}", hash_code, device_id, "пустышка")
+        record["id"] = sid
+        return record
 
 
     def _scenario_candidates(self, hash_code: str) -> list[dict]:
@@ -492,9 +488,12 @@ class YandexQuasar(Dispatcher):
                 if trigger.get("type") == "scenario.trigger.voice":
                     value = trigger.get("value")
                 elif "value" in trigger and "type" not in trigger:
+                    # известный flat legacy template
                     value = trigger.get("value")
                 elif isinstance(trigger.get("trigger"), dict):
-                    value = trigger["trigger"].get("value")
+                    inner = trigger["trigger"]
+                    if inner.get("type") == "scenario.trigger.voice":
+                        value = inner.get("value")
                 if value == hash_code:
                     candidates.append(scenario)
                     break
@@ -519,9 +518,11 @@ class YandexQuasar(Dispatcher):
     async def _verify_scenario_target(self, scenario: dict, device_id: str) -> bool | None:
         """Полный target кандидата: True/False/None (неполный или неизвестный).
 
-        Проверяется `scenarios.steps.actions.v2` → `parameters.items` →
-        `step.action.item.device` и cloud device ID в item/value. Произвольное
-        имя сценария identity не является.
+        Wire-форма фактических builders: `step["type"] ==
+        "scenarios.steps.actions.v2"` → `parameters.items` →
+        `step.action.item.device` с cloud device ID в `item["id"]`/`value["id"]`.
+        Target должен быть единственным и нашим: посторонний или дополнительный
+        device item не считается совпадением. Имя сценария identity не является.
         """
         steps = scenario.get("steps")
         if not isinstance(steps, list) or not steps:
@@ -531,22 +532,31 @@ class YandexQuasar(Dispatcher):
             steps = scenario.get("steps")
             if not isinstance(steps, list) or not steps:
                 return None
-        found = False
-        for step in steps:
-            if not isinstance(step, dict) or step.get("action") != "scenarios.steps.actions.v2":
-                continue
-            items = (step.get("parameters") or {}).get("items")
-            if not isinstance(items, list):
-                continue
-            for item in items:
-                if not isinstance(item, dict) or item.get("type") != "step.action.item.device":
-                    continue
-                value = item.get("value")
-                if value == device_id or (
-                    isinstance(value, dict) and value.get("id") == device_id
-                ):
-                    found = True
-        return found
+        # Собственная пустышка содержит ровно один step и один device item.
+        # Дополнительные действия или несовпадающие IDs не доказывают identity.
+        if len(steps) != 1 or not isinstance(steps[0], dict):
+            return None
+        step = steps[0]
+        if step.get("type") != "scenarios.steps.actions.v2":
+            return None
+        parameters = step.get("parameters")
+        if not isinstance(parameters, dict):
+            return None
+        items = parameters.get("items")
+        if not isinstance(items, list) or len(items) != 1:
+            return None
+        item = items[0]
+        if not isinstance(item, dict) or item.get("type") != "step.action.item.device":
+            return None
+        value = item.get("value")
+        if not isinstance(value, dict):
+            return None
+        item_id, value_id = item.get("id"), value.get("id")
+        if not isinstance(item_id, str) or not isinstance(value_id, str):
+            return None
+        if item_id != value_id:
+            return False
+        return item_id == device_id
 
     async def _resolve_speaker_scenario(self, speaker: dict, *, allow_creation: bool = True) -> None:
         """Binding только при единственном полном совпадении trigger+target.
@@ -601,29 +611,30 @@ class YandexQuasar(Dispatcher):
         if not allow_creation:
             return
 
-        # write readiness: без CSRF автоматического POST нет
+        # Без подтверждённой долговременной записи unknown-outcome POST
+        # нельзя безопасно восстановить после restart.
+        if not self.cache_manager:
+            _LOGGER.warning("Scenario marker unavailable for %s; POST banned", device_id)
+            return
         if not await self.session.ensure_csrf():
             _LOGGER.warning("CSRF unavailable; scenario creation for %s aborted", device_id)
             return
-
-        if self.cache_manager:
-            verified = await self.cache_manager.async_save_and_verify_scenario_marker(
-                device_id, hash_code, SCENARIO_STATE_PENDING
+        verified = await self.cache_manager.async_save_and_verify_scenario_marker(
+            device_id, hash_code, SCENARIO_STATE_PENDING
+        )
+        if not verified:
+            _LOGGER.warning(
+                "Durable pending marker verification failed on disk for %s; aborting POST",
+                device_id,
             )
-            if not verified:
-                _LOGGER.warning(
-                    "Durable pending marker verification failed on disk for %s; aborting POST",
-                    device_id,
-                )
-                return
+            return
 
         try:
             sid = await self.add_scenario(device_id, hash_code)
             speaker["scenario_id"] = sid
             if self.scenarios is not None:
                 self.scenarios.append(
-                    {"id": sid, "name": f"ХА {device_id}", "triggers": [{"value": hash_code}],
-                     "steps": self._created_scenario_steps(device_id)}
+                    self._created_scenario_record(sid, device_id, hash_code)
                 )
             if self.cache_manager:
                 await self.cache_manager.async_save_scenario_marker(
@@ -672,26 +683,19 @@ class YandexQuasar(Dispatcher):
             if speaker.get("scenario_unresolved"):
                 raise RuntimeError("scenario_conflict")
 
-            journal = {}
-            if self.cache_manager and self.cache_manager.snapshot:
-                journal = self.cache_manager.snapshot.scenario_creation
-            existing = journal.get(device_id)
-            has_marker = (
-                isinstance(existing, dict)
-                and existing.get("state") in (SCENARIO_STATE_PENDING, SCENARIO_STATE_CONFIRMED)
-            )
-            if has_marker and not confirm_risk:
+            if not confirm_risk:
                 raise RuntimeError("confirm_required")
 
+            if not self.cache_manager:
+                raise RuntimeError("marker_unavailable")
             hash_code = encode(device_id)
             if not await self.session.ensure_csrf():
                 raise RuntimeError("csrf_unavailable")
-            if self.cache_manager:
-                verified = await self.cache_manager.async_save_and_verify_scenario_marker(
-                    device_id, hash_code, SCENARIO_STATE_PENDING
-                )
-                if not verified:
-                    raise RuntimeError("marker_verification_failed")
+            verified = await self.cache_manager.async_save_and_verify_scenario_marker(
+                device_id, hash_code, SCENARIO_STATE_PENDING
+            )
+            if not verified:
+                raise RuntimeError("marker_verification_failed")
             try:
                 sid = await self.add_scenario(device_id, hash_code)
             except Exception:
@@ -703,8 +707,7 @@ class YandexQuasar(Dispatcher):
             speaker["scenario_id"] = sid
             if self.scenarios is not None:
                 self.scenarios.append(
-                    {"id": sid, "name": f"ХА {device_id}", "triggers": [{"value": hash_code}],
-                     "steps": self._created_scenario_steps(device_id)}
+                    self._created_scenario_record(sid, device_id, hash_code)
                 )
             if self.cache_manager:
                 await self.cache_manager.async_save_scenario_marker(
@@ -745,7 +748,7 @@ class YandexQuasar(Dispatcher):
             self.scenarios = scenarios
             self.readiness.scenarios_state = ScenariosState.READY
         except Exception as e:
-            _LOGGER.debug(f"Ошибка загрузки сценариев: {e!r}")
+            _LOGGER.debug("Scenario catalog unavailable: %s", type(e).__name__)
             # старый список допустим только в diagnostics: bindings очищаются
             self.scenarios = None
             self.readiness.scenarios_state = ScenariosState.UNAVAILABLE
