@@ -118,6 +118,18 @@ def test_unchanged_options_closed_gate_and_disabled_retry(tmp_path):
             )
             assert unchanged["type"] == "create_entry"
             assert dict(entry.options) == {}
+            first = await options_step(hass, "settings")
+            second = await options_step(hass, "settings")
+            first_done = await hass.config_entries.options.async_configure(
+                first["flow_id"], {}
+            )
+            assert first_done["type"] == "create_entry"
+            second_done = await hass.config_entries.options.async_configure(
+                second["flow_id"], {"force_offline_local": True}
+            )
+            assert second_done["type"] == "create_entry"
+            assert entry.options["force_offline_local"] is True
+            hass.config_entries.async_update_entry(entry, options={})
             retry = await options_step(hass, "recovery")
             assert "retry_setup" in retry["menu_options"]
             assert retry["description_placeholders"]["cache_reason"] == "cache_missing"
