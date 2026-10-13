@@ -3,7 +3,7 @@ import logging
 import os
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_INCLUDE
+from homeassistant.const import CONF_INCLUDE, MAJOR_VERSION, MINOR_VERSION
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
@@ -19,6 +19,26 @@ from ..core.yandex_quasar import YandexQuasar
 
 INCLUDE_KEYS = ("id", "name", "type", "room_name", "skill_id", "house_name")
 _LOGGER = logging.getLogger(__name__)
+
+
+async def async_translate_entity_names(hass, entities, platform: str):
+    """Supply translated names only on Core predating native entity naming."""
+    if (MAJOR_VERSION, MINOR_VERSION) >= (2023, 4):
+        return
+    from homeassistant.helpers.translation import async_get_translations
+
+    translated = [
+        entity for entity in entities
+        if entity.has_entity_name and entity.translation_key is not None
+    ]
+    if not translated:
+        return
+    resources = await async_get_translations(
+        hass, hass.config.language, "entity", {DOMAIN}
+    )
+    for entity in translated:
+        key = f"component.{DOMAIN}.entity.{platform}.{entity.translation_key}.name"
+        entity._attr_name = resources[key]
 
 
 INCLUDE_TYPES_UNKNOWN = (
