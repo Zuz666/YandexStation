@@ -169,10 +169,13 @@ def _speaker_registry_entries(hass, glagol_id):
     registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
     if "async_get_devices" in getattr(type(device_registry), "__dict__", {}):
-        matches = device_registry.async_get_devices(identifiers={(DOMAIN, glagol_id)})
-        device = matches[0] if matches else None
+        matches = list(
+            device_registry.async_get_devices(identifiers={(DOMAIN, glagol_id)})
+        )
     else:
-        device = device_registry.async_get_device(identifiers={(DOMAIN, glagol_id)})
+        one = device_registry.async_get_device(identifiers={(DOMAIN, glagol_id)})
+        matches = [one] if one is not None else []
+    by_id = {item.id: item for item in matches if item is not None}
     suffixes = {
         "camera": ("lyrics",), "calendar": ("calendar",),
         "select": ("equalizer",), "conversation": ("conversation",),
@@ -180,12 +183,17 @@ def _speaker_registry_entries(hass, glagol_id):
         "binary_sensor": ("local_connection",),
     }
     records = []
+    media_device = None
     for item in registry.entities.values():
         if item.platform != DOMAIN:
             continue
         if item.domain == "media_player" and item.unique_id == glagol_id:
             records.append(item)
-        elif device is not None and item.device_id == device.id:
+            if item.device_id:
+                media_device = by_id.get(item.device_id) or device_registry.async_get(
+                    item.device_id
+                )
+        elif item.device_id in by_id:
             records.append(item)
         elif any(
             item.unique_id in (
@@ -195,6 +203,18 @@ def _speaker_registry_entries(hass, glagol_id):
             for suffix in suffixes.get(item.domain, ())
         ):
             records.append(item)
+    device = media_device
+    if device is None:
+        record_devices = [
+            by_id[item.device_id]
+            for item in records
+            if item.device_id in by_id
+        ]
+        device = (
+            record_devices[0]
+            if record_devices
+            else (matches[0] if matches else None)
+        )
     return device, records
 
 
@@ -204,10 +224,23 @@ def _registry_speaker_owner(hass, glagol_id):
     for item in records:
         if item.domain == "media_player" and item.unique_id == glagol_id:
             return item.config_entry_id or "", False
-    owners = {item.config_entry_id for item in records}
+    device_registry = dr.async_get(hass)
+    if "async_get_devices" in getattr(type(device_registry), "__dict__", {}):
+        matches = list(
+            device_registry.async_get_devices(identifiers={(DOMAIN, glagol_id)})
+        )
+    else:
+        one = device_registry.async_get_device(identifiers={(DOMAIN, glagol_id)})
+        matches = [one] if one is not None else []
+    device_owners = {
+        cid for match in matches if match is not None for cid in match.config_entries if cid
+    }
+    if not records:
+        return None, len(device_owners) > 1
+    owners = {item.config_entry_id for item in records} | device_owners
     if len(owners) == 1 and None not in owners:
         return owners.pop(), False
-    return None, bool(records)
+    return None, True
 
 
 async def async_resolve_speaker_owners(hass, entry, quasar) -> set[str]:
@@ -291,9 +324,19 @@ async def async_claim_speaker(hass, entry, glagol_id: str) -> None:
             if not isinstance(glagol_id, str) or glagol_id not in records:
                 raise ValueError("ownership_conflict")
             device, entities = _speaker_registry_entries(hass, glagol_id)
+            devices = dr.async_get(hass)
+            if "async_get_devices" in getattr(type(devices), "__dict__", {}):
+                matches = list(
+                    devices.async_get_devices(identifiers={(DOMAIN, glagol_id)})
+                )
+            else:
+                matches = [device] if device is not None else []
+            if device is not None and all(m.id != device.id for m in matches):
+                matches.append(device)
             owners = {item.config_entry_id for item in entities if item.config_entry_id}
-            if device is not None:
-                owners.update(device.config_entries)
+            for match in matches:
+                if match is not None:
+                    owners.update(match.config_entries)
             if previous := lifecycle.speaker_owners.get(glagol_id):
                 owners.add(previous)
             for owner in owners - {entry.entry_id}:
@@ -311,16 +354,22 @@ async def async_claim_speaker(hass, entry, glagol_id: str) -> None:
                 raise RuntimeError("reload_in_progress")
             registry = er.async_get(hass)
             for entity in entities:
+                updates = {}
                 if entity.config_entry_id != entry.entry_id:
-                    registry.async_update_entity(
-                        entity.entity_id, config_entry_id=entry.entry_id
-                    )
+                    updates["config_entry_id"] = entry.entry_id
+                if device is not None and entity.device_id != device.id:
+                    updates["device_id"] = device.id
+                if updates:
+                    registry.async_update_entity(entity.entity_id, **updates)
             if device is not None:
-                devices = dr.async_get(hass)
                 if "async_get_devices" in getattr(type(devices), "__dict__", {}):
-                    devices.async_update_device(
-                        device.id, new_config_entry_id=entry.entry_id
-                    )
+                    for match in matches:
+                        if match is not None and match.id != device.id:
+                            devices.async_remove_device(match.id)
+                    if entry.entry_id not in device.config_entries:
+                        devices.async_update_device(
+                            device.id, new_config_entry_id=entry.entry_id
+                        )
                 else:
                     devices.async_update_device(device.id, add_config_entry_id=entry.entry_id)
                     for owner in owners - {entry.entry_id}:
