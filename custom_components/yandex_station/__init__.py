@@ -145,12 +145,9 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
     try:
         from homeassistant.helpers import network
         context.hass_url = network.get_url(hass, allow_external=False)
-        stream.StreamView.hass_url = context.hass_url
     except Exception as e:
         _LOGGER.warning(f"Ошибка получения локального адреса Home Assistant: {e}")
 
-    stream.StreamView.hass = hass
-    stream.StreamView.key = context.key
     context.implementation = stream.StreamImplementation(context)
 
     if lifecycle.stream_dispatcher is None:

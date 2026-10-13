@@ -329,6 +329,13 @@ class LifecycleManager:
             await asyncio.gather(*tasks, return_exceptions=True)
         for runtime in tuple(self.runtimes.values()):
             await runtime.async_stop()
+        if self.context and self.context.implementation is not None:
+            try:
+                await asyncio.wait_for(self.context.drain_event.wait(), 10)
+            except asyncio.TimeoutError:
+                _LOGGER.warning("Stream drain timed out during shutdown")
+            await self.context.implementation.async_close()
+            self.context.implementation = None
 
     async def async_hot_reload(
         self, hass: HomeAssistant, enable_code_reload: bool = False
@@ -421,13 +428,13 @@ class LifecycleManager:
                 try:
                     stream_mod = sys.modules.get("custom_components.yandex_station.core.stream")
                     if stream_mod and hasattr(stream_mod, "StreamImplementation"):
+                        previous = self.context.implementation
+                        self.context.implementation = None
+                        if previous is not None:
+                            await previous.async_close()
                         new_impl = stream_mod.StreamImplementation(self.context)
                         self.context.implementation = new_impl
                         rebind_ok = True
-                        if hasattr(stream_mod, "StreamView"):
-                            stream_mod.StreamView.key = self.context.key
-                            stream_mod.StreamView.hass_url = self.context.hass_url
-                            stream_mod.StreamView.hass = self.context.hass
                         root = sys.modules["custom_components.yandex_station"]
                         await root.async_rebind_runtime(hass)
                     else:
