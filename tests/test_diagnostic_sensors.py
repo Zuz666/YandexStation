@@ -11,7 +11,13 @@ from custom_components.yandex_station.binary_sensor import (
     async_setup_entry as bs_setup_entry,
 )
 from custom_components.yandex_station.core.const import DOMAIN
-from custom_components.yandex_station.core.policy import AuthState, DevicesState, EntryPolicy, Readiness
+from custom_components.yandex_station.core.policy import (
+    AuthState,
+    DevicesState,
+    EntryPolicy,
+    Readiness,
+    ScenariosState,
+)
 from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
 from custom_components.yandex_station.core.yandex_station import YandexStation
 from custom_components.yandex_station.sensor import (
@@ -109,6 +115,53 @@ def test_service_device_and_account_sensors():
         assert inv_sensor.extra_state_attributes["last_snapshot_at"] == "2026-10-13T12:00:00Z"
 
     asyncio.run(scenario())
+def test_quasar_sync_transitions_readiness_to_online():
+    async def scenario():
+        session = MagicMock()
+        policy = EntryPolicy()
+        readiness = Readiness()
+        quasar = YandexQuasar(session, policy=policy, readiness=readiness)
+
+        mock_resp_devices = AsyncMock()
+        mock_resp_devices.json.return_value = {
+            "status": "ok",
+            "households": [{"name": "Home", "all": []}],
+        }
+        mock_resp_scenarios = AsyncMock()
+        mock_resp_scenarios.json.return_value = {
+            "status": "ok",
+            "scenarios": [],
+        }
+
+        async def fake_get(url, **kwargs):
+            if "scenarios" in url:
+                return mock_resp_scenarios
+            return mock_resp_devices
+
+        session.get = AsyncMock(side_effect=fake_get)
+
+        assert readiness.auth_state == AuthState.UNKNOWN
+        assert readiness.devices_state == DevicesState.UNKNOWN
+
+        await quasar.init()
+
+        assert readiness.auth_state == AuthState.VALID
+        assert readiness.devices_state == DevicesState.READY
+        assert readiness.scenarios_state == ScenariosState.READY
+        assert readiness.inventory_source == "cloud"
+
+        entry = MagicMock()
+        entry.entry_id = "test_e1"
+        service_device = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name="Яндекс",
+            entry_type=DeviceEntryType.SERVICE,
+        )
+        health_sensor = YandexCloudHealthSensor(quasar, entry, service_device)
+        assert health_sensor.native_value == "online"
+
+    asyncio.run(scenario())
+
 def test_speaker_transport_and_alice_sensors():
     async def scenario():
         session = MagicMock()
