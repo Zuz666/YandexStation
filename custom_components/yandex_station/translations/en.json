@@ -53,14 +53,14 @@
   },
   "options": {
     "abort": {
-      "reauth_started": "Reauthentication started. Current credentials and cache are preserved until sign-in succeeds.",
-      "claim_unavailable": "No eligible speakers are available in this account's local snapshot for ownership transfer.",
-      "speaker_claimed": "Speaker ownership transferred to this account. Ordinary integration entry reload scheduled.",
-      "retry_started": "One ordinary integration entry reload has been scheduled.",
-      "recovery_runtime_missing": "The entry is not currently running. Use 'Retry entry setup'.",
-      "scenario_retry_unavailable": "No unbound scenarios with a saved marker are available for a manual retry.",
-      "scenario_bound": "Scenario found and bound without creating a duplicate.",
-      "scenario_created": "Scenario created after explicit duplicate-risk confirmation."
+      "reauth_started": "Reauthentication started. Go to Settings -> Devices & services to complete sign-in; current credentials and cache are preserved.",
+      "claim_unavailable": "No speakers in this account's local cache require ownership transfer.",
+      "speaker_claimed": "Speaker transferred to this account. Integration entry reload started.",
+      "retry_started": "Integration entry reload started.",
+      "recovery_runtime_missing": "The integration entry is not currently running. Use 'Restart integration entry' first.",
+      "scenario_retry_unavailable": "All speakers in this account already have bound cloud scenarios — manual recovery is not needed.",
+      "scenario_bound": "Existing cloud scenario found and bound without creating a duplicate.",
+      "scenario_created": "Service scenario created and bound to the speaker."
     },
     "error": {
       "invalid_endpoint": "Invalid API URL or fallback endpoint list. Use HTTPS without username, password, fragment, or extra query parameters; specify a validator for cookie probes.",
@@ -84,40 +84,40 @@
         "menu_options": {
           "settings": "Integration settings and modes",
           "devices": "Import Yandex Smart Home devices",
-          "recovery": "Recovery",
+          "recovery": "Diagnostics and recovery",
           "reauth": "Reauthenticate (Reauth)"
         }
       },
       "recovery": {
-        "title": "Recovery",
-        "description": "Local state reasons (no cloud requests): snapshot {cache_reason}; setup {setup_reason}; auth {auth_reason}; catalog {cloud_reason}; scenarios {scenario_reason}; ownership {ownership_reason}.",
+        "title": "Diagnostics and recovery",
+        "description": "**Current entry status** *(checked locally, no cloud requests)*:\n\n{cache_icon} **Local device cache:** `{cache_reason}`\n{setup_icon} **Last setup status:** `{setup_reason}`\n{auth_icon} **Auth session:** `{auth_reason}`\n{cloud_icon} **Cloud connectivity:** `{cloud_reason}`\n{scenario_icon} **Speaker scenarios:** `{scenario_reason}`\n{ownership_icon} **Speaker ownership:** `{ownership_reason}`\n\n*🟢 — normal · 🟡 — offline/limited mode · 🔴 — needs attention*\n\nSelect an action below:",
         "menu_options": {
-          "retry_setup": "Retry entry setup",
-          "retry_scenario_creation": "Retry scenario creation with risk confirmation",
-          "claim_speaker": "Transfer speaker ownership to this account"
+          "retry_setup": "Restart integration entry",
+          "retry_scenario_creation": "Restore speaker cloud scenario",
+          "claim_speaker": "Claim speaker from a disabled account"
         }
       },
       "retry_setup": {
-        "title": "Retry entry setup",
-        "description": "Request one ordinary reload of this entry without changing settings or enabling a disabled entry.",
+        "title": "Restart integration entry",
+        "description": "Performs one ordinary reload of this entry without resetting your settings or local cache.\n\nUseful when the entry is stuck in an error state after a temporary network or Yandex outage. Manually disabled entries are not enabled automatically.",
         "data": {
-          "confirm_retry": "Confirm setup retry"
+          "confirm_retry": "Confirm entry restart"
         }
       },
       "retry_scenario_creation": {
-        "title": "Manual scenario creation retry",
-        "description": "A fresh check may find and bind an existing scenario without writing. If creation already succeeded but the cloud has not listed it yet, retrying may create a duplicate. This action performs at most one confirmed attempt.",
+        "title": "Restore speaker cloud scenario",
+        "description": "Use this when local control works, but cloud voice commands or cloud TTS fail on a speaker.\n\n1. First, the integration checks the cloud scenario list — if the service scenario already exists, it will be bound without creating a new one.\n2. If not found, at most one creation attempt will be performed after your confirmation.",
         "data": {
-          "device_id": "Speaker with an unbound scenario",
-          "confirm_risk": "I understand the duplicate risk and confirm the retry"
+          "device_id": "Select speaker",
+          "confirm_risk": "I understand the duplicate risk on cloud timeout and confirm the retry"
         }
       },
       "claim_speaker": {
-        "title": "Transfer speaker ownership",
-        "description": "Available only after removing or disabling the previous owner. Speaker entities keep their entity IDs, names, areas, and user disabled state. Tokens and scenarios from another account are not transferred.",
+        "title": "Claim speaker from another account",
+        "description": "Use this when moving a speaker between Yandex accounts on the same Home Assistant instance.\n\n• The previous owner account must be disabled or removed first.\n• All speaker entities keep their entity IDs, custom names, area, and history.\n• Foreign tokens and scenarios are never copied — this account uses its own cache.",
         "data": {
-          "glagol_id": "Speaker from this account's local snapshot",
-          "confirm_claim": "Confirm ownership transfer"
+          "glagol_id": "Select speaker to claim",
+          "confirm_claim": "Confirm transferring speaker ownership to this account"
         }
       },
       "settings": {
