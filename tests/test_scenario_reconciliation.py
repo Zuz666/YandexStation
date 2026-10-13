@@ -17,6 +17,7 @@ from custom_components.yandex_station.core.policy import (
 from custom_components.yandex_station.core.yandex_quasar import YandexQuasar, encode
 from custom_components.yandex_station.core.yandex_session import CloudRequestError
 from custom_components.yandex_station.core.yandex_station import YandexStation
+from .test_cache import device_record
 
 
 class ScenarioCommandPeer:
@@ -57,6 +58,15 @@ class ScenarioCommandPeer:
         return self
 
 
+def command_runtime(peer):
+    quasar = YandexQuasar(peer)
+    quasar.owned_glagol_ids = {"glagol1"}
+    device = device_record("dev1", "glagol1")
+    device["scenario_id"] = "scen1"
+    quasar.devices = [device]
+    return quasar, device
+
+
 def test_scenario_match_binds_and_saves_confirmed(tmp_path):
     async def scenario():
         session = MagicMock()
@@ -65,6 +75,7 @@ def test_scenario_match_binds_and_saves_confirmed(tmp_path):
         cache.async_save_scenario_marker = AsyncMock()
 
         quasar = YandexQuasar(session, cache_manager=cache)
+        quasar.owned_glagol_ids = {"did1"}
         device_id = "dev_123"
         hash_code = encode(device_id)
 
@@ -108,6 +119,7 @@ def test_scenario_creation_blocked_when_marker_exists(tmp_path):
         cache.async_save_scenario_marker = AsyncMock()
 
         quasar = YandexQuasar(session, cache_manager=cache)
+        quasar.owned_glagol_ids = {"did1"}
         device_id = "dev_123"
 
         speaker = {
@@ -134,8 +146,7 @@ def test_scenario_creation_blocked_when_marker_exists(tmp_path):
 def test_send_serialized_per_device():
     async def scenario():
         peer = ScenarioCommandPeer()
-        quasar = YandexQuasar(peer)
-        device = {"id": "dev1", "name": "Synthetic speaker", "scenario_id": "scen1"}
+        quasar, device = command_runtime(peer)
         outcomes = await asyncio.gather(
             quasar.send(device, "cmd1", is_tts=True),
             quasar.send(device, "cmd2", is_tts=True),
@@ -148,18 +159,14 @@ def test_send_serialized_per_device():
 
 def test_send_missing_scenario_id_fails_cleanly():
     async def scenario():
-        session = MagicMock()
-        session.put = AsyncMock()
-        session.post = AsyncMock()
-        quasar = YandexQuasar(session)
-
-        # Device has no scenario_id or scenario_id is None
-        device = {"id": "dev1", "name": "Колонка", "scenario_id": None}
+        peer = ScenarioCommandPeer()
+        quasar, device = command_runtime(peer)
+        device["scenario_id"] = None
 
         ok = await quasar.send(device, "продолжить")
         assert ok == SendOutcome.UNAVAILABLE
-        session.put.assert_not_called()
-        session.post.assert_not_called()
+        assert peer.configured is None
+        assert peer.executed == []
 
     asyncio.run(scenario())
 
@@ -167,8 +174,7 @@ def test_send_missing_scenario_id_fails_cleanly():
 def test_failed_put_and_lost_action_response_never_replay(caplog):
     async def scenario():
         peer = ScenarioCommandPeer()
-        quasar = YandexQuasar(peer)
-        device = {"id": "dev1", "scenario_id": "scen1"}
+        quasar, device = command_runtime(peer)
         secret = "synthetic-secret-spoken-phrase"
         peer.put_failure = True
         assert await quasar.send(device, secret) == SendOutcome.UNAVAILABLE
@@ -193,8 +199,7 @@ def test_command_deadline_includes_lock_wait(monkeypatch):
 
         monkeypatch.setattr(yandex_quasar, "COMMAND_TIMEOUT", 0.01)
         peer = ScenarioCommandPeer()
-        quasar = YandexQuasar(peer)
-        device = {"id": "dev1", "scenario_id": "scen1"}
+        quasar, device = command_runtime(peer)
         lock = asyncio.Lock()
         await lock.acquire()
         quasar._device_command_locks["dev1"] = lock
@@ -213,10 +218,9 @@ def test_cancelled_action_records_unknown_outcome_without_replay():
     async def scenario():
         peer = ScenarioCommandPeer()
         peer.release_action = asyncio.Event()
-        quasar = YandexQuasar(peer)
-        device = {"id": "dev1", "scenario_id": "scen1"}
+        quasar, device = command_runtime(peer)
         task = asyncio.create_task(quasar.send(device, "one-effect"))
-        await peer.action_started.wait()
+        await asyncio.wait_for(peer.action_started.wait(), 1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -246,12 +250,7 @@ def test_station_failed_cloud_commands_preserve_state(method, args, lost_action,
         peer = ScenarioCommandPeer()
         peer.put_failure = not lost_action
         peer.lose_action_response = lost_action
-        quasar = YandexQuasar(peer)
-        device = {
-            "id": "dev1", "name": "Synthetic speaker", "scenario_id": "scen1",
-            "capabilities": [{"type": "devices.capabilities.on_off"}],
-            "quasar_info": {"device_id": "glagol1", "platform": "yandexstation"},
-        }
+        quasar, device = command_runtime(peer)
         station = YandexStation(quasar, device)
         station._attr_state = MediaPlayerState.PAUSED
         station._attr_volume_level = 0.4
@@ -277,6 +276,7 @@ def test_failed_durable_marker_verification_aborts_post():
         cache.async_save_and_verify_scenario_marker = AsyncMock(return_value=False)
 
         quasar = YandexQuasar(session, cache_manager=cache)
+        quasar.owned_glagol_ids = {"did1"}
         quasar.devices = [{
             "id": "dev_fail_1",
             "name": "Колонка",
@@ -311,6 +311,7 @@ def test_concurrent_load_speakers_calls_are_serialized():
         cache.async_save_scenario_marker = AsyncMock()
 
         quasar = YandexQuasar(session, cache_manager=cache)
+        quasar.owned_glagol_ids = {"did1"}
         speaker = {
             "id": "dev_concurrent_1",
             "name": "Колонка",
@@ -351,6 +352,7 @@ def test_untrusted_journal_aborts_creation():
         cache.snapshot = None
 
         quasar = YandexQuasar(session, cache_manager=cache)
+        quasar.owned_glagol_ids = {"did1"}
         quasar.devices = [{
             "id": "dev_untrusted_1",
             "name": "Колонка",

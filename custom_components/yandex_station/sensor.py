@@ -181,7 +181,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         entities.append(YandexCloudHealthSensor(quasar, entry, service_device))
         entities.append(YandexInventorySourceSensor(quasar, entry, service_device))
 
-        for speaker in quasar.speakers + quasar.modules:
+        for speaker in quasar.owned_speakers + quasar.owned_modules:
             entities.append(YandexTransportSensor(quasar, speaker))
             entities.append(YandexAliceStateSensor(quasar, speaker))
     for quasar, device, config in hass_utils.incluce_devices(hass, entry):

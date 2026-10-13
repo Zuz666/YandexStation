@@ -60,6 +60,7 @@ def test_async_setup_and_services(tmp_path):
             "entity": entity,
         }
         quasar.devices = [dev]
+        quasar.owned_glagol_ids = {"did_1"}
         hass.data[DOMAIN]["user1"] = quasar
 
         # Test send_command

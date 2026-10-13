@@ -54,7 +54,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(
         [
             YandexEqualizer(quasar, sp)
-            for sp in quasar.speakers
+            for sp in quasar.owned_speakers
             if sp["quasar_info"]["platform"] in EQUALIZER_PLATFORMS
         ],
         True,
