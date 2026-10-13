@@ -308,7 +308,13 @@ class YandexQuasar(Dispatcher):
 
         if self.policy.enable_scenarios and self.policy.effective_cloud_allowed:
             await self.load_scenarios()
-            await self.load_speakers()
+            if self.readiness.scenarios_state == ScenariosState.READY:
+                await self.load_speakers()
+            else:
+                _LOGGER.warning(
+                    "Scenarios catalog is %s; skipping speaker scenario reconciliation",
+                    self.readiness.scenarios_state,
+                )
         else:
             self.readiness.scenarios_state = ScenariosState.DISABLED
 
@@ -323,6 +329,12 @@ class YandexQuasar(Dispatcher):
         return [i for i in self.devices if has_quasar(i) and not i.get("capabilities")]
 
     async def load_speakers(self):
+        if self.scenarios is None:
+            _LOGGER.warning(
+                "Cannot reconcile speaker scenarios: catalog is unpopulated (None)"
+            )
+            return
+
         async with self._reconciliation_lock:
             hashes = {}
             if self.scenarios:
