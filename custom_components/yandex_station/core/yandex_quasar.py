@@ -3,16 +3,18 @@ import json
 import logging
 from datetime import datetime
 
-from aiohttp import WSMsgType
+from aiohttp import ClientError, WSMsgType
 
 from .quasar_info import has_quasar
-from .yandex_session import YandexSession
+from .yandex_session import CloudRequestError, YandexSession, safe_error_summary
 from .policy import (
     AuthState,
     DevicesState,
     EntryPolicy,
     Readiness,
+    RecoveryBackoff,
     ScenariosState,
+    SendOutcome,
 )
 from .cache import (
     CacheManager,
@@ -22,6 +24,7 @@ from .cache import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+COMMAND_TIMEOUT = 10
 
 IOT_TYPES = {
     "on": "devices.capabilities.on_off",
@@ -268,7 +271,8 @@ class YandexQuasar(Dispatcher):
                     await self._sync_cloud_devices()
                 except Exception as e:
                     _LOGGER.debug(
-                        "Initial cloud sync failed, continuing in cached mode: %r", e
+                        "Initial cloud sync unavailable, using cache: %s",
+                        safe_error_summary(e),
                     )
             return
 
@@ -279,20 +283,28 @@ class YandexQuasar(Dispatcher):
 
         # No snapshot: initial cloud bootstrap required
         try:
-            await self._sync_cloud_devices()
+            await asyncio.wait_for(self._sync_cloud_devices(), timeout=15)
         except Exception as e:
-            _LOGGER.debug("Cloud devices fetch failed: %r", e)
+            _LOGGER.debug("Cloud devices fetch unavailable: %s", safe_error_summary(e))
             self.readiness.devices_state = DevicesState.UNAVAILABLE
             raise
 
     async def _sync_cloud_devices(self):
         """Sync devices catalog and scenarios from Yandex cloud."""
         _LOGGER.debug("Получение списка устройств из облака.")
-        r = await self.session.get(
-            "https://iot.quasar.yandex.ru/m/v3/user/devices", timeout=15
-        )
+        try:
+            r = await self.session.get(
+                "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
+            )
+        except CloudRequestError as error:
+            if error.status == 401:
+                # A probe/exchange classifies credentials; this status alone cannot.
+                # Recovery owns the next inventory attempt, never this response path.
+                await self.session.refresh_cookies()
+            raise
         resp = await r.json()
-        assert resp["status"] == "ok", resp
+        if not isinstance(resp, dict) or resp.get("status") != "ok":
+            raise RuntimeError("inventory_unavailable")
 
         self.devices = []
         for house in resp["households"]:
@@ -419,7 +431,8 @@ class YandexQuasar(Dispatcher):
         списком устройств.
         """
         r = await self.session.get(
-            f"https://iot.quasar.yandex.ru/m/user/devices/{device['id']}/configuration"
+            f"https://iot.quasar.yandex.ru/m/user/devices/{device['id']}/configuration",
+            role="quasar",
         )
         resp = await r.json()
         assert resp["status"] == "ok", resp
@@ -429,7 +442,9 @@ class YandexQuasar(Dispatcher):
     async def load_scenarios(self):
         """Получает список сценариев, которые мы ранее создали."""
         try:
-            r = await self.session.get("https://iot.quasar.yandex.ru/m/user/scenarios")
+            r = await self.session.get(
+                "https://iot.quasar.yandex.ru/m/user/scenarios", role="quasar"
+            )
             resp = await r.json()
             assert resp["status"] == "ok", resp
             self.scenarios = resp["scenarios"]
@@ -448,7 +463,8 @@ class YandexQuasar(Dispatcher):
 
         # load scenario info
         r = await self.session.get(
-            f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/{sid}/edit"
+            f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/{sid}/edit",
+            role="quasar",
         )
         resp = await r.json()
         assert resp["status"] == "ok"
@@ -456,7 +472,8 @@ class YandexQuasar(Dispatcher):
         # convert to scenario patch
         payload = parse_scenario(resp["scenario"])
         r = await self.session.put(
-            f"https://iot.quasar.yandex.ru/m/v3/user/scenarios/{sid}", json=payload
+            f"https://iot.quasar.yandex.ru/m/v3/user/scenarios/{sid}", json=payload,
+            role="quasar",
         )
         resp = await r.json()
         assert resp["status"] == "ok", resp
@@ -465,61 +482,125 @@ class YandexQuasar(Dispatcher):
         """Добавляет сценарий-пустышку."""
         payload = scenario_speaker_tts("ХА " + device_id, hash, device_id, "пустышка")
         r = await self.session.post(
-            f"https://iot.quasar.yandex.ru/m/v4/user/scenarios", json=payload
+            "https://iot.quasar.yandex.ru/m/v4/user/scenarios", json=payload,
+            role="quasar",
         )
         resp = await r.json()
         assert resp["status"] == "ok", resp
         return resp["scenario_id"]
 
-    async def send(self, device: dict, text: str, is_tts: bool = False) -> bool:
-        """Запускает сценарий на выполнение команды или TTS."""
-        sid = device.get("scenario_id")
-        if not sid:
-            _LOGGER.debug(
-                f"{device.get('name')} => cloud send skipped: no valid scenario_id"
-            )
-            return False
+    async def send(
+        self, device: dict, text: str, is_tts: bool = False
+    ) -> SendOutcome:
+        """Send one PUT/action pair; never replay an uncertain side effect."""
+        action_dispatched = False
+        phase = "lock_wait"
+        reason = "ok"
+        entity_id = getattr(device.get("entity"), "entity_id", None)
+        operation = "tts" if is_tts else "command"
 
-        device_id = device["id"]
-        lock = self._device_command_locks.setdefault(device_id, asyncio.Lock())
-        async with lock:
-            _LOGGER.debug(f"{device['name']} => cloud | {text}")
-
-            name = "ХА " + device_id
-            trigger = encode(device_id)
-            payload = (
-                scenario_speaker_tts(name, trigger, device_id, text)
-                if is_tts
-                else scenario_speaker_action(name, trigger, device_id, text)
-            )
-
-            try:
-                r = await self.session.put(
+        async def execute():
+            nonlocal action_dispatched, phase, reason
+            lock = self._device_command_locks.setdefault(device["id"], asyncio.Lock())
+            async with lock:
+                phase = "admission"
+                sid = device.get("scenario_id")
+                if not self.policy.effective_cloud_allowed:
+                    reason = "cloud_blocked_by_policy"
+                elif not self.policy.enable_scenarios:
+                    reason = "scenarios_disabled"
+                elif not sid:
+                    reason = "scenario_missing"
+                elif self.readiness.scenarios_state != ScenariosState.READY:
+                    reason = "scenarios_unavailable"
+                else:
+                    reason = "ok"
+                if reason != "ok":
+                    return SendOutcome.UNAVAILABLE
+                phase = "csrf"
+                if not await self.session.ensure_csrf():
+                    reason = "csrf_unavailable"
+                    return SendOutcome.UNAVAILABLE
+                device_id = device["id"]
+                payload = (
+                    scenario_speaker_tts("ХА " + device_id, encode(device_id), device_id, text)
+                    if is_tts
+                    else scenario_speaker_action("ХА " + device_id, encode(device_id), device_id, text)
+                )
+                phase = "scenario_update"
+                response = await self.session.put(
                     f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/{sid}",
+                    role="quasar",
                     json=payload,
                 )
-                resp = await r.json()
-                if resp.get("status") != "ok":
-                    _LOGGER.warning(f"Scenario update failed: {resp}")
-                    return False
+                body = await response.json()
+                if not isinstance(body, dict) or body.get("status") != "ok":
+                    reason = "invalid_api_response"
+                    return SendOutcome.UNAVAILABLE
+                phase = "scenario_action"
+                action_dispatched = True
+                response = await self.session.post(
+                    f"https://iot.quasar.yandex.ru/m/user/scenarios/{sid}/actions",
+                    role="quasar",
+                )
+                body = await response.json()
+                if not isinstance(body, dict) or body.get("status") != "ok":
+                    reason = "invalid_api_response"
+                    return SendOutcome.UNKNOWN_OUTCOME
+                return SendOutcome.SENT
 
-                r = await self.session.post(
-                    f"https://iot.quasar.yandex.ru/m/user/scenarios/{sid}/actions"
-                )
-                resp = await r.json()
-                if resp.get("status") != "ok":
-                    _LOGGER.warning(f"Scenario action failed: {resp}")
-                    return False
-                return True
-            except Exception as e:
+        try:
+            outcome = await asyncio.wait_for(execute(), COMMAND_TIMEOUT)
+        except asyncio.CancelledError:
+            if action_dispatched:
+                device["last_command_outcome"] = SendOutcome.UNKNOWN_OUTCOME.value
                 _LOGGER.warning(
-                    f"Cloud command send failed for {device.get('name')}: {e!r}"
+                    "Cloud command: entity=%s operation=%s phase=%s "
+                    "outcome=unknown_outcome reason=cancelled",
+                    entity_id, operation, phase,
                 )
-                return False
+            raise
+        except CloudRequestError as error:
+            reason = safe_error_summary(error)
+            if error.status == 404:
+                device.pop("scenario_id", None)
+                self.scenarios = None
+                self.readiness.scenarios_state = ScenariosState.UNAVAILABLE
+                self.dispatch_update("readiness", {})
+            outcome = (
+                SendOutcome.UNKNOWN_OUTCOME if action_dispatched else SendOutcome.UNAVAILABLE
+            )
+        except (ClientError, OSError, asyncio.TimeoutError, ValueError, RuntimeError) as error:
+            reason = safe_error_summary(error)
+            before_dispatch = isinstance(error, (ValueError, RuntimeError)) and str(error) in (
+                "csrf_unavailable", "cloud_not_published", "cloud_blocked_by_policy",
+                "invalid_endpoint", "untrusted_credential_destination",
+            )
+            outcome = (
+                SendOutcome.UNKNOWN_OUTCOME
+                if action_dispatched and not before_dispatch
+                else SendOutcome.UNAVAILABLE
+            )
+        previous = device.get("last_command_outcome")
+        device["last_command_outcome"] = outcome.value
+        if outcome != SendOutcome.SENT:
+            log = _LOGGER.warning if previous != outcome.value else _LOGGER.debug
+            log(
+                "Cloud command: entity=%s operation=%s phase=%s outcome=%s reason=%s",
+                entity_id, operation, phase, outcome.value, reason,
+            )
+        elif previous and previous != SendOutcome.SENT.value:
+            _LOGGER.info(
+                "Cloud command recovered: entity=%s operation=%s", entity_id, operation
+            )
+        return outcome
+
     async def load_local_speakers(self):
         """Загружает список локальных колонок. Не используется."""
         try:
-            r = await self.session.get("https://quasar.yandex.net/glagol/device_list")
+            r = await self.session.get(
+                "https://quasar.yandex.net/glagol/device_list", role="glagol_token"
+            )
             resp = await r.json()
             return [
                 {"device_id": d["id"], "name": d["name"], "platform": d["platform"]}
@@ -533,7 +614,8 @@ class YandexQuasar(Dispatcher):
     async def get_device_config(self, device: dict) -> (dict, str):
         did = device["id"]
         r = await self.session.get(
-            f"https://iot.quasar.yandex.ru/m/v2/user/devices/{did}/configuration"
+            f"https://iot.quasar.yandex.ru/m/v2/user/devices/{did}/configuration",
+            role="quasar",
         )
         resp = await r.json()
         assert resp["status"] == "ok", resp
@@ -546,13 +628,15 @@ class YandexQuasar(Dispatcher):
         r = await self.session.post(
             f"https://iot.quasar.yandex.ru/m/v3/user/devices/{did}/configuration/quasar",
             json={"config": config, "version": version},
+            role="quasar",
         )
         resp = await r.json()
         assert resp["status"] == "ok", resp
 
     async def get_device(self, device: dict):
         r = await self.session.get(
-            f"https://iot.quasar.yandex.ru/m/user/{device['item_type']}s/{device['id']}"
+            f"https://iot.quasar.yandex.ru/m/user/{device['item_type']}s/{device['id']}",
+            role="quasar",
         )
         resp = await r.json()
         assert resp["status"] == "ok", resp
@@ -570,6 +654,7 @@ class YandexQuasar(Dispatcher):
         r = await self.session.post(
             f"https://iot.quasar.yandex.ru/m/user/{device['item_type']}s/{device['id']}/actions",
             json={"actions": [action]},
+            role="quasar",
         )
         resp = await r.json()
         assert resp["status"] == "ok", resp
@@ -588,7 +673,7 @@ class YandexQuasar(Dispatcher):
         }
 
         url = f"https://iot.quasar.yandex.ru/m/user/{device['item_type']}s/{device['id']}/actions"
-        r = await self.session.post(url, json={"actions": [action]})
+        r = await self.session.post(url, role="quasar", json={"actions": [action]})
         resp = await r.json()
         assert resp["status"] == "ok", resp
 
@@ -612,6 +697,7 @@ class YandexQuasar(Dispatcher):
         r = await self.session.post(
             f"https://iot.quasar.yandex.ru/m/user/{device['item_type']}s/{device['id']}/actions",
             json={"actions": actions},
+            role="quasar",
         )
         resp = await r.json()
         assert resp["status"] == "ok", resp
@@ -626,6 +712,7 @@ class YandexQuasar(Dispatcher):
         r = await self.session.post(
             f"https://iot.quasar.yandex.ru/m/v3/user/custom/group/color/apply",
             json={"device_ids": [device["id"]], **kwargs},
+            role="quasar",
         )
         resp = await r.json()
         assert resp["status"] == "ok", resp
@@ -647,7 +734,9 @@ class YandexQuasar(Dispatcher):
         # _LOGGER.debug(f"Update speakers online status")
 
         try:
-            r = await self.session.get("https://quasar.yandex.ru/devices_online_stats")
+            r = await self.session.get(
+                "https://quasar.yandex.ru/devices_online_stats", role="account"
+            )
             resp = await r.json()
             assert resp["status"] == "ok", resp
         except:
@@ -670,7 +759,9 @@ class YandexQuasar(Dispatcher):
             _LOGGER.debug("Skipping cloud connect() due to cache-only/offline policy")
             return
 
-        r = await self.session.get("https://iot.quasar.yandex.ru/m/v3/user/devices")
+        r = await self.session.get(
+            "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
+        )
         resp = await r.json()
         assert resp["status"] == "ok", resp
 
@@ -680,7 +771,9 @@ class YandexQuasar(Dispatcher):
             for device in house["all"]:
                 self.dispatch_update(device["id"], device)
 
-        ws = await self.session.ws_connect(resp["updates_url"], heartbeat=60)
+        ws = await self.session.ws_connect(
+            resp["updates_url"], role="cloud_ws", heartbeat=60
+        )
         async for msg in ws:
             if msg.type != WSMsgType.TEXT:
                 break
@@ -706,7 +799,7 @@ class YandexQuasar(Dispatcher):
 
         try:
             r = await self.session.get(
-                f"https://iot.quasar.yandex.ru/m/v3/user/devices", timeout=15
+                "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
             )
             resp = await r.json()
             assert resp["status"] == "ok", resp
@@ -723,7 +816,7 @@ class YandexQuasar(Dispatcher):
         try:
             # 1. Get all scenarios history
             r = await self.session.get(
-                "https://iot.quasar.yandex.ru/m/user/scenarios/history"
+                "https://iot.quasar.yandex.ru/m/user/scenarios/history", role="quasar"
             )
             raw = await r.json()
 
@@ -748,7 +841,8 @@ class YandexQuasar(Dispatcher):
 
             # 4. Get speakers from launch devices
             r = await self.session.get(
-                f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/launches/{scenario['id']}"
+                f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/launches/{scenario['id']}",
+                role="quasar",
             )
             raw = await r.json()
 
@@ -767,20 +861,27 @@ class YandexQuasar(Dispatcher):
             _LOGGER.debug("Can't get voice scenario", exc_info=e)
 
     async def run_forever(self):
+        backoff = RecoveryBackoff()
         while not self.session.closed:
             try:
                 await self.connect()
-            except Exception as e:
-                _LOGGER.debug("Quasar update error", exc_info=e)
-            await asyncio.sleep(30)
+            except Exception as error:
+                reason = safe_error_summary(error)
+            else:
+                backoff.reset()
+                reason = "connection_closed"
+            retry_after = (
+                self.session.retry_after.get("cloud_ws")
+                or self.session.retry_after.get("quasar")
+            )
+            delay = backoff.next_delay(retry_after)
+            _LOGGER.debug(
+                "Cloud updates reconnect: reason=%s retry_in=%.1fs", reason, delay
+            )
+            await asyncio.sleep(delay)
 
     def start(self):
         self.updates_task = asyncio.create_task(self.run_forever())
-
-    def stop(self):
-        if self.updates_task:
-            self.updates_task.cancel()
-        self.dispatcher.clear()
 
     async def async_stop(self):
         """Cancel and await background tasks and Glagol connections (RFC v2 §2.3, §7.3)."""
@@ -800,7 +901,9 @@ class YandexQuasar(Dispatcher):
                 except Exception:
                     pass
 
+        await self.session.async_stop()
         self.dispatcher.clear()
+
     async def set_account_config(self, key: str, value):
         kv = ACCOUNT_CONFIG.get(key)
         assert kv and value in kv["values"], f"{key}={value}"
@@ -810,10 +913,13 @@ class YandexQuasar(Dispatcher):
             r = await self.session.post(
                 f"https://iot.quasar.yandex.ru/m/user/settings",
                 json={kv["key"]: kv["values"][value]},
+                role="quasar",
             )
 
         else:
-            r = await self.session.get("https://quasar.yandex.ru/get_account_config")
+            r = await self.session.get(
+                "https://quasar.yandex.ru/get_account_config", role="account"
+            )
             resp = await r.json()
             assert resp["status"] == "ok", resp
 
@@ -821,7 +927,8 @@ class YandexQuasar(Dispatcher):
             payload[kv["key"]] = kv["values"][value]
 
             r = await self.session.post(
-                "https://quasar.yandex.ru/set_account_config", json=payload
+                "https://quasar.yandex.ru/set_account_config", json=payload,
+                role="account",
             )
 
         resp = await r.json()
@@ -832,6 +939,7 @@ class YandexQuasar(Dispatcher):
             "https://rpc.alice.yandex.ru/gproxy/get_alarms",
             json={"device_ids": [device["quasar_info"]["device_id"]]},
             headers=ALARM_HEADERS,
+            role="rpc",
         )
         resp = await r.json()
         return resp["alarms"]
@@ -842,6 +950,7 @@ class YandexQuasar(Dispatcher):
             "https://rpc.alice.yandex.ru/gproxy/create_alarm",
             json={"alarm": alarm, "device_type": device["type"]},
             headers=ALARM_HEADERS,
+            role="rpc",
         )
         return resp.ok
 
@@ -851,6 +960,7 @@ class YandexQuasar(Dispatcher):
             "https://rpc.alice.yandex.ru/gproxy/change_alarm",
             json={"alarm": alarm, "device_type": device["type"]},
             headers=ALARM_HEADERS,
+            role="rpc",
         )
         return resp.ok
 
@@ -866,6 +976,7 @@ class YandexQuasar(Dispatcher):
                 ],
             },
             headers=ALARM_HEADERS,
+            role="rpc",
         )
         return resp.ok
 

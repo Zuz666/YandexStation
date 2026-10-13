@@ -25,8 +25,9 @@ async def get_file_info(
     }
     params["sign"] = sign(*params.values())[:-1]
 
-    r = await session.get(
+    r = await session.request_glagol(
         "https://api.music.yandex.net/get-file-info",
+        role="music",
         headers=HEADERS,
         params=params,
         timeout=5,
@@ -37,8 +38,12 @@ async def get_file_info(
 
 async def get_lyrics(session: YandexSession, track_id: int | str) -> str | None:
     # thanks to https://github.com/MarshalX/yandex-music-api
-    r = await session.post(
-        "https://api.music.yandex.net/tracks", data={"track-ids": [track_id]}, timeout=5
+    r = await session.request_glagol(
+        "https://api.music.yandex.net/tracks",
+        role="music",
+        method="post",
+        data={"track-ids": [track_id]},
+        timeout=5,
     )
     raw = await r.json()
     if not raw["result"][0]["lyricsInfo"]["hasAvailableSyncLyrics"]:
@@ -47,8 +52,9 @@ async def get_lyrics(session: YandexSession, track_id: int | str) -> str | None:
     timestamp = int(datetime.now().timestamp())
     params = {"timeStamp": timestamp, "sign": sign(track_id, timestamp)}
 
-    r = await session.get(
+    r = await session.request_glagol(
         f"https://api.music.yandex.net/tracks/{track_id}/lyrics",
+        role="music",
         headers=HEADERS,
         params=params,
         timeout=5,
@@ -56,7 +62,7 @@ async def get_lyrics(session: YandexSession, track_id: int | str) -> str | None:
     raw = await r.json()
     url = raw["result"]["downloadUrl"]
 
-    r = await session.get(url, timeout=5)
+    r = await session.get(url, role="music", timeout=5)
     raw = await r.read()
     return raw.decode("utf-8")
 

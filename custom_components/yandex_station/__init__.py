@@ -24,7 +24,7 @@ from homeassistant.const import (
     EVENT_HOMEASSISTANT_STOP,
 )
 from homeassistant.core import ServiceCall
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.event import async_track_time_interval
 
@@ -35,7 +35,7 @@ from .core.yandex_quasar import YandexQuasar
 from .core.yandex_session import YandexSession
 from .core.yandex_station import YandexStationBase
 from .hass import hass_utils
-from .core.policy import EntryPolicy, SessionConfig
+from .core.policy import AuthState, EntryPolicy, SessionConfig
 from .core.lifecycle import LifecycleManager, StableStreamDispatcher, StreamContext
 from .core.cache import CacheManager
 
@@ -81,9 +81,17 @@ CONF_SSL = "ssl"
 CONF_CLOUD_UPDATES = "cloud_updates"
 CONF_LOCAL_UPDATES = "local_updates"
 
+def _validate_session_config(config):
+    try:
+        SessionConfig.from_configs(config)
+    except ValueError as error:
+        raise vol.Invalid(str(error)) from error
+    return config
+
+
 CONFIG_SCHEMA = vol.Schema(
     {
-        DOMAIN: vol.Schema(
+        DOMAIN: vol.All(vol.Schema(
             {
                 vol.Optional(CONF_USERNAME): cv.string,
                 vol.Optional(CONF_PASSWORD): cv.string,
@@ -121,7 +129,7 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Optional("enable_diagnostic_sensors"): cv.boolean,
             },
             extra=vol.ALLOW_EXTRA,
-        ),
+        ), _validate_session_config),
     },
     extra=vol.ALLOW_EXTRA,
 )
@@ -135,10 +143,6 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
     #     utils.fix_recognition_lang(
     #         hass, "frontend_latest", config[CONF_RECOGNITION_LANG]
     #     )
-
-    YandexSession.domain = config.get(CONF_DOMAIN)
-    YandexSession.proxy = config.get(CONF_PROXY)
-    YandexSession.ssl = config.get(CONF_SSL)
 
     if config.get(CONF_LOCAL_UPDATES, True):
         await _init_local_discovery(hass)
@@ -186,7 +190,7 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     async def update_cookie_and_token(**kwargs):
-        hass.config_entries.async_update_entry(entry, data=kwargs)
+        hass.config_entries.async_update_entry(entry, data={**entry.data, **kwargs})
 
     config = hass.data.get(DOMAIN, {}).get(DATA_CONFIG, {})
     policy = EntryPolicy.from_configs(config, entry.options)
@@ -197,8 +201,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     )
 
     session = utils.async_create_clientsession(hass)
-    yandex = YandexSession(session, config=session_config, **entry.data)
-    yandex.policy = policy
+    yandex = YandexSession(session, config=session_config, policy=policy, **entry.data)
     yandex.add_update_listener(update_cookie_and_token)
 
     quasar = YandexQuasar(yandex, policy=policy, cache_manager=cache_manager)
@@ -206,7 +209,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         await quasar.init()
     except Exception as e:
         if not quasar.devices:
+            if yandex.readiness.auth_state == AuthState.REAUTH_REQUIRED:
+                raise ConfigEntryAuthFailed("credential_rejected") from e
             raise ConfigEntryNotReady from e
+    if yandex.readiness.auth_state == AuthState.REAUTH_REQUIRED:
+        entry.async_start_reauth(hass)
 
     await hass_utils.load_fake_devies(hass, quasar)
 
@@ -250,10 +257,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     quasar: YandexQuasar | None = hass.data.get(DOMAIN, {}).get(entry.unique_id)
     if quasar:
-        if hasattr(quasar, "async_stop"):
-            await quasar.async_stop()
-        else:
-            quasar.stop()
+        await quasar.async_stop()
 
     platforms = getattr(quasar, "platforms", None) or PLATFORMS
     unloaded = await hass.config_entries.async_unload_platforms(entry, platforms)
