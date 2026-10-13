@@ -14,26 +14,30 @@ from .core.const import DOMAIN
 from .core.lifecycle import guard_quasar_entity
 from .core.yandex_quasar import YandexQuasar
 from .core.yandex_station import YandexStation
+from .hass import hass_utils
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     quasar: YandexQuasar = hass.data[DOMAIN][entry.unique_id]
-    async_add_entities(
-        [YandexConversation(quasar, speaker) for speaker in quasar.owned_speakers], False
-    )
+    entities = [
+        YandexConversation(quasar, speaker) for speaker in quasar.owned_speakers
+    ]
+    await hass_utils.async_translate_entity_names(hass, entities, "conversation")
+    async_add_entities(entities, False)
 
 
 class YandexConversation(ConversationEntity):
     _attr_entity_registry_enabled_default = False
     _attr_supported_features = ConversationEntityFeature.CONTROL
+    _attr_has_entity_name = True
+    _attr_translation_key = "alice"
 
     def __init__(self, quasar: YandexQuasar, device: dict) -> None:
         self.quasar = quasar
         self.device = device
 
-        self._attr_name = device["name"] + " Алиса"
         self._attr_unique_id = device["quasar_info"]["device_id"] + "_conversation"
 
         self._attr_device_info = DeviceInfo(

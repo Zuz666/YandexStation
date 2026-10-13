@@ -48,6 +48,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 continue
             entities.append(YandexBinarySensor(quasar, device, instance))
 
+    await hass_utils.async_translate_entity_names(hass, entities, "binary_sensor")
     async_add_entities(entities)
 
 
@@ -78,7 +79,6 @@ class YandexStationLocalConnection(BinarySensorEntity):
     _attr_should_poll = False
     _attr_translation_key = "local_connection"
     _attr_has_entity_name = True
-    _attr_name = "Локальное подключение"
 
     def __init__(self, quasar: YandexQuasar, entry, device: dict):
         self.quasar = quasar

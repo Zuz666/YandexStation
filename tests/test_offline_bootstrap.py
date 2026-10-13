@@ -246,7 +246,12 @@ def test_offline_acceptance_a1_full_lifecycle(tmp_path):
 
         mock_session = MagicMock()
         mock_session.cookie_jar = MagicMock()
-        with patch("custom_components.yandex_station.core.utils.async_create_clientsession", return_value=mock_session):
+        # This mocked Core fixture does not load translation resources.
+        # Real entity registration and naming are covered in test_entity_names.
+        with patch(
+            "custom_components.yandex_station.hass.hass_utils.async_translate_entity_names",
+            AsyncMock(),
+        ), patch("custom_components.yandex_station.core.utils.async_create_clientsession", return_value=mock_session):
             with patch("custom_components.yandex_station.hass.hass_utils.er") as mock_er:
                 with patch("custom_components.yandex_station.hass.hass_utils.dr") as mock_dr:
                     mock_er.async_get.return_value.entities.values.return_value = []
