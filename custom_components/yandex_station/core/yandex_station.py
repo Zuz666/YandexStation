@@ -31,7 +31,7 @@ from homeassistant.helpers.restore_state import (
     RestoredExtraData,
 )
 from homeassistant.helpers.template import Template
-from .policy import AuthState, DevicesState
+from .policy import AuthState, DevicesState, SendOutcome
 from homeassistant.util import slugify
 
 from . import stream, utils
@@ -326,6 +326,25 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
 
     def debug(self, text: str):
         _LOGGER.debug(f"{self.name} | {text}")
+
+    def _log_media(self, level: int, message: str, media_type: str, media_id: str):
+        # The suffix may be a dialog/skill/request ID; media_id may be TTS or a signed URL.
+        kind, separator, _ = media_type.partition(":")
+        if not re.fullmatch(r"[a-zA-Z0-9_.+/-]{1,64}", kind):
+            kind = "custom"
+        if separator:
+            kind += ":<redacted>"
+        source = (
+            "url" if "://" in media_id
+            else "music_id" if RE_MUSIC_ID.fullmatch(media_id)
+            else "text" if media_id
+            else "empty"
+        )
+        _LOGGER.log(
+            level, "%s: entity=%s transport=%s media_type=%s source=%s",
+            message, self.entity_id, "local" if self.local_state else "cloud",
+            kind, source,
+        )
 
     async def init_local_mode(self):
         # self.debug(f"Init local mode (hass: {self.hass is not None})")
@@ -766,6 +785,14 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         volume = 0 if mute else self._attr_volume_level
         await self.async_set_volume_level(volume)
 
+    async def _async_cloud_send(self, text: str, is_tts: bool = False):
+        outcome = await self.quasar.send(self.device, text, is_tts=is_tts)
+        if outcome == SendOutcome.SENT:
+            return
+        if outcome == SendOutcome.UNKNOWN_OUTCOME:
+            raise HomeAssistantError("cloud_command_unknown_outcome")
+        raise HomeAssistantError("cloud_command_unavailable")
+
     async def async_set_volume_level(self, volume: float):
         # https://github.com/AlexxIT/YandexStation/issues/324
         if isinstance(volume, str):
@@ -795,9 +822,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             # на Яндекс ТВ Станция (2023) громкость от 0 до 100
             # на колонках - от 0 до 10
             k = 100 if is_tv(self.device) else 10
-            ok = await self.quasar.send(self.device, f"громкость на {round(k * volume)}")
-            if not ok:
-                raise HomeAssistantError("Не удалось изменить громкость: колонка недоступна")
+            await self._async_cloud_send(f"громкость на {round(k * volume)}")
             if volume > 0:
                 self._attr_is_volume_muted = False
                 self._attr_volume_level = round(volume, 2)
@@ -841,9 +866,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             await self.glagol.send({"command": "play"})
 
         else:
-            ok = await self.quasar.send(self.device, "продолжить")
-            if not ok:
-                raise HomeAssistantError("Не удалось продолжить воспроизведение: колонка недоступна")
+            await self._async_cloud_send("продолжить")
             self._attr_state = MediaPlayerState.PLAYING
             self.async_write_ha_state()
     async def async_media_pause(self):
@@ -851,9 +874,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             await self.glagol.send({"command": "stop"})
 
         else:
-            ok = await self.quasar.send(self.device, "пауза")
-            if not ok:
-                raise HomeAssistantError("Не удалось поставить на паузу: колонка недоступна")
+            await self._async_cloud_send("пауза")
             self._attr_state = MediaPlayerState.PAUSED
             self.async_write_ha_state()
     async def async_media_stop(self):
@@ -863,13 +884,13 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         if self.local_state:
             await self.glagol.send({"command": "prev"})
         else:
-            await self.quasar.send(self.device, "прошлый трек")
+            await self._async_cloud_send("прошлый трек")
 
     async def async_media_next_track(self):
         if self.local_state:
             await self.glagol.send({"command": "next"})
         else:
-            await self.quasar.send(self.device, "следующий трек")
+            await self._async_cloud_send("следующий трек")
 
     async def async_turn_on(self):
         if self.is_on is not None:
@@ -909,7 +930,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
     async def async_play_media(
         self, media_type: str, media_id: str, extra: dict = None, **kwargs
     ):
-        self.debug(f"play_media: {media_type} {media_id} {extra}")
+        self._log_media(logging.DEBUG, "play_media", media_type, media_id)
 
         # Format:  media-source://{domain}/{identifier}?message={user_input}
         # Example: media-source://tts/yandex_station/747970653d74657874?message=123
@@ -1067,7 +1088,9 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                 payload = None
 
             if not payload:
-                _LOGGER.warning(f"Unsupported local media: {media_id} {media_type}")
+                self._log_media(
+                    logging.WARNING, "Unsupported local media", media_type, media_id
+                )
                 return
 
             await self.glagol.send(payload)
@@ -1075,27 +1098,23 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         else:
             if media_type.startswith(("text:", "dialog:")):
                 media_id = self.yandex_dialog(media_type, media_id)
-                ok = await self.quasar.send(self.device, media_id)
-                if not ok:
-                    raise HomeAssistantError("Не удалось отправить команду на колонку")
+                await self._async_cloud_send(media_id)
 
             elif media_type == "text":
                 media_id = utils.fix_cloud_text(media_id)
-                ok = await self.quasar.send(self.device, media_id, is_tts=True)
-                if not ok:
-                    raise HomeAssistantError("Не удалось отправить текст на колонку")
+                await self._async_cloud_send(media_id, is_tts=True)
 
             elif media_type == "command":
                 media_id = utils.fix_cloud_text(media_id)
-                ok = await self.quasar.send(self.device, media_id)
-                if not ok:
-                    raise HomeAssistantError("Не удалось отправить команду на колонку")
+                await self._async_cloud_send(media_id)
             elif media_type == "brightness":
                 await self._set_brightness(media_id)
                 return
 
             else:
-                _LOGGER.warning(f"Unsupported cloud media: {media_type}")
+                self._log_media(
+                    logging.WARNING, "Unsupported cloud media", media_type, media_id
+                )
                 return
 
 

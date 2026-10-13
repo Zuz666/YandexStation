@@ -1,10 +1,15 @@
 import asyncio
 import importlib
+import os
+from pathlib import Path
+import shutil
+import subprocess
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import jwt
 from aiohttp import web
+import homeassistant.core
 
 from custom_components.yandex_station.core.lifecycle import (
     LifecycleManager,
@@ -175,40 +180,47 @@ def test_hot_reload_failed_unload_rolls_back():
     asyncio.run(scenario())
 
 
-def test_hot_reload_failed_rebind_leaves_http_503():
-    async def scenario():
-        hass = MagicMock()
-        entry1 = MagicMock(entry_id="e1", disabled_by=None)
-        entry1.state = "loaded"
-        hass.config_entries.async_entries.return_value = [entry1]
-        hass.config_entries.async_unload = AsyncMock(return_value=True)
-        hass.config_entries.async_setup = AsyncMock(return_value=True)
+def test_hot_reload_failed_rebind_leaves_http_503(tmp_path):
+    source = Path(__file__).resolve().parents[1] / "custom_components" / "yandex_station"
+    shutil.copytree(source, tmp_path / "custom_components" / "yandex_station")
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve())],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
-        context = StreamContext(hass=hass, hass_url="http://127.0.0.1:8123")
-        mgr = LifecycleManager(context=context)
 
-        orig_reload = importlib.reload
-        stream_mod = sys.modules.get("custom_components.yandex_station.core.stream")
-        orig_impl = getattr(stream_mod, "StreamImplementation", None)
-        try:
-            def mock_reload(m):
-                res = orig_reload(m)
-                if getattr(m, "__name__", "") == "custom_components.yandex_station.core.stream":
-                    if hasattr(res, "StreamImplementation"):
-                        delattr(res, "StreamImplementation")
-                return res
+async def _failed_rebind_scenario():
+    # Real reload changes class identities; it must never mutate the pytest process.
+    hass = MagicMock()
+    entry1 = MagicMock(entry_id="e1", disabled_by=None)
+    entry1.state = "loaded"
+    hass.config_entries.async_entries.return_value = [entry1]
+    hass.config_entries.async_unload = AsyncMock(return_value=True)
+    hass.config_entries.async_setup = AsyncMock(return_value=True)
 
-            with patch("importlib.reload", side_effect=mock_reload):
-                res = await mgr.async_hot_reload(hass, enable_code_reload=True)
-                assert res.get("error") == "rebind_failed"
-                # HTTP admission must remain closed (HTTP 503) per RFC §7.4
-                assert context.admission_open is False
+    context = StreamContext(hass=hass, hass_url="http://127.0.0.1:8123")
+    mgr = LifecycleManager(context=context)
+    orig_reload = importlib.reload
 
-                dispatcher = StableStreamDispatcher(context)
-                resp = await dispatcher.get(MagicMock(), "tok", "mp3")
-                assert resp.status == 503
-        finally:
-            if stream_mod and orig_impl:
-                setattr(stream_mod, "StreamImplementation", orig_impl)
+    def reload_without_stream_target(module):
+        result = orig_reload(module)
+        if module.__name__ == "custom_components.yandex_station.core.stream":
+            del result.StreamImplementation
+        return result
 
-    asyncio.run(scenario())
+    with patch("importlib.reload", side_effect=reload_without_stream_target):
+        result = await mgr.async_hot_reload(hass, enable_code_reload=True)
+    assert result.get("error") == "rebind_failed"
+    assert context.admission_open is False
+    dispatcher = StableStreamDispatcher(context)
+    response = await dispatcher.get(MagicMock(), "tok", "mp3")
+    assert response.status == 503
+
+
+if __name__ == "__main__":
+    asyncio.run(_failed_rebind_scenario())

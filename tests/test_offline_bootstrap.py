@@ -265,10 +265,15 @@ def test_offline_acceptance_a1_full_lifecycle(tmp_path):
                 assert attrs["cloud_state"] == "offline"
 
                 # Verify central barrier blocks cloud requests
-                with pytest.raises(RuntimeError, match="blocked by force_offline_local"):
-                    await quasar.session._request("get", "https://quasar.yandex.ru/get_account_config")
-
-                with pytest.raises(RuntimeError, match="blocked by force_offline_local"):
-                    await quasar.session.ws_connect("wss://iot.quasar.yandex.ru/ws")
+                with pytest.raises(RuntimeError):
+                    await quasar.session._request(
+                        "get", "https://quasar.yandex.ru/get_account_config", role="account"
+                    )
+                with pytest.raises(RuntimeError):
+                    await quasar.session.ws_connect(
+                        "wss://iot.quasar.yandex.ru/ws", role="cloud_ws"
+                    )
+                mock_session.get.assert_not_called()
+                mock_session.ws_connect.assert_not_called()
 
     asyncio.run(scenario())

@@ -69,7 +69,9 @@ class YandexGlagol:
             "platform": self.device["quasar_info"]["platform"],
         }
         r = await self.session.get(
-            "https://quasar.yandex.net/glagol/token", params=payload
+            "https://quasar.yandex.net/glagol/token",
+            role="glagol_token",
+            params=payload,
         )
         # @dext0r: fix bug with wrong content-type
         resp = json.loads(await r.text())
@@ -123,7 +125,9 @@ class YandexGlagol:
             if not self.device_token:
                 self.debug("Токен устройства отсутствует, локальное подключение пропущено")
                 return
-            self.ws = await self.session.ws_connect(self.url, heartbeat=55, ssl=False)
+            self.ws = await self.session.ws_connect(
+                self.url, role="local_ws", heartbeat=55, ssl=False
+            )
             await self.ping(command="softwareVersion")
 
             # if not self.keep_task or self.keep_task.done():

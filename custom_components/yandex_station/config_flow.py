@@ -9,7 +9,6 @@
 """
 
 import logging
-from functools import lru_cache
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
@@ -39,10 +38,21 @@ def generate_qr_code(data: str) -> str:
 # noinspection PyUnusedLocal
 class YandexStationFlowHandler(ConfigFlow, domain=DOMAIN):
     @property
-    @lru_cache()
     def yandex(self):
-        session = utils.async_create_clientsession(self.hass)
-        return YandexSession(session)
+        if not hasattr(self, "_yandex"):
+            entry = self.hass.config_entries.async_get_entry(
+                self.context.get("entry_id")
+            ) if self.context.get("entry_id") else None
+            yaml_config = self.hass.data.get(DOMAIN, {}).get(DATA_CONFIG, {})
+            options = entry.options if entry else {}
+            session = utils.async_create_clientsession(self.hass)
+            self._yandex = YandexSession(
+                session,
+                config=SessionConfig.from_configs(yaml_config, options),
+                policy=EntryPolicy.from_configs(yaml_config, options),
+                account_uid=entry.data.get("account_uid") if entry else None,
+            )
+        return self._yandex
 
     async def async_step_import(self, data: dict):
         """Init by component setup. Forward YAML login/pass to auth."""
@@ -204,8 +214,8 @@ class OptionsFlowHandler(OptionsFlow):
             yaml_config, self.config_entry.options
         )
 
-        def format_effective(default_url: str, custom_url: str) -> str:
-            resolved = session_config.resolve_url(custom_url)
+        def format_effective(default_url: str, custom_url: str, role: str) -> str:
+            resolved = session_config.resolve_url(custom_url, role)
             if custom_url == default_url and not session_config.domain:
                 return f"{resolved} (по умолчанию)"
             if custom_url in self.config_entry.options.values():
@@ -214,13 +224,13 @@ class OptionsFlowHandler(OptionsFlow):
 
         placeholders = {
             "current_quasar": format_effective(
-                "https://iot.quasar.yandex.ru", session_config.quasar_base_url
+                "https://iot.quasar.yandex.ru", session_config.quasar_base_url, "quasar"
             ),
             "current_account": format_effective(
-                "https://quasar.yandex.ru", session_config.account_base_url
+                "https://quasar.yandex.ru", session_config.account_base_url, "account"
             ),
             "current_passport": format_effective(
-                "https://passport.yandex.ru", session_config.passport_base_url
+                "https://passport.yandex.ru", session_config.passport_base_url, "passport"
             ),
         }
 
@@ -316,6 +326,15 @@ class OptionsFlowHandler(OptionsFlow):
                 new_options.pop(k, None)
             elif v is not None:
                 new_options[k] = v
+
+        yaml_config = self.hass.data.get(DOMAIN, {}).get(DATA_CONFIG, {})
+        try:
+            SessionConfig.from_configs(yaml_config, new_options)
+            EntryPolicy.from_configs(yaml_config, new_options)
+        except ValueError:
+            result = await self.async_step_settings()
+            result["errors"] = {"base": "invalid_endpoint"}
+            return result
 
         self.hass.config_entries.async_update_entry(
             self.config_entry, options=new_options
