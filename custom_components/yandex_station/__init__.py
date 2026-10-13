@@ -288,6 +288,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     async with lifecycle.entry_operation(entry.entry_id, "unload") as admitted:
         if not admitted:
             return False
+        options = getattr(hass.config_entries, "options", None)
+        if options is not None:
+            for flow in tuple(options.async_progress(include_uninitialized=True)):
+                if flow.get("handler") == entry.entry_id and flow.get("flow_id"):
+                    options.async_abort(flow["flow_id"])
         quasar = lifecycle.runtimes.get(entry.entry_id)
         if quasar is not None:
             await quasar.async_stop()
