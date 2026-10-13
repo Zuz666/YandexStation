@@ -131,12 +131,15 @@ def test_quasar_sync_transitions_readiness_to_online():
 
         assert readiness.auth_state == AuthState.UNKNOWN
         assert readiness.devices_state == DevicesState.UNKNOWN
+        # bounded bootstrap does inventory only: scenarios stay untouched (§5)
+        assert readiness.scenarios_state == ScenariosState.UNKNOWN
 
         await quasar.init()
 
         assert readiness.auth_state == AuthState.VALID
         assert readiness.devices_state == DevicesState.READY
         assert readiness.inventory_source == "cloud"
+        assert readiness.scenarios_state == ScenariosState.UNKNOWN
 
         entry = MagicMock()
         entry.entry_id = "test_e1"
@@ -214,6 +217,9 @@ def test_quasar_sync_scenarios_failure_degrades_readiness():
 
         assert readiness.auth_state == AuthState.VALID
         assert readiness.devices_state == DevicesState.READY
+        # scenario recovery is an explicit pass after publication, not part of init
+        assert readiness.scenarios_state == ScenariosState.UNKNOWN
+        await quasar.load_scenarios()
         assert readiness.scenarios_state == ScenariosState.UNAVAILABLE
         # Assert that zero scenario creation POSTs were attempted when catalog is unavailable
         quasar.add_scenario.assert_not_called()

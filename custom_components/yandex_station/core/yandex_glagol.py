@@ -7,26 +7,26 @@ import uuid
 from asyncio import Future
 from typing import Callable, Dict, Optional
 
-from aiohttp import ClientConnectorError, ClientWebSocketResponse, ServerTimeoutError
+from aiohttp import (
+    ClientConnectorError,
+    ClientWebSocketResponse,
+    ServerTimeoutError,
+    WSMsgType,
+)
 from zeroconf import ServiceBrowser, ServiceStateChange, Zeroconf
 
+from .policy import TokenState
 from .yandex_session import YandexSession
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class YandexGlagol:
-    """Класс для работы с колонкой по локальному протоколу."""
+    """Класс для работы с колонкой по локальному протоколу.
 
-    device_token = None
-    url: Optional[str] = None
-    ws: Optional[ClientWebSocketResponse] = None
-
-    # next_ping_ts = 0
-    # keep_task: Task = None
-    update_handler: Callable = None
-
-    waiters: Dict[str, Future] = {}
+    Всё mutable состояние (токен, сокет, waiters) принадлежит экземпляру
+    (RFC v2 §5): две колонки одного процесса никогда не делят waiters.
+    """
 
     def __init__(
         self,
@@ -37,9 +37,16 @@ class YandexGlagol:
     ):
         self.session = session
         self.device = device
-        self.device_token = token
         self.quasar = quasar
-        self._connect_task = None
+        self.device_token = token
+        self.token_state = TokenState.CANDIDATE if token else TokenState.MISSING
+        self.url: Optional[str] = None
+        self.ws: Optional[ClientWebSocketResponse] = None
+        self.update_handler: Callable = None
+        self.waiters: Dict[str, Future] = {}
+        self._connect_task: Optional[asyncio.Task] = None
+        self._stopped = False
+        self._cancelled = False
         try:
             self.loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -64,10 +71,23 @@ class YandexGlagol:
             or self.device["quasar_info"]["device_id"] not in self.quasar.owned_glagol_ids
         ):
             raise RuntimeError("speaker_not_owned")
-        if getattr(self.session, "policy", None) and not self.session.policy.effective_cloud_allowed:
-            self.debug("Облачное получение токена заблокировано force_offline_local")
-            return None
 
+        if self.quasar is not None:
+            # single-flight на устройство: параллельные вызовы ждут один запрос
+            token = await self.quasar.async_fetch_device_token(self.device)
+        else:
+            if getattr(self.session, "policy", None) and not self.session.policy.effective_cloud_allowed:
+                self.debug("Облачное получение токена заблокировано force_offline_local")
+                return None
+            token = await self._async_fetch_token_direct()
+
+        if token:
+            self.device_token = token
+            if self.token_state is not TokenState.ACCEPTED:
+                self.token_state = TokenState.CANDIDATE
+        return token
+
+    async def _async_fetch_token_direct(self) -> Optional[str]:
         self.debug("Обновление токена устройства")
         payload = {
             "device_id": self.device["quasar_info"]["device_id"],
@@ -83,16 +103,11 @@ class YandexGlagol:
         token = resp.get("token") if isinstance(resp, dict) else None
         if not isinstance(token, str) or not token or resp.get("status") != "ok":
             raise RuntimeError("device_token_unavailable")
-        if self.quasar:
-            did, platform = payload["device_id"], payload["platform"]
-            if self.quasar.cache_manager:
-                await self.quasar.cache_manager.async_save_device_token(
-                    did, platform, token
-                )
-            self.quasar.device_tokens.setdefault(did, {})[platform] = token
-        self.device_token = token
         return token
+
     async def start_or_restart(self):
+        if self._stopped:
+            return
         # first time
         if not self.url:
             self.url = f"wss://{self.device['host']}:{self.device['port']}"
@@ -102,124 +117,211 @@ class YandexGlagol:
             self.debug("Обновление IP-адреса устройства")
             self.url = f"wss://{self.device['host']}:{self.device['port']}"
             # force close session
-            if self.ws:
+            if self.ws and not self.ws.closed:
                 await self.ws.close()
 
     async def stop(self):
+        """Запрещает reconnect, отменяет и дожидается задач, закрывает сокет."""
         self.debug("Останавливаем локальное подключение")
+        self._stopped = True
         self.url = None
-        if self._connect_task:
+        if self._connect_task is not None:
             self._connect_task.cancel()
             try:
                 await self._connect_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception as e:
+                self.debug(f"Остановка подключения: {type(e).__name__}")
             self._connect_task = None
-        if self.ws and not self.ws.closed:
+        if self.ws is not None and not self.ws.closed:
             await self.ws.close()
+        self.ws = None
+        for future in self.waiters.values():
+            if not future.done():
+                future.cancel()
+        self.waiters.clear()
+        if self.update_handler:
+            self.update_handler(None)
+
+    async def _handle_token_rejection(self, rejected_token: str) -> int:
+        """Positive decoder: peer CLOSE (4000, "Invalid token") для этого соединения.
+
+        Сбрасывает только эту пару (устройство, platform): local state, RAM tuple
+        и durable marker; затем не более одного single-flight fetch при разрешённом
+        cloud. Возвращает минимальный fails для backoff повтора.
+        """
+        did = self.device.get("quasar_info", {}).get("device_id")
+        _LOGGER.warning(
+            "glagol_token_rejected: device=%s code=4000", did,
+        )
+        self.token_state = TokenState.REJECTED
+        self.device_token = None
+        if self.quasar is not None:
+            info = self.device["quasar_info"]
+            ram = self.quasar.device_tokens.get(info["device_id"], {})
+            if ram.get(info["platform"]) == rejected_token:
+                ram.pop(info["platform"], None)
+            if self.quasar.cache_manager is not None:
+                try:
+                    await self.quasar.cache_manager.async_invalidate_device_token(
+                        info["device_id"], info["platform"], rejected_token
+                    )
+                except Exception as e:
+                    _LOGGER.debug(
+                        "Token invalidation save failed: %s", type(e).__name__
+                    )
+            if not self.quasar.stopping and self.quasar.policy.effective_cloud_allowed:
+                new_token = await self.quasar.async_fetch_device_token(self.device)
+                if new_token and new_token != rejected_token:
+                    self.device_token = new_token
+                    self.token_state = TokenState.CANDIDATE
+                    return 0
+        # без нового кандидата повтор не раньше стандартного backoff
+        return 2
+
     async def _connect(self, fails: int):
         self.debug("Локальное подключение")
 
-        fails += 1  # will be reset with first msg from station
+        fails += 1  # will be reset with first accepted msg from station
+        connection_token = self.device_token
+        ws: Optional[ClientWebSocketResponse] = None
+        self._cancelled = False
 
         try:
-            if not self.device_token:
-                self.device_token = await self.get_device_token()
-
-            if not self.device_token:
-                self.debug("Токен устройства отсутствует, локальное подключение пропущено")
+            if not connection_token:
+                # токен не добывается здесь: single-flight fetch запускается
+                # recovery после публикации сущностей (RFC v2 §5)
+                self.debug("Токен устройства отсутствует, локальное подключение ожидает")
                 return
-            self.ws = await self.session.ws_connect(
+            if self.token_state is not TokenState.ACCEPTED:
+                self.token_state = TokenState.CANDIDATE
+
+            ws = self.ws = await self.session.ws_connect(
                 self.url, role="local_ws", heartbeat=55, ssl=False
             )
-            await self.ping(command="softwareVersion")
+            await self.ping()
 
-            # if not self.keep_task or self.keep_task.done():
-            #     self.keep_task = self.loop.create_task(self._keep_connection())
+            while True:
+                msg = await ws.receive()
 
-            async for msg in self.ws:
-                # Большая станция в режиме idle шлёт статус раз в 5 секунд,
-                # в режиме playing шлёт чаще раза в 1 секунду
-                # self.next_ping_ts = time.time() + 6
+                if msg.type == WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                    except ValueError:
+                        self.debug("Пропущен некорректный TEXT frame")
+                        continue
+                    if not isinstance(data, dict):
+                        self.debug("Пропущен не-словарный TEXT frame")
+                        continue
+                    fails = 0  # any decodable message - reset fails
 
-                if isinstance(msg.data, ServerTimeoutError):
+                    # принятый токен подтверждается принятым state/обменом
+                    if "state" in data and connection_token == self.device_token:
+                        self.token_state = TokenState.ACCEPTED
+
+                    request_id = data.get("requestId")
+                    if request_id in self.waiters:
+                        result = {"status": data.get("status")}
+
+                        if vinsResponse := data.get("vinsResponse"):
+                            try:
+                                # payload only in yandex module
+                                if payload := vinsResponse.get("payload"):
+                                    response = payload["response"]
+                                else:
+                                    response = vinsResponse["response"]
+
+                                if card := response.get("card"):
+                                    result.update(card)
+                                elif cards := response.get("cards"):
+                                    result.update(cards[0])
+                                elif is_streaming := response.get("is_streaming"):
+                                    result["is_streaming"] = is_streaming
+                                elif output_speech := response.get("output_speech"):
+                                    result.update(output_speech)
+
+                            except Exception as e:
+                                _LOGGER.debug(f"Response error: {e}")
+
+                        if not self.waiters[request_id].done():
+                            self.waiters[request_id].set_result(result)
+
+                    if self.update_handler:
+                        self.update_handler(data)
+
+                elif msg.type == WSMsgType.BINARY:
+                    # неизвестный BINARY не говорит ничего о токене и не сбрасывает backoff
+                    self.debug("Неизвестный BINARY frame проигнорирован")
+                    continue
+
+                elif msg.type == WSMsgType.CLOSE:
+                    rejected = (
+                        msg.data == 4000
+                        and msg.extra == "Invalid token"
+                        and connection_token == self.device_token
+                        and ws is self.ws
+                    )
+                    if rejected:
+                        fails = await self._handle_token_rejection(connection_token)
+                    # любой CLOSE завершает reader после классификации
+                    break
+
+                elif msg.type in (WSMsgType.CLOSING, WSMsgType.CLOSED, WSMsgType.ERROR):
+                    break
+
+                elif isinstance(msg.data, ServerTimeoutError):
                     raise msg.data
 
-                data = json.loads(msg.data)
-                fails = 0  # any message - reset fails
-
-                # debug(msg.data)
-
-                request_id = data.get("requestId")
-                if request_id in self.waiters:
-                    result = {"status": data["status"]}
-
-                    if vinsResponse := data.get("vinsResponse"):
-                        try:
-                            # payload only in yandex module
-                            if payload := vinsResponse.get("payload"):
-                                response = payload["response"]
-                            else:
-                                response = vinsResponse["response"]
-
-                            if card := response.get("card"):
-                                result.update(card)
-                            elif cards := response.get("cards"):
-                                result.update(cards[0])
-                            elif is_streaming := response.get("is_streaming"):
-                                result["is_streaming"] = is_streaming
-                            elif output_speech := response.get("output_speech"):
-                                result.update(output_speech)
-
-                        except Exception as e:
-                            _LOGGER.debug(f"Response error: {e}")
-
-                    self.waiters[request_id].set_result(result)
-
-                self.update_handler(data)
-
-            # Preserved across reconnects per RFC v2 §3.4
         except (ClientConnectorError, ConnectionResetError, ServerTimeoutError) as e:
             self.debug(f"Ошибка подключения: {repr(e)}")
 
-        except (asyncio.CancelledError, RuntimeError) as e:
-            # сюда попадаем при остановке HA
-            if isinstance(e, RuntimeError):
-                assert e.args[0] == "Session is closed", repr(e)
+        except asyncio.CancelledError:
+            self.debug("Останавливаем подключение: CancelledError")
+            self._cancelled = True
+            raise
 
+        except RuntimeError as e:
+            # сюда попадаем при остановке HA ("Session is closed")
             self.debug(f"Останавливаем подключение: {repr(e)}")
-            if self.ws and not self.ws.closed:
-                await self.ws.close()
-            return
+            self._stopped = True
 
         except Exception as e:
             _LOGGER.error(f"{self.name} => local | {repr(e)}")
 
-        # возвращаемся в облачный режим
-        self.update_handler(None)
+        finally:
+            if ws is not None and not ws.closed:
+                await ws.close()
+            if self.ws is ws:
+                self.ws = None
+            # потребитель узнаёт о разрыве при любом выходе, включая отмену
+            if self.update_handler:
+                try:
+                    self.update_handler(None)
+                except Exception:
+                    pass
+            # отменённая/остановленная задача не планирует свой повтор
+            if self._stopped or self._cancelled or not self.url:
+                self._connect_task = None
+            else:
+                self._connect_task = asyncio.create_task(self._reconnect_later(fails))
 
-        # останавливаем попытки
-        if not self.url:
-            return
-
+    async def _reconnect_later(self, fails: int):
         if fails:
             # 0s, 30s, 60s, ... 5 min
             delay = 30 * min(fails - 1, 10)
             self.debug(f"Таймаут до следующего подключения {delay}")
             await asyncio.sleep(delay)
-
+        if self._stopped or self._cancelled or not self.url:
+            return
         self._connect_task = asyncio.create_task(self._connect(fails))
-    # async def _keep_connection(self):
-    #     _LOGGER.debug("Start keep connection task")
-    #     while not self.ws.closed:
-    #         await asyncio.sleep(1)
-    #         if time.time() > self.next_ping_ts:
-    #             await self.ping()
 
     async def ping(self, command="ping"):
-        # _LOGGER.debug("ping")
+        ws = self.ws
+        if ws is None or ws.closed:
+            return
         try:
-            await self.ws.send_json(
+            await ws.send_json(
                 {
                     "conversationToken": self.device_token,
                     "id": str(uuid.uuid4()),
@@ -227,16 +329,20 @@ class YandexGlagol:
                     "sentTime": int(round(time.time() * 1000)),
                 }
             )
-        except:
+        except Exception:
             pass
 
     async def send(self, payload: dict) -> Optional[dict]:
         _LOGGER.debug(f"{self.name} => local | {payload}")
 
+        ws = self.ws
+        if ws is None or ws.closed:
+            return {"error": "no_local_connection"}
+
         request_id = str(uuid.uuid4())
 
         try:
-            await self.ws.send_json(
+            await ws.send_json(
                 {
                     "conversationToken": self.device_token,
                     "id": request_id,
@@ -249,8 +355,6 @@ class YandexGlagol:
 
             # limit future wait time
             await asyncio.wait_for(self.waiters[request_id], 5)
-
-            # self.next_ping_ts = time.time() + 0.5
 
             return self.waiters.pop(request_id).result()
 

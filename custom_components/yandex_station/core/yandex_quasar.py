@@ -26,6 +26,46 @@ from .cache import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+# Runtime-only device fields preserved when an unchanged inventory refresh
+# updates existing records in place (RFC v2 §5): entity/session objects and
+# locally discovered addresses never come from the cloud catalog.
+RUNTIME_DEVICE_FIELDS = (
+    "entity", "glagol", "callbacks", "update_task",
+    "host", "port", "scenario_id", "hdmi_audio",
+)
+
+
+def _device_fingerprint(device: dict) -> tuple:
+    """Membership identity of one device; states, names and hosts excluded."""
+    info = device.get("quasar_info") or {}
+    caps = tuple(sorted(
+        (i.get("type"), (i.get("parameters") or {}).get("instance"))
+        for i in device.get("capabilities") or ()
+    ))
+    props = tuple(sorted(
+        (i.get("type"), (i.get("parameters") or {}).get("instance"))
+        for i in device.get("properties") or ()
+    ))
+    return (
+        device.get("id"), info.get("device_id"), info.get("platform"),
+        device.get("type"), caps, props,
+    )
+
+
+def _inventory_fingerprint(devices) -> tuple:
+    return tuple(sorted((_device_fingerprint(d) for d in devices or ()), key=repr))
+
+
+def _merge_device_records(old_devices: list, new_devices: list) -> None:
+    """Update existing dicts in place; runtime fields and identity survive."""
+    by_id = {d["id"]: d for d in new_devices}
+    for device in old_devices:
+        if (new := by_id.get(device["id"])) is None:
+            continue
+        preserved = {k: device[k] for k in RUNTIME_DEVICE_FIELDS if k in device}
+        device.update(new)
+        device.update(preserved)
+
 COMMAND_TIMEOUT = 10
 
 IOT_TYPES = {
@@ -245,8 +285,13 @@ class YandexQuasar(Dispatcher):
         self._reconciliation_lock = asyncio.Lock()
         self.online_updated = asyncio.Event()
         self.online_updated.set()
+        self.updates_task: asyncio.Task | None = None
+        self._recovery_task: asyncio.Task | None = None
+        self._token_tasks: dict[str, asyncio.Task] = {}
+        self.fresh_device_ids: set[str] = set()
 
     def _restore_from_snapshot(self, snapshot: StationSnapshot):
+        self.fresh_device_ids.clear()
         self.devices = [dict(d) for d in snapshot.devices]
         self.readiness.devices_state = DevicesState.READY
         self.readiness.inventory_source = "cache"
@@ -273,7 +318,11 @@ class YandexQuasar(Dispatcher):
                     dev["hdmi_audio"] = cfg["hdmi_audio"]
 
     async def init(self):
-        """Основная функция. Возвращает список колонок."""
+        """Восстанавливает пригодный снимок и сразу возвращается (RFC v2 §5).
+
+        При наличии снимка никаких cookie/CSRF/inventory/scenario/config/token
+        запросов: cloud recovery выполняется задачей после публикации сущностей.
+        """
         snapshot = None
         if self.cache_manager:
             snapshot = await self.cache_manager.async_load()
@@ -281,14 +330,6 @@ class YandexQuasar(Dispatcher):
         if snapshot is not None:
             # Restore the last-known-good account catalog and local metadata.
             self._restore_from_snapshot(snapshot)
-            if self.policy.effective_cloud_allowed and not self.policy.effective_use_cached_devices:
-                try:
-                    await self._sync_cloud_devices()
-                except Exception as e:
-                    _LOGGER.debug(
-                        "Initial cloud sync unavailable, using cache: %s",
-                        safe_error_summary(e),
-                    )
             return
 
         if self.policy.effective_use_cached_devices:
@@ -297,16 +338,26 @@ class YandexQuasar(Dispatcher):
             self.readiness.devices_state = DevicesState.UNAVAILABLE
             raise RuntimeError(reason)
 
-        # No snapshot: initial cloud bootstrap required
+        # No snapshot: bounded initial cloud bootstrap, no scenario obligations
         try:
-            await asyncio.wait_for(self._sync_cloud_devices(), timeout=15)
+            await asyncio.wait_for(
+                self._sync_cloud_devices(allow_reload=False), timeout=15
+            )
         except Exception as e:
             _LOGGER.debug("Cloud devices fetch unavailable: %s", safe_error_summary(e))
             self.readiness.devices_state = DevicesState.UNAVAILABLE
             raise
 
-    async def _sync_cloud_devices(self):
-        """Sync devices catalog and scenarios from Yandex cloud."""
+    async def _sync_cloud_devices(self, allow_reload: bool = True) -> bool:
+        """Полный cloud GET строит новый нормализованный каталог отдельно.
+
+        Неизменный membership fingerprint: полный снимок сохраняется, существующие
+        device dict обновляются на месте, свежие состояния рассылаются через
+        dispatcher, reload отсутствует. Изменённый fingerprint: снимок сохраняется
+        до всего остального, запрашивается один ordinary reload, старые consumers
+        продолжают работать до своего unload. Возвращает True, когда новый каталог
+        применён напрямую (bootstrap или reload недоступен).
+        """
         _LOGGER.debug("Получение списка устройств из облака.")
         try:
             r = await self.session.get(
@@ -337,31 +388,49 @@ class YandexQuasar(Dispatcher):
                 {**device, "house_name": house["name"]} for device in house["all"]
             )
         devices = normalize_inventory(devices)
+
+        old_records = self.devices
+        if self.cache_manager is not None and self.cache_manager.snapshot is not None:
+            old_records = self.cache_manager.snapshot.devices
+        unchanged = _inventory_fingerprint(old_records) == _inventory_fingerprint(devices)
+
+        # снимок сохраняется до любого применения каталога
         if self.cache_manager:
             await self.cache_manager.async_save_devices(
                 devices, account_uid=self.session.account_uid
             )
-        self.devices = devices
         self.readiness.auth_state = AuthState.VALID
         self.readiness.devices_state = DevicesState.READY
         self.readiness.inventory_source = "cloud"
 
-        if (
-            self.owned_glagol_ids and self.policy.enable_scenarios
-            and self.policy.effective_cloud_allowed
-        ):
-            await self.load_scenarios()
-            if self.readiness.scenarios_state == ScenariosState.READY:
-                await self.load_speakers()
-            else:
-                _LOGGER.warning(
-                    "Scenarios catalog is %s; skipping speaker scenario reconciliation",
-                    self.readiness.scenarios_state,
-                )
-        elif not self.policy.enable_scenarios or not self.policy.effective_cloud_allowed:
-            self.readiness.scenarios_state = ScenariosState.DISABLED
+        if unchanged:
+            _merge_device_records(self.devices, devices)
+            self.fresh_device_ids = {d["id"] for d in devices}
+            for device in self.devices:
+                self.dispatch_update(device["id"], device)
+            self.dispatch_update("readiness", {})
+            return True
 
+        if allow_reload and self._request_inventory_reload():
+            _LOGGER.info("Inventory membership changed; ordinary reload requested")
+            self.dispatch_update("readiness", {})
+            return False
+
+        # bootstrap (init) или reload недоступен: применяем новый каталог напрямую
+        self.devices = devices
+        self.fresh_device_ids = {d["id"] for d in devices}
         self.dispatch_update("readiness", {})
+        return True
+
+    def _request_inventory_reload(self) -> bool:
+        cache = self.cache_manager
+        hass = getattr(cache, "hass", None) if cache is not None else None
+        if hass is None:
+            return False
+        from .lifecycle import get_lifecycle
+
+        return get_lifecycle(hass).request_entry_reload(cache.entry_id)
+
     @property
     def speakers(self):
         return [i for i in self.devices if has_quasar(i) and i.get("capabilities")]
@@ -930,11 +999,117 @@ class YandexQuasar(Dispatcher):
             await asyncio.sleep(delay)
 
     def start(self):
-        self.updates_task = asyncio.create_task(self.run_forever())
+        """Запускает recovery после публикации; WS-подписку — только по policy."""
+        if not self.policy.effective_cloud_allowed or self.stopping:
+            return
+        if self._recovery_task is None:
+            self._recovery_task = asyncio.create_task(
+                self._async_recover_after_publication()
+            )
+        if self.policy.effective_cloud_updates and self.updates_task is None:
+            self.updates_task = asyncio.create_task(self.run_forever())
+
+    async def _async_recover_after_publication(self):
+        """Один проход cloud-read/scenarios/token-fetch после публикации (§5).
+
+        Никаких ожиданий чужих unload: при изменённом membership ordinary reload
+        уже запрошен, задача завершается без подмены старых consumers.
+        """
+        try:
+            if not self.policy.effective_use_cached_devices:
+                if not await self._sync_cloud_devices():
+                    return
+            elif not (
+                self.policy.enable_scenarios and self.policy.effective_cloud_allowed
+            ):
+                self.readiness.scenarios_state = ScenariosState.DISABLED
+            if self.stopping:
+                return
+            if self.owned_glagol_ids and self.policy.enable_scenarios:
+                await self.load_scenarios()
+                if self.readiness.scenarios_state == ScenariosState.READY:
+                    await self.load_speakers()
+                else:
+                    _LOGGER.warning(
+                        "Scenarios catalog is %s; skipping speaker scenario reconciliation",
+                        self.readiness.scenarios_state,
+                    )
+            elif not self.policy.enable_scenarios:
+                self.readiness.scenarios_state = ScenariosState.DISABLED
+            if self.stopping:
+                return
+            # single-flight token-fetch только для колонок без известного токена
+            for speaker in self.owned_speakers + self.owned_modules:
+                info = speaker["quasar_info"]
+                if info["device_id"] in self.device_tokens:
+                    continue
+                token = await self.async_fetch_device_token(speaker)
+                if self.stopping:
+                    return
+                entity = speaker.get("entity")
+                if token and entity is not None and getattr(entity, "hass", None):
+                    try:
+                        await entity.init_local_mode()
+                    except Exception as e:
+                        _LOGGER.debug(
+                            "Local reconnect after token fetch failed: %s",
+                            type(e).__name__,
+                        )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            _LOGGER.warning(
+                "Recovery after publication failed: %s", safe_error_summary(e)
+            )
+
+    def async_fetch_device_token(self, device: dict) -> asyncio.Task:
+        """Single-flight token fetch per Glagol device (RFC v2 §5)."""
+        did = device["quasar_info"]["device_id"]
+        task = self._token_tasks.get(did)
+        if task is not None and not task.done():
+            return task
+        task = asyncio.create_task(self._async_fetch_device_token(device))
+        self._token_tasks[did] = task
+        task.add_done_callback(lambda _t, did=did: self._token_tasks.pop(did, None))
+        return task
+
+    async def _async_fetch_device_token(self, device: dict) -> str | None:
+        info = device["quasar_info"]
+        did, platform = info["device_id"], info["platform"]
+        if not self.policy.effective_cloud_allowed:
+            _LOGGER.debug("Токен %s не запрашивается: cloud заблокирован policy", did)
+            return None
+        r = await self.session.request_glagol(
+            "https://quasar.yandex.net/glagol/token",
+            role="glagol_token",
+            params={"device_id": did, "platform": platform},
+        )
+        # @dext0r: fix bug with wrong content-type
+        resp = json.loads(await r.text())
+        token = resp.get("token") if isinstance(resp, dict) else None
+        if not isinstance(token, str) or not token or resp.get("status") != "ok":
+            raise RuntimeError("device_token_unavailable")
+        if self.cache_manager is not None:
+            await self.cache_manager.async_save_device_token(did, platform, token)
+        self.device_tokens.setdefault(did, {})[platform] = token
+        return token
 
     async def async_stop(self):
         """Cancel and await background tasks and Glagol connections (RFC v2 §2.3, §7.3)."""
         self.stopping = True
+        if self._recovery_task is not None:
+            self._recovery_task.cancel()
+            try:
+                await self._recovery_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._recovery_task = None
+        token_tasks = list(self._token_tasks.values())
+        for task in token_tasks:
+            task.cancel()
+        if token_tasks:
+            await asyncio.gather(*token_tasks, return_exceptions=True)
+        self._token_tasks.clear()
         if self.updates_task:
             self.updates_task.cancel()
             try:
