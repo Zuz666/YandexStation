@@ -42,7 +42,7 @@ class YandexOther(RemoteEntity, YandexEntity):
 
         for i, cmd in enumerate(command):
             if cmd not in self.buttons:
-                _LOGGER.warning(f"Неизвестная команда {cmd}")
+                _LOGGER.warning(f"Unknown remote command: {cmd}")
                 continue
 
             if delay_secs and i:

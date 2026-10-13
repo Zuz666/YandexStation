@@ -161,7 +161,7 @@ def test_nested_and_typed_triggers_are_all_matched():
     async def scenario():
         hash_code = encode("dev_123")
         scenarios = [
-            # typed trigger идёт вторым: проверяются все triggers, не только первый
+            # Typed trigger is second: all triggers are inspected, not only the first
             {"id": "scen_typed",
              "triggers": [
                  {"type": "scenario.trigger.other", "value": "noise"},
@@ -171,7 +171,7 @@ def test_nested_and_typed_triggers_are_all_matched():
             wire_scenario("scen_nested"),
         ]
         quasar, speaker, _, _ = quasar_with()
-        # каждая запись проверяется отдельным вызовом: typed и nested по очереди
+        # Verify each scenario format (typed and nested) in turn
         quasar.scenarios = [scenarios[0]]
         await quasar.load_speakers()
         assert speaker["scenario_id"] == "scen_typed"
@@ -276,7 +276,7 @@ def test_retry_scenario_creation_binds_existing_match_without_post():
 def test_retry_scenario_creation_requires_confirm_and_posts_once():
     async def scenario():
         quasar, speaker, cache, session = quasar_with()
-        quasar.load_scenarios = AsyncMock()  # свежий успешный GET каталога
+        quasar.load_scenarios = AsyncMock()  # Fresh successful catalog GET
         cache.snapshot.scenario_creation["dev_123"] = {
             "trigger": "old", "state": SCENARIO_STATE_PENDING,
         }
@@ -294,7 +294,7 @@ def test_retry_scenario_creation_requires_confirm_and_posts_once():
         assert result == "created"
         assert speaker["scenario_id"] == "scen_new"
         quasar.add_scenario.assert_called_once()
-        # marker заменён новой revision без промежуточного удаления
+        # Marker is replaced with a new revision without intermediate deletion
         cache.async_save_and_verify_scenario_marker.assert_called_once_with(
             "dev_123", encode("dev_123"), SCENARIO_STATE_PENDING
         )
@@ -311,7 +311,7 @@ def test_retry_scenario_creation_refuses_conflict_and_unavailable():
         quasar, speaker, _, _ = quasar_with(
             scenarios=[wire_scenario("scen_a"), wire_scenario("scen_b")]
         )
-        quasar.load_scenarios = AsyncMock()  # конфликт проверяется на готовом каталоге
+        quasar.load_scenarios = AsyncMock()  # Conflict is checked on the loaded catalog
         try:
             await quasar.retry_scenario_creation("dev_123", confirm_risk=True)
             assert False, "scenario_conflict expected"
@@ -344,7 +344,7 @@ def test_scenario_worker_retries_until_ready_and_finishes():
             quasar.readiness.scenarios_state = ScenariosState.READY
             quasar.scenarios = []
 
-        # backoff зажат до одного цикла событий
+        # Clamp backoff to a single event-loop turn
         from custom_components.yandex_station.core.policy import RecoveryBackoff
         original = RecoveryBackoff.next_delay
         RecoveryBackoff.next_delay = lambda self, retry_after=None: 0

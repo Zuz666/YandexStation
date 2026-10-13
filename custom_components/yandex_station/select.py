@@ -110,10 +110,10 @@ class YandexEqualizer(SelectEntity):
             else:
                 self._attr_current_option = None
 
-            # выключаем автоматическое обновление
+            # Disable polling once equalizer preset is loaded
             self._attr_should_poll = False
         except Exception as e:
-            _LOGGER.warning("Не удалось загрузить эквалайзер", exc_info=e)
+            _LOGGER.warning("Failed to load equalizer settings", exc_info=e)
 
     async def async_select_option(self, option: str):
         try:
@@ -151,7 +151,7 @@ class YandexEqualizer(SelectEntity):
             self._async_write_ha_state()
 
         except Exception as e:
-            _LOGGER.warning("Не удалось изменить эквалайзер", exc_info=e)
+            _LOGGER.warning("Failed to update equalizer settings", exc_info=e)
 
 
 # noinspection PyAbstractClass
