@@ -36,6 +36,7 @@ from homeassistant.util import slugify
 
 from . import stream, utils
 from .const import DATA_CONFIG, DOMAIN
+from .lifecycle import get_lifecycle
 from .quasar_info import QUASAR_INFO, is_tv
 from .yandex_glagol import YandexGlagol
 from .yandex_music import get_file_info
@@ -229,6 +230,20 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             self._apply_hdmi_audio(device["hdmi_audio"])
 
         quasar.subscribe_update(device["id"], self.on_update)
+
+    def _media_stream_context(self):
+        cache = self.quasar.cache_manager
+        if self.hass is None or cache is None:
+            raise HomeAssistantError("media_entry_unavailable")
+        return get_lifecycle(self.hass).context, cache.entry_id
+
+    @staticmethod
+    def _validate_media_destination(context, entry_id: str, url: str) -> None:
+        try:
+            stream.validate_media_url(context, entry_id, url)
+        except ValueError as error:
+            raise HomeAssistantError("media_destination_blocked") from error
+
 
     @property
     def transport(self) -> str:
@@ -984,6 +999,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         self, media_type: str, media_id: str, extra: dict = None, **kwargs
     ):
         self._log_media(logging.DEBUG, "play_media", media_type, media_id)
+        extra = extra or {}
 
         # Format:  media-source://{domain}/{identifier}?message={user_input}
         # Example: media-source://tts/yandex_station/747970653d74657874?message=123
@@ -1032,6 +1048,12 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
 
         if self.local_state:
             if "://" in media_id:
+                try:
+                    context, entry_id = self._media_stream_context()
+                    offline = stream.is_offline(context, entry_id)
+                except (HomeAssistantError, ValueError) as error:
+                    self._log_media(logging.WARNING, "Media blocked", media_type, media_id)
+                    raise HomeAssistantError("media_entry_unavailable") from error
                 metadata = extra.get("metadata") or {}
                 # We use metadata to pass current media_id to speaker's state
                 # This will allow Music Assistant to sync it's state with the speaker
@@ -1041,11 +1063,16 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                 # Media Source to aac/flac/m3u8/mp3/mp4/wav/gif
                 # audio/mpeg media-source://media_source/local/esh.mp3 {}
                 if media_source.is_media_source_id(media_id):
+                    if offline and not media_id.startswith(
+                        "media-source://media_source/local/"
+                    ):
+                        raise HomeAssistantError("offline_media_source_blocked")
                     sourced_media = await media_source.async_resolve_media(
                         self.hass, media_id, self.entity_id
                     )
                     # We use the sourced_media.url (relative) to reduce the link size
                     media_id = sourced_media.url
+                    self._validate_media_destination(context, entry_id, media_id)
                     # Pass resolved media_id as title to speaker state
                     metadata.setdefault("title", media_id)
                     # We will resolve this later.
@@ -1054,17 +1081,22 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                 # Music Assistant streaming mp3 url
                 # http://192.168.1.123:8097/single/***/media_player.yandex_station/***/media_player.yandex_station.mp3
                 elif media_id.endswith(f"/{self.entity_id}.mp3"):
-                    # Disabling SEEK becase MA source uses single streaming link
+                    # Online MA retains direct playback; offline cannot bypass
+                    # the HA-owned LAN resolver through the speaker's DNS.
+                    self._validate_media_destination(context, entry_id, media_id)
                     metadata["duration"] = None
-
-                    # We wan't using stream proxy for MA source
-                    payload = utils.audio_play_command(media_id, "mp3", metadata)
+                    payload = (
+                        None if offline
+                        else utils.audio_play_command(media_id, "mp3", metadata)
+                    )
 
                 # Yandex Music, Kinopoisk, YouTube, etc.
                 else:
-                    # Return None if none of this
-                    payload = await utils.get_media_payload(
-                        self.quasar.session, media_id
+                    self._validate_media_destination(context, entry_id, media_id)
+                    # Music/Kinopoisk/Bookmate metadata is cloud egress.
+                    payload = (
+                        None if offline
+                        else await utils.get_media_payload(self.quasar.session, media_id)
                     )
 
                 # Any url, direct (http) or relative (from media source)
@@ -1074,11 +1106,12 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                     else:
                         ext = stream.get_ext(media_id)  # auto detect extension
 
-                    if not ext and media_id.startswith("http"):
-                        # Get ext via HEAD or GET requests
-                        ext = await stream.get_content_type(self.hass, media_id)
+                    if ext not in stream.MIME_TYPES and media_id.startswith("http"):
+                        ext = await stream.get_content_type(context, entry_id, media_id)
 
-                    payload = utils.get_stream_url(media_id, ext, metadata)
+                    payload = utils.get_stream_url(
+                        context, entry_id, media_id, ext, metadata
+                    )
 
             elif media_type.startswith(("text:", "dialog:")):
                 payload = {
@@ -1282,6 +1315,15 @@ class YandexStation(YandexStationBase):
 
     async def sync_play_media(self, data: dict):
         self.debug("Sync state: play_media")
+        try:
+            context, entry_id = self._media_stream_context()
+            if stream.is_offline(context, entry_id):
+                self.debug("Sync media unavailable: offline_music_metadata_blocked")
+                return
+        except (ValueError, HomeAssistantError):
+            self.debug("Sync media unavailable: media_entry_unavailable")
+            return
+
 
         source = self.sync_sources[self._attr_source]
 
@@ -1315,7 +1357,9 @@ class YandexStation(YandexStationBase):
                 )
 
             data = {
-                "media_content_id": stream.get_url(info["url"], info["codec"]),
+                "media_content_id": stream.get_url(
+                    context, entry_id, info["url"], info["codec"]
+                ),
                 "media_content_type": source.get("media_content_type", "music"),
                 "entity_id": source["entity_id"],
             }
@@ -1335,7 +1379,7 @@ class YandexStation(YandexStationBase):
                 }
 
         except Exception as e:
-            self.debug("Failed to get track url: " + str(e))
+            self.debug("Failed to get track url: " + type(e).__name__)
             return
 
         await self.async_media_seek(0)

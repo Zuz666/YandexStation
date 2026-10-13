@@ -14,6 +14,8 @@ from homeassistant.util import slugify
 from .core.const import DOMAIN
 from .core.entity import YandexEntity
 from .core.image import draw_cover, draw_lyrics, draw_none
+from .core.lifecycle import get_lifecycle
+from .core import stream
 from .core.yandex_music import get_lyrics
 from .core.yandex_quasar import YandexQuasar
 from .core.yandex_session import safe_error_summary
@@ -209,9 +211,23 @@ class YandexLyrics(Camera):
         entity: YandexStation = self.device.get("entity")
         if not entity:
             return None
+        cache = self.quasar.cache_manager
+        if cache is None or self.hass is None:
+            return None
+        context = get_lifecycle(self.hass).context
+        try:
+            if stream.is_offline(context, cache.entry_id):
+                self.cover = None
+                return None
+        except ValueError:
+            return None
 
         if self.cover_content_id != entity.media_content_id:
             if entity.media_image_url:
+                try:
+                    stream.validate_media_url(context, cache.entry_id, entity.media_image_url)
+                except ValueError:
+                    return None
                 session = async_get_clientsession(self.hass)
                 r = await session.get(entity.media_image_url, timeout=15)
                 image = await r.read()
@@ -232,6 +248,9 @@ class YandexLyrics(Camera):
         if not entity:
             return None
 
+        if self.quasar.policy.force_offline_local:
+            self.lyrics = None
+            return None
         if self.lyrics_content_id != entity.media_content_id:
             if entity.media_content_type == MediaType.MUSIC:
                 self.lyrics = await get_lyrics(

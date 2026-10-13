@@ -295,17 +295,17 @@ def audio_play_command(url: str, ext: str, metadata: dict = None) -> dict:
 
 
 def get_stream_url(
-    media_id: str, ext: str | None, metadata: dict = None
+    context, entry_id: str, media_id: str, ext: str | None, metadata: dict = None
 ) -> dict | None:
     if ext in ("aac", "flac", "m3u8", "mp3", "mp4", "wav"):
         # station can't handle links without extension
-        stream_url = stream.get_url(media_id, ext)
+        stream_url = stream.get_url(context, entry_id, media_id, ext)
         return audio_play_command(stream_url, ext, metadata)
 
     if ext == "gif":
         # maximum link size ~250 symbols
-        if media_id[0] == "/":
-            media_id = stream.get_url(media_id, ext)
+        if media_id.startswith("/") or stream.is_offline(context, entry_id):
+            media_id = stream.get_url(context, entry_id, media_id, ext)
         payload = {"animation_sequence": [{"frontal_led_image": media_id}]}
         return external_command("draw_led_screen", payload)
 
