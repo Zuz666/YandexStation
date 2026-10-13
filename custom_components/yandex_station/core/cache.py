@@ -377,6 +377,14 @@ class CacheManager:
         return self._cache_status
 
     @property
+    def hass(self) -> HomeAssistant:
+        return self._hass
+
+    @property
+    def entry_id(self) -> str:
+        return self._entry_id
+
+    @property
     def scenario_creation_trusted(self) -> bool:
         return self._scenario_creation_trusted
 
