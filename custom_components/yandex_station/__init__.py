@@ -183,17 +183,25 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
 async def async_rebind_runtime(hass: HomeAssistant):
     """Rebind reloadable targets without replacing stable service dispatchers."""
     lifecycle = get_lifecycle(hass)
-    for item in tuple(hass.data.values()):
-        cache_data = getattr(item, "cache_data", None)
+    from homeassistant.helpers.translation import TRANSLATION_FLATTEN_CACHE
+
+    translation_cache = hass.data.get(TRANSLATION_FLATTEN_CACHE)
+    if translation_cache is not None:
+        cache_data = getattr(translation_cache, "cache_data", None)
         if cache_data is not None:
-            for loaded in getattr(cache_data, "loaded", {}).values():
-                if isinstance(loaded, set):
+            # Modern Core stores language -> category -> component.
+            async with translation_cache.lock:
+                for loaded in cache_data.loaded.values():
                     loaded.discard(DOMAIN)
-            for categories in getattr(cache_data, "cache", {}).values():
-                if isinstance(categories, dict):
+                for categories in cache_data.cache.values():
                     for by_domain in categories.values():
-                        if isinstance(by_domain, dict):
-                            by_domain.pop(DOMAIN, None)
+                        by_domain.pop(DOMAIN, None)
+        else:
+            # HA 2023.2 stores language -> component -> category.
+            for loaded in translation_cache.loaded.values():
+                loaded.discard(DOMAIN)
+            for by_domain in translation_cache.cache.values():
+                by_domain.pop(DOMAIN, None)
 
     def import_conversation():
         try:
