@@ -656,7 +656,7 @@ class YandexQuasar(Dispatcher):
         async with self._reconciliation_lock:
             for speaker in self.owned_speakers:
                 await self._resolve_speaker_scenario(speaker)
-
+        self.dispatch_update("readiness", {})
     async def retry_scenario_creation(self, device_id: str, *, confirm_risk: bool = False) -> str:
         """Ручное Recovery: одна подтверждённая попытка на устройство (§6).
 
@@ -734,7 +734,7 @@ class YandexQuasar(Dispatcher):
             self.readiness.scenarios_state = ScenariosState.DISABLED
             for speaker in self.owned_speakers:
                 speaker["scenario_id"] = None
-
+            self.dispatch_update("readiness", {})
             return
         try:
             r = await self.session.get(
@@ -747,6 +747,7 @@ class YandexQuasar(Dispatcher):
                 raise RuntimeError("scenarios_unavailable")
             self.scenarios = scenarios
             self.readiness.scenarios_state = ScenariosState.READY
+            self.dispatch_update("readiness", {})
         except Exception as e:
             _LOGGER.debug("Scenario catalog unavailable: %s", type(e).__name__)
             # старый список допустим только в diagnostics: bindings очищаются
@@ -754,7 +755,7 @@ class YandexQuasar(Dispatcher):
             self.readiness.scenarios_state = ScenariosState.UNAVAILABLE
             for speaker in self.owned_speakers:
                 speaker["scenario_id"] = None
-
+            self.dispatch_update("readiness", {})
     def _ensure_scenario_worker(self):
         """Отдельный worker: старт при разрешённом cloud/recovery (§6)."""
         if self.stopping or self._scenario_worker_task is not None:
@@ -1089,20 +1090,27 @@ class YandexQuasar(Dispatcher):
             )
             resp = await r.json()
             assert resp["status"] == "ok", resp
+            for speaker in resp["items"]:
+                for device in self.devices:
+                    if (
+                        "quasar_info" not in device
+                        or device["quasar_info"]["device_id"] != speaker["id"]
+                    ):
+                        continue
+                    device["online"] = speaker["online"]
+                    entity = device.get("entity")
+                    if (
+                        entity is not None
+                        and getattr(entity, "local_state", False) is None
+                    ):
+                        entity._attr_available = bool(speaker["online"])
+                        if getattr(entity, "hass", None):
+                            entity.async_write_ha_state()
+                    break
         except:
             return
         finally:
             self.online_updated.set()
-
-        for speaker in resp["items"]:
-            for device in self.devices:
-                if (
-                    "quasar_info" not in device
-                    or device["quasar_info"]["device_id"] != speaker["id"]
-                ):
-                    continue
-                device["online"] = speaker["online"]
-                break
 
     async def connect(self):
         if self.policy.effective_use_cached_devices or not self.policy.effective_cloud_allowed:
@@ -1260,6 +1268,11 @@ class YandexQuasar(Dispatcher):
                 return
             # сценарный worker: свой backoff, завершается после полного согласования
             self._ensure_scenario_worker()
+            if any(
+                getattr(s.get("entity"), "local_state", False) is None
+                for s in self.owned_speakers
+            ):
+                await self.update_online_stats()
             if self.stopping:
                 return
             # single-flight token-fetch только для колонок без известного токена
