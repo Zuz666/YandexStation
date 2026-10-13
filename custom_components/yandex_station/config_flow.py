@@ -276,18 +276,6 @@ class OptionsFlowHandler(OptionsFlow):
             return self._config_entry
         return self.hass.config_entries.async_get_entry(self.handler)
 
-    def _abort_other_options_flows(self) -> None:
-        options = getattr(self.hass.config_entries, "options", None)
-        if options is not None:
-            for flow in tuple(options.async_progress(include_uninitialized=True)):
-                fid = flow.get("flow_id")
-                if (
-                    flow.get("handler") == self.config_entry.entry_id
-                    and fid
-                    and fid != getattr(self, "flow_id", None)
-                ):
-                    options.async_abort(fid)
-
     async def async_step_init(self, user_input: dict = None):
         """Show main options menu."""
         return self.async_show_menu(
@@ -345,7 +333,6 @@ class OptionsFlowHandler(OptionsFlow):
             elif not lifecycle.entry_admitted(entry.entry_id):
                 errors["base"] = "reload_in_progress"
             elif lifecycle.request_entry_reload(entry.entry_id):
-                self._abort_other_options_flows()
                 return self.async_abort(reason="retry_started")
             else:
                 errors["base"] = "reload_in_progress"
@@ -637,7 +624,6 @@ class OptionsFlowHandler(OptionsFlow):
             result["errors"] = {"base": "invalid_endpoint"}
             return result
 
-        self._abort_other_options_flows()
         if new_options != self.config_entry.options:
             self.hass.config_entries.async_update_entry(
                 self.config_entry, options=new_options
