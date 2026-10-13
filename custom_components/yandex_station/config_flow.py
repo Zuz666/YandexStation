@@ -304,18 +304,42 @@ class OptionsFlowHandler(OptionsFlow):
         readiness = runtime.readiness if runtime else None
         # Setup reasons are safe_error_summary codes/classes; no URL or body.
         reason = lifecycle.setup_reasons.get(self.config_entry.entry_id, "none")
+        auth_reason = str(readiness.auth_state) if readiness else "unknown"
+        cloud_reason = (
+            str(readiness.computed_cloud_state(runtime.policy))
+            if readiness else "unknown"
+        )
+        scenario_reason = str(readiness.scenarios_state) if readiness else "unknown"
+        ownership_reason = (
+            "ownership_conflict"
+            if lifecycle.ownership_conflicts.get(self.config_entry.entry_id)
+            else "none"
+        )
         placeholders = {
             "cache_reason": cache_reason,
             "setup_reason": reason,
-            "auth_reason": str(readiness.auth_state) if readiness else "unknown",
-            "cloud_reason": (
-                str(readiness.computed_cloud_state(runtime.policy))
-                if readiness else "unknown"
+            "auth_reason": auth_reason,
+            "cloud_reason": cloud_reason,
+            "scenario_reason": scenario_reason,
+            "ownership_reason": ownership_reason,
+            "cache_icon": "🟢" if cache_reason == "cache_ready" else "🔴",
+            "setup_icon": "🟢" if reason == "none" else "🔴",
+            "auth_icon": (
+                "🟢" if auth_reason == "valid"
+                else "🔴" if auth_reason == "reauth_required"
+                else "🟡"
             ),
-            "scenario_reason": str(readiness.scenarios_state) if readiness else "unknown",
-            "ownership_reason": "ownership_conflict" if lifecycle.ownership_conflicts.get(
-                self.config_entry.entry_id
-            ) else "none",
+            "cloud_icon": (
+                "🟢" if cloud_reason == "online"
+                else "🔴" if cloud_reason in ("reauth_required", "unavailable")
+                else "🟡"
+            ),
+            "scenario_icon": (
+                "🟢" if scenario_reason == "ready"
+                else "🔴" if scenario_reason == "unavailable"
+                else "🟡"
+            ),
+            "ownership_icon": "🟢" if ownership_reason == "none" else "🔴",
         }
         return self.async_show_menu(
             step_id="recovery",
