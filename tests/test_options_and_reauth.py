@@ -419,3 +419,98 @@ def test_empty_valid_snapshot_keeps_offline_selection(tmp_path):
             })["include"] == ["unavailable-1"]
 
     asyncio.run(scenario())
+
+
+def test_core_qr_poll_pending_then_success_keeps_the_same_flow(tmp_path):
+    async def scenario():
+        async with core_flow(tmp_path) as (hass, entry, lifecycle):
+            loaded = MagicMock()
+            loaded.single_config_entry = False
+            loaded.get_platform.return_value = YandexStationFlowHandler
+            client = MagicMock()
+            client.close = AsyncMock()
+            polls = []
+            reloads = []
+
+            def response(payload=None, text=""):
+                result = MagicMock(status=200, ok=True)
+                result.json = AsyncMock(return_value=payload)
+                result.text = AsyncMock(return_value=text)
+                return result
+
+            async def get(url, **kwargs):
+                if url.endswith("/pwl-yandex"):
+                    return response(text='__CSRF__ = "synthetic-csrf"')
+                assert "short_info/" in url
+                return response({
+                    "status": "ok", "display_login": entry.unique_id,
+                    "uid": "uid-1",
+                })
+
+            async def post(url, **kwargs):
+                if url.endswith("/password/submit"):
+                    return response({"track_id": "synthetic-track"})
+                if url.endswith("/magic/code"):
+                    return response({"link": "https://passport.yandex.ru/synthetic-qr"})
+                if url.endswith("/magic/code/status"):
+                    polls.append(1)
+                    if len(polls) == 1:
+                        return response({"state": "otp_auth_waiting"})
+                    return response({
+                        "state": "otp_auth_finished", "trackId": "synthetic-track",
+                    })
+                if url.endswith("/sessions/get_session"):
+                    return response({"status": "ok"})
+                assert url.endswith("/oauth/token_by_sessionid")
+                return response({"access_token": "replacement"})
+
+            async def reload_entry(entry_id):
+                reloads.append((entry_id, dict(entry.data)))
+                return True
+
+            with patch("homeassistant.loader.async_get_integration",
+                       new_callable=AsyncMock, return_value=loaded), \
+                 patch("homeassistant.config_entries.async_process_deps_reqs",
+                       new_callable=AsyncMock, create=True), \
+                 patch("custom_components.yandex_station.config_flow.utils.async_create_clientsession",
+                       return_value=client), \
+                 patch("custom_components.yandex_station.config_flow.generate_qr_code",
+                       return_value="synthetic-qr-image"), \
+                 patch.object(YandexSession, "_get", side_effect=get), \
+                 patch.object(YandexSession, "_post", side_effect=post), \
+                 patch.object(hass.config_entries, "async_reload",
+                              side_effect=reload_entry):
+                form = await hass.config_entries.flow.async_init(
+                    DOMAIN, context={"source": "reauth", "entry_id": entry.entry_id}
+                )
+                form = await hass.config_entries.flow.async_configure(
+                    form["flow_id"], {"confirm_reauth": True}
+                )
+                qr = await hass.config_entries.flow.async_configure(
+                    form["flow_id"], {"method": "qr"}
+                )
+                assert qr["step_id"] == "qr"
+                pending = await hass.config_entries.flow.async_configure(qr["flow_id"])
+                assert pending["type"] == "form"
+                assert pending["step_id"] == "qr"
+                assert pending["flow_id"] == qr["flow_id"]
+                assert pending["errors"] == {"base": "unauthorised"}
+                assert pending["description_placeholders"]["qr_url"] == (
+                    "https://passport.yandex.ru/synthetic-qr"
+                )
+                assert entry.data["x_token"] == "previous"
+                assert not reloads
+                success = await asyncio.create_task(
+                    hass.config_entries.flow.async_configure(qr["flow_id"])
+                )
+                assert success["reason"] == "reauth_successful"
+                assert len(polls) == 2
+                assert entry.data["x_token"] == "replacement"
+                assert entry.data["account_uid"] == "uid-1"
+                assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                assert reloads == [(entry.entry_id, dict(entry.data))]
+                client.close.assert_awaited_once()
+
+    asyncio.run(scenario())

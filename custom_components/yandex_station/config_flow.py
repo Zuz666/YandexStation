@@ -177,7 +177,7 @@ class YandexStationFlowHandler(ConfigFlow, domain=DOMAIN):
         if blocked := await self._reauth_network_gate():
             return blocked
         resp = await self.yandex.login_qr()
-        if not resp:
+        if not resp.raw:  # QR not scanned: login_qr returns LoginResponse({})
             self.cur_step["errors"] = {"base": "unauthorised"}
             return self.cur_step
         return await self._check_yandex_response(resp)
