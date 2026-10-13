@@ -419,7 +419,7 @@ class EntryPolicy:
     force_offline_local: bool = False
     cloud_updates: bool = True
     local_updates: bool = True
-    enable_diagnostic_sensors: bool = True
+    enable_diagnostic_sensors: bool = False
 
     @property
     def effective_use_cached_devices(self) -> bool:
@@ -455,7 +455,7 @@ class EntryPolicy:
             force_offline_local=get_val("force_offline_local", False),
             cloud_updates=get_val("cloud_updates", True),
             local_updates=get_val("local_updates", True),
-            enable_diagnostic_sensors=get_val("enable_diagnostic_sensors", True),
+            enable_diagnostic_sensors=get_val("enable_diagnostic_sensors", False),
         )
 
 

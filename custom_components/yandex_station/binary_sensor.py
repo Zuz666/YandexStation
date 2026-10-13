@@ -25,7 +25,12 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     if quasar and quasar.policy.enable_diagnostic_sensors:
         for speaker in quasar.owned_speakers + quasar.owned_modules:
-            entities.append(YandexStationLocalConnection(quasar, speaker))
+            did = speaker.get("quasar_info", {}).get("device_id") or speaker.get("id")
+            sensor = YandexStationLocalConnection(quasar, entry, speaker)
+            if hass_utils.migrate_diagnostic_unique_id(
+                hass, entry, "binary_sensor", f"{did}_local_connection", sensor.unique_id
+            ):
+                entities.append(sensor)
 
     for quasar, device, config in hass_utils.incluce_devices(hass, entry):
         for instance in device["capabilities"]:
@@ -70,15 +75,17 @@ class YandexStationLocalConnection(BinarySensorEntity):
 
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_should_poll = False
+    _attr_translation_key = "local_connection"
     _attr_has_entity_name = True
     _attr_name = "Локальное подключение"
 
-    def __init__(self, quasar: YandexQuasar, device: dict):
+    def __init__(self, quasar: YandexQuasar, entry, device: dict):
         self.quasar = quasar
         self.device = device
         did = device.get("quasar_info", {}).get("device_id") or device.get("id")
         self._did = did
-        self._attr_unique_id = f"{did}_local_connection"
+        self._attr_unique_id = f"{entry.entry_id}_{did}_local_connection"
         self.entity_id = f"binary_sensor.yandex_station_{slugify(self._attr_unique_id)}"
         self._attr_is_on = False
         self._software_version = None
@@ -87,13 +94,14 @@ class YandexStationLocalConnection(BinarySensorEntity):
             identifiers={(DOMAIN, did)},
             name=device["name"],
         )
-        self._unsub = quasar.subscribe_update(f"{self._did}_glagol", self._on_glagol_update)
 
     async def async_added_to_hass(self):
         entity = self.device.get("entity")
         if entity and getattr(entity, "local_state", None):
             self._attr_is_on = True
-        self.async_on_remove(self._unsub)
+        self.async_on_remove(
+            self.quasar.subscribe_update(f"{self._did}_glagol", self._on_glagol_update)
+        )
 
     def _on_glagol_update(self, data: dict | None):
         if data and "state" in data:
