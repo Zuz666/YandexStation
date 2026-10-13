@@ -241,6 +241,15 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         if not self.device.get("capabilities"):
             return False
         if not getattr(self.quasar, "policy", None):
+            return self.device["quasar_info"]["device_id"] in self.quasar.owned_glagol_ids
+        if (
+            self.quasar.stopping
+            or self.device["quasar_info"]["device_id"] not in self.quasar.owned_glagol_ids
+        ):
+            return False
+        if not self.device.get("capabilities"):
+            return False
+        if not getattr(self.quasar, "policy", None):
             return True
         if not self.quasar.policy.effective_cloud_allowed:
             return False
@@ -274,6 +283,11 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         return data or None
     @property
     def available(self) -> bool:
+        if (
+            self.quasar.stopping
+            or self.device["quasar_info"]["device_id"] not in self.quasar.owned_glagol_ids
+        ):
+            return False
         if self.local_state is not None:
             return True
         if (
@@ -354,7 +368,12 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         )
 
     async def init_local_mode(self):
-        # self.debug(f"Init local mode (hass: {self.hass is not None})")
+        did = self.device["quasar_info"]["device_id"]
+        if (
+            self.quasar.stopping or did not in self.quasar.owned_glagol_ids
+            or not (self.quasar.policy.local_updates or did in self.quasar.yaml_glagol_hosts)
+        ):
+            return
         if not self.glagol:
             info = self.device["quasar_info"]
             token = self.quasar.device_tokens.get(info["device_id"], {}).get(

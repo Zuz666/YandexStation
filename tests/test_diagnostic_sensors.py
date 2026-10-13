@@ -121,15 +121,10 @@ def test_quasar_sync_transitions_readiness_to_online():
             "status": "ok",
             "households": [{"name": "Home", "all": []}],
         }
-        mock_resp_scenarios = AsyncMock()
-        mock_resp_scenarios.json.return_value = {
-            "status": "ok",
-            "scenarios": [],
-        }
 
         async def fake_get(url, **kwargs):
             if "scenarios" in url:
-                return mock_resp_scenarios
+                raise AssertionError("No speakers require scenario inventory")
             return mock_resp_devices
 
         session.get = AsyncMock(side_effect=fake_get)
@@ -141,7 +136,6 @@ def test_quasar_sync_transitions_readiness_to_online():
 
         assert readiness.auth_state == AuthState.VALID
         assert readiness.devices_state == DevicesState.READY
-        assert readiness.scenarios_state == ScenariosState.READY
         assert readiness.inventory_source == "cloud"
 
         entry = MagicMock()
@@ -193,6 +187,7 @@ def test_quasar_sync_scenarios_failure_degrades_readiness():
         policy = EntryPolicy()
         readiness = Readiness()
         quasar = YandexQuasar(session, policy=policy, readiness=readiness)
+        quasar.owned_glagol_ids = {"sp_1"}
 
         speaker_device = {
             "id": "speaker_dev_1",
@@ -245,6 +240,7 @@ def test_speaker_transport_and_alice_sensors():
         )
         quasar = YandexQuasar(session, readiness=readiness)
         did = "did_sp_200"
+        quasar.owned_glagol_ids = {did}
         device = {
             "id": "cloud_sp_200",
             "name": "Станция Спальня",

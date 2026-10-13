@@ -71,6 +71,9 @@ def test_options_flow_commit_and_reload():
         entry.entry_id = "entry_1"
         entry.unique_id = "test_user"
         entry.options = {"force_offline_local": False, "enable_scenarios": True}
+        entry.disabled_by = None
+        entry.source = "user"
+        hass.config_entries.async_get_entry = MagicMock(return_value=entry)
 
         flow = OptionsFlowHandler(entry)
         flow.hass = hass
@@ -80,7 +83,9 @@ def test_options_flow_commit_and_reload():
             "enable_scenarios": False,
         }
 
-        result = await flow.async_step_settings(user_input)
+        # Submit from its own task: the deferred reload observes that requester.
+        submit = asyncio.create_task(flow.async_step_settings(user_input))
+        result = await submit
         assert result["type"] == "create_entry"
 
         # Verify synchronous update before reload
@@ -89,13 +94,17 @@ def test_options_flow_commit_and_reload():
         assert call_options["force_offline_local"] is True
         assert call_options["enable_scenarios"] is False
 
-        # Verify reload task was created
+        # Reload reserved, but dispatched only after the options task returned
+        assert created_tasks == []
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
         assert len(created_tasks) == 1
 
     asyncio.run(scenario())
 def test_options_flow_reauth_trigger():
     async def scenario():
         hass = MagicMock(spec=HomeAssistant)
+        hass.data = {DOMAIN: {}}
         entry = MagicMock()
         entry.async_start_reauth = MagicMock()
 

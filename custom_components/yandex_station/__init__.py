@@ -27,16 +27,17 @@ from homeassistant.core import ServiceCall
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.util import dt as dt_util
 
 from .core import stream, utils
 from .core.const import CONF_MEDIA_PLAYERS, DATA_CONFIG, DATA_SPEAKERS, DOMAIN
 from .core.yandex_glagol import YandexIOListener
 from .core.yandex_quasar import YandexQuasar
-from .core.yandex_session import YandexSession
+from .core.yandex_session import YandexSession, safe_error_summary
 from .core.yandex_station import YandexStationBase
 from .hass import hass_utils
-from .core.policy import AuthState, EntryPolicy, SessionConfig
-from .core.lifecycle import LifecycleManager, StableStreamDispatcher, StreamContext
+from .core.policy import AuthState, DevicesState, ScenariosState, EntryPolicy, SessionConfig
+from .core.lifecycle import StableStreamDispatcher, get_lifecycle
 from .core.cache import CacheManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -137,17 +138,31 @@ CONFIG_SCHEMA = vol.Schema(
 
 async def async_setup(hass: HomeAssistant, hass_config: dict):
     config: dict = hass_config.get(DOMAIN) or {}
-    hass.data[DOMAIN] = {DATA_CONFIG: config, DATA_SPEAKERS: {}}
+    lifecycle = get_lifecycle(hass)
+    hass.data[DOMAIN][DATA_CONFIG] = config
+    hass.data[DOMAIN].setdefault(DATA_SPEAKERS, {})
+    context = lifecycle.context
+    try:
+        from homeassistant.helpers import network
+        context.hass_url = network.get_url(hass, allow_external=False)
+        stream.StreamView.hass_url = context.hass_url
+    except Exception as e:
+        _LOGGER.warning(f"Ошибка получения локального адреса Home Assistant: {e}")
+
+    stream.StreamView.hass = hass
+    stream.StreamView.key = context.key
+    context.implementation = stream.StreamImplementation(context)
+
+    if lifecycle.stream_dispatcher is None:
+        lifecycle.stream_dispatcher = StableStreamDispatcher(context)
+        hass.http.register_view(lifecycle.stream_dispatcher)
 
     # if CONF_RECOGNITION_LANG in config:
     #     utils.fix_recognition_lang(
     #         hass, "frontend_latest", config[CONF_RECOGNITION_LANG]
     #     )
 
-    if config.get(CONF_LOCAL_UPDATES, True):
-        await _init_local_discovery(hass)
-
-    await _init_services(hass)
+    await async_rebind_runtime(hass)
     await _setup_entry_from_config(hass)
 
     def import_conversation():
@@ -161,23 +176,6 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
 
     # using executor, because bug with "Detected blocking call"
     await hass.async_add_executor_job(import_conversation)
-    context = StreamContext(hass=hass)
-    try:
-        from homeassistant.helpers import network
-        context.hass_url = network.get_url(hass, allow_external=False)
-        stream.StreamView.hass_url = context.hass_url
-    except Exception as e:
-        _LOGGER.warning(f"Ошибка получения локального адреса Home Assistant: {e}")
-
-    stream.StreamView.hass = hass
-    stream.StreamView.key = context.key
-    context.implementation = stream.StreamImplementation(context)
-
-    dispatcher = StableStreamDispatcher(context)
-    hass.http.register_view(dispatcher)
-
-    lifecycle = LifecycleManager(context)
-    hass.data[DOMAIN]["lifecycle"] = lifecycle
 
     async def reload_code_service(call: ServiceCall):
         enable = hass.data[DOMAIN].get(DATA_CONFIG, {}).get("enable_code_reload", False)
@@ -188,144 +186,205 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    async def update_cookie_and_token(**kwargs):
-        hass.config_entries.async_update_entry(entry, data={**entry.data, **kwargs})
-
-    config = hass.data.get(DOMAIN, {}).get(DATA_CONFIG, {})
-    policy = EntryPolicy.from_configs(config, entry.options)
-    session_config = SessionConfig.from_configs(config, entry.options)
-
-    cache_manager = CacheManager(
-        hass, entry.entry_id, account_login=entry.unique_id,
-        account_uid=entry.data.get("account_uid"),
-    )
-
-    session = utils.async_create_clientsession(hass)
-    yandex = YandexSession(session, config=session_config, policy=policy, **entry.data)
-    yandex.add_update_listener(update_cookie_and_token)
-
-    quasar = YandexQuasar(yandex, policy=policy, cache_manager=cache_manager)
-    try:
-        await quasar.init()
-    except Exception as e:
-        if not quasar.devices:
-            if yandex.readiness.auth_state == AuthState.REAUTH_REQUIRED:
-                raise ConfigEntryAuthFailed("credential_rejected") from e
-            raise ConfigEntryNotReady from e
-    if yandex.readiness.auth_state == AuthState.REAUTH_REQUIRED:
-        entry.async_start_reauth(hass)
-
-    await hass_utils.load_fake_devies(hass, quasar)
-
-    # entry.unique_id - user login
-    hass.data[DOMAIN][entry.unique_id] = quasar
-
-    # add stations to global list
-    speakers = hass.data[DOMAIN][DATA_SPEAKERS]
-    for device in quasar.speakers + quasar.modules:
-        did = device.get("quasar_info", {}).get("device_id")
-        if did:
-            shared = speakers.setdefault(did, {})
-            if "host" in shared and shared["host"]:
-                device.setdefault("host", shared["host"])
-            if "port" in shared and shared["port"]:
-                device.setdefault("port", shared["port"])
-            if device.get("host"):
-                shared["host"] = device["host"]
-            if device.get("port"):
-                shared["port"] = device["port"]
-            shared["device_id"] = did
-    await _setup_devices(hass, quasar)
-
-    if policy.effective_cloud_updates:
-        quasar.start()
-    if hass_utils.incluce_devices(hass, entry):
-        quasar.platforms = platforms = PLATFORMS
-        entry.async_on_unload(
-            async_track_time_interval(
-                hass, quasar.devices_passive_update, timedelta(minutes=5)
-            )
+async def async_rebind_runtime(hass: HomeAssistant):
+    """Rebind reloadable targets without replacing stable service dispatchers."""
+    lifecycle = get_lifecycle(hass)
+    await _init_services(hass)
+    if hass.data[DOMAIN][DATA_CONFIG].get(CONF_LOCAL_UPDATES, True):
+        await _init_local_discovery(hass)
+    if lifecycle.stop_unsubscribe is None:
+        lifecycle.stop_unsubscribe = hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STOP, lifecycle.async_stop
         )
-    else:
-        quasar.platforms = platforms = SPEAKER_PLATFORMS
 
-    await hass.config_entries.async_forward_entry_setups(entry, platforms)
-    return True
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
+    lifecycle = get_lifecycle(hass)
+    async with lifecycle.entry_operation(entry.entry_id, "setup") as admitted:
+        if not admitted:
+            raise ConfigEntryNotReady("reload_in_progress")
+
+        async def update_cookie_and_token(**kwargs):
+            hass.config_entries.async_update_entry(entry, data={**entry.data, **kwargs})
+
+        config = hass.data[DOMAIN][DATA_CONFIG]
+        policy = EntryPolicy.from_configs(config, entry.options)
+        session_config = SessionConfig.from_configs(config, entry.options)
+        cache_manager = CacheManager(
+            hass, entry.entry_id, account_login=entry.unique_id,
+            account_uid=entry.data.get("account_uid"),
+        )
+        session = utils.async_create_clientsession(hass)
+        yandex = YandexSession(session, config=session_config, policy=policy, **entry.data)
+        yandex.add_update_listener(update_cookie_and_token)
+        quasar = YandexQuasar(yandex, policy=policy, cache_manager=cache_manager)
+        lifecycle.runtimes[entry.entry_id] = quasar
+        try:
+            try:
+                await quasar.init()
+            except Exception as error:
+                if quasar.readiness.devices_state != DevicesState.READY:
+                    if yandex.readiness.auth_state == AuthState.REAUTH_REQUIRED:
+                        raise ConfigEntryAuthFailed("credential_rejected") from error
+                    raise ConfigEntryNotReady(safe_error_summary(error)) from error
+            finally:
+                lifecycle.finish_bootstrap(entry.entry_id)
+            if yandex.readiness.auth_state == AuthState.REAUTH_REQUIRED:
+                entry.async_start_reauth(hass)
+            await hass_utils.load_fake_devies(hass, quasar)
+            # Keep the account-login lookup used by all platform setup functions.
+            hass.data[DOMAIN][entry.unique_id] = quasar
+            await hass_utils.async_resolve_speaker_owners(hass, entry, quasar)
+
+            observations = hass.data[DOMAIN][DATA_SPEAKERS]
+            for device in quasar.speakers + quasar.modules:
+                did = device["quasar_info"]["device_id"]
+                if observation := observations.get(did):
+                    device["host"] = observation["host"]
+                    device["port"] = observation["port"]
+                    await cache_manager.async_save_local_config(
+                        did, host=observation["host"], port=observation["port"]
+                    )
+            await _setup_devices(hass, quasar)
+
+            if (
+                quasar.owned_speakers and policy.enable_scenarios
+                and policy.effective_cloud_allowed
+            ):
+                await quasar.load_scenarios()
+                if quasar.readiness.scenarios_state == ScenariosState.READY:
+                    await quasar.load_speakers()
+            if policy.effective_cloud_updates:
+                quasar.start()
+            if hass_utils.incluce_devices(hass, entry):
+                quasar.platforms = platforms = PLATFORMS
+                entry.async_on_unload(async_track_time_interval(
+                    hass, quasar.devices_passive_update, timedelta(minutes=5)
+                ))
+            else:
+                quasar.platforms = platforms = SPEAKER_PLATFORMS
+            await hass.config_entries.async_forward_entry_setups(entry, platforms)
+            return True
+        except BaseException as error:
+            lifecycle.setup_reasons[entry.entry_id] = safe_error_summary(error)
+            await quasar.async_stop()
+            lifecycle.runtimes.pop(entry.entry_id, None)
+            if hass.data[DOMAIN].get(entry.unique_id) is quasar:
+                hass.data[DOMAIN].pop(entry.unique_id, None)
+            raise
 
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    quasar: YandexQuasar | None = hass.data.get(DOMAIN, {}).get(entry.unique_id)
-    if quasar:
-        await quasar.async_stop()
-
-    platforms = getattr(quasar, "platforms", None) or PLATFORMS
-    unloaded = await hass.config_entries.async_unload_platforms(entry, platforms)
-    if unloaded and entry.unique_id in hass.data.get(DOMAIN, {}):
-        hass.data[DOMAIN].pop(entry.unique_id, None)
-    return unloaded
+    lifecycle = get_lifecycle(hass)
+    async with lifecycle.entry_operation(entry.entry_id, "unload") as admitted:
+        if not admitted:
+            return False
+        quasar = lifecycle.runtimes.get(entry.entry_id)
+        if quasar is not None:
+            await quasar.async_stop()
+        platforms = getattr(quasar, "platforms", None) or PLATFORMS
+        unloaded = await hass.config_entries.async_unload_platforms(entry, platforms)
+        if unloaded:
+            lifecycle.runtimes.pop(entry.entry_id, None)
+            hass.data[DOMAIN].pop(entry.unique_id, None)
+        return unloaded
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry):
-    quasar = hass.data.get(DOMAIN, {}).get(entry.unique_id)
-    if quasar is not None:
-        await quasar.async_stop()
-    cache = (
-        quasar.cache_manager if quasar is not None
-        else CacheManager(
+    lifecycle = get_lifecycle(hass)
+    async with lifecycle.entry_operation(entry.entry_id, "remove") as admitted:
+        if not admitted:
+            raise RuntimeError("reload_in_progress")
+        quasar = lifecycle.runtimes.get(entry.entry_id)
+        if quasar is not None:
+            await quasar.async_stop()
+        cache = quasar.cache_manager if quasar is not None else CacheManager(
             hass, entry.entry_id, account_login=entry.unique_id,
             account_uid=entry.data.get("account_uid"),
         )
-    )
-    await cache.async_remove()
+        await cache.async_remove()
+        lifecycle.runtimes.pop(entry.entry_id, None)
+        hass.data[DOMAIN].pop(entry.unique_id, None)
+        # Keep the ownership reservation: removal is not an automatic claim by a peer.
 
 
 async def _init_local_discovery(hass: HomeAssistant):
-    """Init descovery local speakers with Zeroconf (mDNS)."""
-    speakers: dict = hass.data[DOMAIN][DATA_SPEAKERS]
+    """Own one browser and share address observations, never account dictionaries."""
+    lifecycle = get_lifecycle(hass)
+    await lifecycle.async_stop_discovery()
+    speakers = hass.data[DOMAIN][DATA_SPEAKERS]
 
     async def found_local_speaker(info: dict):
-        did = info.get("device_id")
-        if not did:
+        did, host, port = info.get("device_id"), info.get("host"), info.get("port")
+        if (
+            not isinstance(did, str) or not did
+            or not isinstance(host, str) or not host
+            or isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536
+        ):
             return
-        shared = speakers.setdefault(did, {})
-        shared["host"] = info.get("host")
-        shared["port"] = info.get("port")
-        shared.update(info)
-
-        for key, val in hass.data.get(DOMAIN, {}).items():
-            if isinstance(val, YandexQuasar) and not val.stopping:
-                for dev in val.speakers + val.modules:
-                    if dev.get("quasar_info", {}).get("device_id") == did:
-                        dev["host"] = info["host"]
-                        dev["port"] = info["port"]
-                        if val.cache_manager:
-                            await val.cache_manager.async_save_local_config(
-                                did, host=info["host"], port=info["port"]
-                            )
-                        entity: YandexStationBase = dev.get("entity")
-                        if entity and entity.local_state:
+        observation = {
+            "device_id": did, "host": host, "port": port,
+            "observed_at": dt_util.utcnow().isoformat(),
+        }
+        for key in ("platform", "model"):
+            if isinstance(info.get(key), str):
+                observation[key] = info[key]
+        speakers[did] = observation
+        for quasar in tuple(lifecycle.runtimes.values()):
+            if speakers.get(did) is not observation:
+                return
+            if quasar.stopping:
+                continue
+            for device in quasar.speakers + quasar.modules:
+                if device["quasar_info"]["device_id"] != did:
+                    continue
+                changed = (device.get("host"), device.get("port")) != (host, port)
+                device["host"], device["port"] = host, port
+                if quasar.cache_manager is not None:
+                    try:
+                        await quasar.cache_manager.async_save_local_config(
+                            did, host=host, port=port
+                        )
+                    except RuntimeError:
+                        if quasar.stopping:
                             continue
-                        if entity and entity.hass:
-                            await entity.init_local_mode()
-                            entity.async_write_ha_state()
+                        raise
+                if speakers.get(did) is not observation:
+                    return
+                if (
+                    quasar.stopping or did not in quasar.owned_glagol_ids
+                    or not (quasar.policy.local_updates or did in quasar.yaml_glagol_hosts)
+                ):
+                    continue
+                entity = device.get("entity")
+                if entity is not None and entity.hass and (changed or not entity.local_state):
+                    await entity.init_local_mode()
+                    entity.async_write_ha_state()
 
     zeroconf = await utils.get_zeroconf_singleton(hass)
-    listener = YandexIOListener(
-        lambda info: hass.create_task(found_local_speaker(info))
-    )
-    listener.start(zeroconf)
-
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, listener.stop)
+    listener = YandexIOListener(lambda info: hass.loop.call_soon_threadsafe(
+        lifecycle.schedule_discovery, found_local_speaker, info
+    ))
+    lifecycle.discovery_listener = listener
+    await hass.async_add_executor_job(listener.start, zeroconf)
 
 
 async def _init_services(hass: HomeAssistant):
     """Init Yandex Station TTS service."""
+    lifecycle = get_lifecycle(hass)
+
+    def register(domain, name, target, **kwargs):
+        key = f"{domain}.{name}"
+        registered = key in lifecycle.service_targets
+        handler = lifecycle.bind_service(key, target)
+        if not registered:
+            hass.services.async_register(domain, name, handler, **kwargs)
+
     def get_all_speakers():
         speakers = []
         for val in hass.data.get(DOMAIN, {}).values():
-            if hasattr(val, "speakers") and hasattr(val, "modules"):
-                speakers.extend(val.speakers + val.modules)
+            if hasattr(val, "owned_speakers") and hasattr(val, "owned_modules"):
+                speakers.extend(val.owned_speakers + val.owned_modules)
         return speakers
 
     try:
@@ -355,7 +414,7 @@ async def _init_services(hass: HomeAssistant):
                 return await entity.glagol.send(data)
             return {"error": "Entity not found"}
 
-        hass.services.async_register(
+        register(
             DOMAIN,
             "send_command",
             send_command,
@@ -391,7 +450,7 @@ async def _init_services(hass: HomeAssistant):
 
     config = hass.data[DOMAIN][DATA_CONFIG]
     service_name = config.get(CONF_TTS_NAME, "yandex_station_say")
-    hass.services.async_register("tts", service_name, yandex_station_say)
+    register("tts", service_name, yandex_station_say)
 
 
 async def _setup_entry_from_config(hass: HomeAssistant):
@@ -430,6 +489,8 @@ async def _setup_devices(hass: HomeAssistant, quasar: YandexQuasar):
     for device in quasar.speakers + quasar.modules:
         did = device["quasar_info"]["device_id"]
         if upd := confdevices.get(did) or confdevices.get(did.lower()):
+            if upd.get(CONF_HOST):
+                quasar.yaml_glagol_hosts.add(did)
             device.update(upd)
         if quasar.cache_manager and (device.get("host") or device.get("port")):
             await quasar.cache_manager.async_save_local_config(
