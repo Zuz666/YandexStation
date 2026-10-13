@@ -21,6 +21,7 @@ from homeassistant.const import (
 )
 
 from .core.entity import YandexCustomEntity
+from .core.yandex_quasar import YandexQuasar
 from .hass import hass_utils
 
 from homeassistant.helpers.device_registry import DeviceEntryType
