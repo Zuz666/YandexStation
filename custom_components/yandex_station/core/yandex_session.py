@@ -913,9 +913,13 @@ class YandexSession(BasicSession):
             time.monotonic() + self._csrf_backoff.next_delay(retry_after),
         )
 
-    def _csrf_confirm_current(self, sent_generation: int) -> None:
-        """A successful request of the still-current generation resets the chain."""
-        if sent_generation != self._csrf_generation:
+    def _csrf_confirm_current(self, sent_token: str, sent_generation: int) -> None:
+        """Only success of a still-live token+generation pair resets the chain."""
+        if (
+            self.csrf_token is None
+            or self.csrf_token != sent_token
+            or self._csrf_generation != sent_generation
+        ):
             return
         self._csrf_retry_at = 0.0
         self._csrf_backoff.reset()
@@ -1027,7 +1031,7 @@ class YandexSession(BasicSession):
         r = await self._request(method, url, role=role, **kwargs)
         if 200 <= r.status < 300:
             if sent_generation is not None:
-                self._csrf_confirm_current(sent_generation)
+                self._csrf_confirm_current(sent_token, sent_generation)
             self.retry_after.pop(role, None)
             return r
 
