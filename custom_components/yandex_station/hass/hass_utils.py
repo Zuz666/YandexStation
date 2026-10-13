@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 
 from homeassistant.config_entries import ConfigEntry
@@ -21,6 +22,8 @@ from ..vacuum import INCLUDE_TYPES as VACUUM
 from ..water_heater import INCLUDE_TYPES as WATER_HEATER
 
 INCLUDE_KEYS = ("id", "name", "type", "room_name", "skill_id", "house_name")
+_LOGGER = logging.getLogger(__name__)
+
 
 INCLUDE_TYPES_UNKNOWN = (
     "devices.types.camera",
@@ -318,3 +321,29 @@ async def async_claim_speaker(hass, entry, glagol_id: str) -> None:
                     devices.async_update_device(device.id, remove_config_entry_id=owner)
             lifecycle.speaker_owners[glagol_id] = entry.entry_id
             lifecycle.ownership_conflicts.get(entry.entry_id, set()).discard(glagol_id)
+
+
+def migrate_diagnostic_unique_id(
+    hass: HomeAssistant, entry: ConfigEntry, platform: str,
+    legacy_id: str, target_id: str,
+) -> bool:
+    """Preserve owned registry metadata without claiming another entry's ID.
+
+    Return False when the target belongs to a different entry: registering a
+    new entity there would attach it to the foreign registry record.
+    """
+    registry = er.async_get(hass)
+    target_entity_id = registry.async_get_entity_id(platform, DOMAIN, target_id)
+    legacy_entity_id = registry.async_get_entity_id(platform, DOMAIN, legacy_id)
+    legacy = registry.async_get(legacy_entity_id) if legacy_entity_id else None
+    if target_entity_id:
+        target = registry.async_get(target_entity_id)
+        if target.config_entry_id != entry.entry_id:
+            _LOGGER.warning("diagnostic_id_conflict")
+            return False
+        if legacy is not None and legacy.config_entry_id == entry.entry_id:
+            _LOGGER.warning("diagnostic_id_conflict")
+        return True
+    if legacy is not None and legacy.config_entry_id == entry.entry_id:
+        registry.async_update_entity(legacy_entity_id, new_unique_id=target_id)
+    return True
