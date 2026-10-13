@@ -237,6 +237,76 @@ def test_claim_rejects_enabled_owner_and_foreign_account_record(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('order', [('a', 'b'), ('b', 'a')])
+def test_claim_selects_canonical_media_device_across_registration_orders(tmp_path, order):
+    async def scenario():
+        async with ownership_runtime(tmp_path, disabled=('a',)) as (hass, entries, client, _):
+            devices_by_suffix = {}
+            media = None
+            lyrics = None
+            for suffix in order:
+                if suffix == 'a':
+                    dev_a, media = register_speaker(hass, entries['a'])
+                    devices_by_suffix['a'] = dev_a
+                else:
+                    dev_b, lyrics = register_speaker(
+                        hass, entries['b'], domain='camera', suffix='_lyrics'
+                    )
+                    devices_by_suffix['b'] = dev_b
+            area = area_registry.async_get(hass).async_create('Canonical area')
+            device_registry.async_get(hass).async_update_device(
+                devices_by_suffix['a'].id,
+                name_by_user='Canonical speaker device',
+                area_id=area.id,
+            )
+            for entry in entries.values():
+                await prepare_account(hass, entry)
+            b = await restore_account(hass, entries['b'], client)
+            reloaded = asyncio.Event()
+
+            async def reload_entry(_entry_id):
+                reloaded.set()
+                return True
+
+            with patch.object(hass.config_entries, 'async_reload', side_effect=reload_entry):
+                await asyncio.create_task(async_claim_speaker(hass, entries['b'], 'shared-local'))
+                await asyncio.wait_for(reloaded.wait(), 1)
+                await hass.async_block_till_done()
+
+            reg = entity_registry.async_get(hass)
+            updated_media = reg.async_get(media.entity_id)
+            updated_lyrics = reg.async_get(lyrics.entity_id)
+            assert updated_media.config_entry_id == 'entry-b'
+            assert updated_lyrics.config_entry_id == 'entry-b'
+            assert updated_media.device_id == devices_by_suffix['a'].id
+            assert updated_lyrics.device_id == devices_by_suffix['a'].id
+            canonical = device_registry.async_get(hass).async_get(devices_by_suffix['a'].id)
+            assert canonical is not None
+            assert canonical.name_by_user == 'Canonical speaker device'
+            assert canonical.area_id == area.id
+            assert canonical.config_entries == {'entry-b'}
+            if devices_by_suffix['b'].id != devices_by_suffix['a'].id:
+                assert device_registry.async_get(hass).async_get(devices_by_suffix['b'].id) is None
+
+        enabled_dir = tmp_path / 'enabled'
+        enabled_dir.mkdir(exist_ok=True)
+        async with ownership_runtime(enabled_dir) as (hass, entries, client, _):
+            for suffix in order:
+                if suffix == 'a':
+                    device_registry.async_get(hass).async_get_or_create(
+                        config_entry_id=entries['a'].entry_id,
+                        identifiers={(DOMAIN, 'shared-local')},
+                        name='Stale speaker device',
+                    )
+                else:
+                    register_speaker(hass, entries['b'])
+            for entry in entries.values():
+                await prepare_account(hass, entry)
+            await restore_account(hass, entries['b'], client)
+            with pytest.raises(ValueError, match='ownership_conflict'):
+                await async_claim_speaker(hass, entries['b'], 'shared-local')
+
+    asyncio.run(scenario())
 def test_unassigned_owner_cannot_connect_fetch_tokens_send_or_bypass_yaml_include(tmp_path):
     async def scenario():
         async with ownership_runtime(tmp_path) as (hass, entries, client, _):
