@@ -21,6 +21,8 @@ from .cache import (
     SCENARIO_STATE_CONFIRMED,
     SCENARIO_STATE_PENDING,
     StationSnapshot,
+    TOKEN_STATE_VALID,
+    normalize_inventory,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -235,6 +237,7 @@ class YandexQuasar(Dispatcher):
         self.devices = []
         self.scenarios = None
         self.device_tokens = {}
+        self.stopping = False
         self._device_command_locks = {}
         self._reconciliation_lock = asyncio.Lock()
         self.online_updated = asyncio.Event()
@@ -245,9 +248,15 @@ class YandexQuasar(Dispatcher):
         self.readiness.devices_state = DevicesState.READY
         self.readiness.inventory_source = "cache"
         self.readiness.last_snapshot_at = snapshot.updated_at
-        for glagol_id, token_data in snapshot.device_tokens.items():
-            if isinstance(token_data, dict) and token_data.get("state") != "invalid":
-                self.device_tokens[glagol_id] = token_data.get("token")
+        self.device_tokens = {
+            glagol_id: {
+                platform: record["token"] for platform, record in tokens.items()
+                if record.get("state") == TOKEN_STATE_VALID
+            }
+            for glagol_id, tokens in snapshot.device_tokens.items()
+        }
+        if self.session is not None and self.session.account_uid is None:
+            self.session.account_uid = snapshot.account_uid
         for dev in self.speakers + self.modules:
             did = dev.get("quasar_info", {}).get("device_id")
             if did and did in snapshot.local_config:
@@ -256,6 +265,8 @@ class YandexQuasar(Dispatcher):
                     dev.setdefault("host", cfg["host"])
                 if "port" in cfg:
                     dev.setdefault("port", cfg["port"])
+                if "hdmi_audio" in cfg:
+                    dev["hdmi_audio"] = cfg["hdmi_audio"]
 
     async def init(self):
         """Основная функция. Возвращает список колонок."""
@@ -263,7 +274,7 @@ class YandexQuasar(Dispatcher):
         if self.cache_manager:
             snapshot = await self.cache_manager.async_load()
 
-        if snapshot and snapshot.devices:
+        if snapshot is not None:
             # Cache-first: publish local entities immediately before network (RFC v2 §3.1)
             self._restore_from_snapshot(snapshot)
             if self.policy.effective_cloud_allowed and not self.policy.effective_use_cached_devices:
@@ -277,9 +288,10 @@ class YandexQuasar(Dispatcher):
             return
 
         if self.policy.effective_use_cached_devices:
-            _LOGGER.warning("Cache is missing or empty, cannot start in cached mode")
+            reason = self.cache_manager.cache_status if self.cache_manager else "cache_missing"
+            _LOGGER.warning("Cached startup unavailable: reason=%s", reason)
             self.readiness.devices_state = DevicesState.UNAVAILABLE
-            raise RuntimeError("cache_missing")
+            raise RuntimeError(reason)
 
         # No snapshot: initial cloud bootstrap required
         try:
@@ -303,20 +315,32 @@ class YandexQuasar(Dispatcher):
                 await self.session.refresh_cookies()
             raise
         resp = await r.json()
-        if not isinstance(resp, dict) or resp.get("status") != "ok":
+        if (
+            not isinstance(resp, dict) or resp.get("status") != "ok"
+            or not isinstance(resp.get("households"), list)
+        ):
             raise RuntimeError("inventory_unavailable")
-
-        self.devices = []
+        devices = []
         for house in resp["households"]:
-            self.devices.extend(
+            if (
+                not isinstance(house, dict)
+                or not isinstance(house.get("name"), str)
+                or not isinstance(house.get("all"), list)
+                or any(not isinstance(device, dict) for device in house["all"])
+            ):
+                raise RuntimeError("inventory_unavailable")
+            devices.extend(
                 {**device, "house_name": house["name"]} for device in house["all"]
             )
+        devices = normalize_inventory(devices)
+        if self.cache_manager:
+            await self.cache_manager.async_save_devices(
+                devices, account_uid=self.session.account_uid
+            )
+        self.devices = devices
         self.readiness.auth_state = AuthState.VALID
         self.readiness.devices_state = DevicesState.READY
         self.readiness.inventory_source = "cloud"
-
-        if self.cache_manager:
-            await self.cache_manager.async_save_devices(self.devices)
 
         if self.policy.enable_scenarios and self.policy.effective_cloud_allowed:
             await self.load_scenarios()
@@ -372,7 +396,7 @@ class YandexQuasar(Dispatcher):
                             device_id, hash_code, SCENARIO_STATE_CONFIRMED
                         )
                 else:
-                    if self.cache_manager and getattr(self.cache_manager, "is_untrusted", False) is True:
+                    if self.cache_manager and not self.cache_manager.scenario_creation_trusted:
                         _LOGGER.warning(
                             "Scenario creation journal is untrusted on disk for %s; skipping creation",
                             device_id,
@@ -598,7 +622,7 @@ class YandexQuasar(Dispatcher):
     async def load_local_speakers(self):
         """Загружает список локальных колонок. Не используется."""
         try:
-            r = await self.session.get(
+            r = await self.session.request_glagol(
                 "https://quasar.yandex.net/glagol/device_list", role="glagol_token"
             )
             resp = await r.json()
@@ -885,6 +909,7 @@ class YandexQuasar(Dispatcher):
 
     async def async_stop(self):
         """Cancel and await background tasks and Glagol connections (RFC v2 §2.3, §7.3)."""
+        self.stopping = True
         if self.updates_task:
             self.updates_task.cancel()
             try:
@@ -902,6 +927,8 @@ class YandexQuasar(Dispatcher):
                     pass
 
         await self.session.async_stop()
+        if self.cache_manager:
+            await self.cache_manager.async_close()
         self.dispatcher.clear()
 
     async def set_account_config(self, key: str, value):

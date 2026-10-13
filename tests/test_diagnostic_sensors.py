@@ -197,6 +197,7 @@ def test_quasar_sync_scenarios_failure_degrades_readiness():
         speaker_device = {
             "id": "speaker_dev_1",
             "name": "Станция Спальня",
+            "type": "devices.types.smart_speaker.yandex.station",
             "quasar_info": {"device_id": "sp_1", "platform": "yandexstation"},
             "capabilities": [{"type": "devices.capabilities.quasar.server_action"}],
         }
