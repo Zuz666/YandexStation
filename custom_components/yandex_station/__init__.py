@@ -197,7 +197,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     session_config = SessionConfig.from_configs(config, entry.options)
 
     cache_manager = CacheManager(
-        hass, entry.entry_id, account_login=entry.unique_id
+        hass, entry.entry_id, account_login=entry.unique_id,
+        account_uid=entry.data.get("account_uid"),
     )
 
     session = utils.async_create_clientsession(hass)
@@ -265,6 +266,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
         hass.data[DOMAIN].pop(entry.unique_id, None)
     return unloaded
 
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry):
+    quasar = hass.data.get(DOMAIN, {}).get(entry.unique_id)
+    if quasar is not None:
+        await quasar.async_stop()
+    cache = (
+        quasar.cache_manager if quasar is not None
+        else CacheManager(
+            hass, entry.entry_id, account_login=entry.unique_id,
+            account_uid=entry.data.get("account_uid"),
+        )
+    )
+    await cache.async_remove()
+
+
 async def _init_local_discovery(hass: HomeAssistant):
     """Init descovery local speakers with Zeroconf (mDNS)."""
     speakers: dict = hass.data[DOMAIN][DATA_SPEAKERS]
@@ -279,11 +294,15 @@ async def _init_local_discovery(hass: HomeAssistant):
         shared.update(info)
 
         for key, val in hass.data.get(DOMAIN, {}).items():
-            if hasattr(val, "speakers") and hasattr(val, "modules"):
+            if isinstance(val, YandexQuasar) and not val.stopping:
                 for dev in val.speakers + val.modules:
                     if dev.get("quasar_info", {}).get("device_id") == did:
                         dev["host"] = info["host"]
                         dev["port"] = info["port"]
+                        if val.cache_manager:
+                            await val.cache_manager.async_save_local_config(
+                                did, host=info["host"], port=info["port"]
+                            )
                         entity: YandexStationBase = dev.get("entity")
                         if entity and entity.local_state:
                             continue
@@ -412,6 +431,10 @@ async def _setup_devices(hass: HomeAssistant, quasar: YandexQuasar):
         did = device["quasar_info"]["device_id"]
         if upd := confdevices.get(did) or confdevices.get(did.lower()):
             device.update(upd)
+        if quasar.cache_manager and (device.get("host") or device.get("port")):
+            await quasar.cache_manager.async_save_local_config(
+                did, host=device.get("host"), port=device.get("port")
+            )
 
 
 async def async_remove_config_entry_device(

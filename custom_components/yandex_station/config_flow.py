@@ -284,7 +284,8 @@ class OptionsFlowHandler(OptionsFlow):
                 devices[i["id"]] = device_name(i)
         else:
             cache = CacheManager(
-                self.hass, self.config_entry.entry_id, account_login=entry_login
+                self.hass, self.config_entry.entry_id, account_login=entry_login,
+                account_uid=self.config_entry.data.get("account_uid"),
             )
             snapshot = await cache.async_load()
             if snapshot and snapshot.devices:
