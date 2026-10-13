@@ -40,8 +40,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     for module in quasar.owned_modules:
         module["entity"] = entity = YandexModule(quasar, module)
         entities.append(entity)
-    async_add_entities(entities, True)
-
+    # update_before_add=False: сеть исключена из первоначального add (RFC v2 §5)
+    async_add_entities(entities, False)
     # add Quasar TVs
     async_add_entities(
         YandexMediaPlayer(quasar, device, config)
