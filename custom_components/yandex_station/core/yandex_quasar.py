@@ -411,12 +411,19 @@ class YandexQuasar(Dispatcher):
             self.dispatch_update("readiness", {})
             return True
 
-        if allow_reload and self._request_inventory_reload():
-            _LOGGER.info("Inventory membership changed; ordinary reload requested")
+        if allow_reload:
+            if self._request_inventory_reload():
+                _LOGGER.info("Inventory membership changed; ordinary reload requested")
+            else:
+                # admission закрыт или entry disabled: снимок уже надёжно сохранён,
+                # старые consumers продолжают работать до разрешённого reload/setup
+                _LOGGER.warning(
+                    "Inventory membership changed but reload not admitted; "
+                    "keeping current consumers until the next setup"
+                )
             self.dispatch_update("readiness", {})
             return False
-
-        # bootstrap (init) или reload недоступен: применяем новый каталог напрямую
+        # bootstrap (init): новых потребителей ещё нет, применяем напрямую
         self.devices = devices
         self.fresh_device_ids = {d["id"] for d in devices}
         self.dispatch_update("readiness", {})
