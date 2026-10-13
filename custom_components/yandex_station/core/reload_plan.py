@@ -86,21 +86,40 @@ def _imports(tree: ast.Module, module: str, modules: set[str]) -> set[str]:
 
 
 def _protected(tree: ast.Module, module: str) -> tuple[str, ...]:
-    """Preserve route, registration, config, and Store schema contracts."""
+    """Freeze registration/Store contracts and their local constant values."""
     contracts = []
+    assignments = {}
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+        elif isinstance(statement, ast.AnnAssign):
+            targets = (statement.target,)
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                assignments[target.id] = statement
+
+    # DOMAIN is imported by both storage owners and by service registrations.
+    # The import AST does not reflect its value when core.const changes.
+    dependencies = {"DOMAIN"} if module == ROOT + ".core.const" else set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             method = node.func.attr if isinstance(node.func, ast.Attribute) else None
             if (module == ROOT and method in {
                 "register_view", "async_register", "async_register_admin_service",
             }) or (module == ROOT and isinstance(node.func, ast.Name)
-                   and node.func.id == "register") or (
-                module.endswith(".core.cache") and method == "Store"
-            ) or (
-                module.endswith(".core.cache") and isinstance(node.func, ast.Name)
-                and node.func.id == "Store"
+                   and node.func.id == "register"):
+                contracts.append(ast.dump(node, include_attributes=False))
+            if method == "Store" or (
+                isinstance(node.func, ast.Name) and node.func.id == "Store"
             ):
                 contracts.append(ast.dump(node, include_attributes=False))
+                for argument in (*node.args, *(kw.value for kw in node.keywords)):
+                    dependencies.update(
+                        child.id for child in ast.walk(argument)
+                        if isinstance(child, ast.Name)
+                    )
         if module == ROOT and isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
             if any(isinstance(target, ast.Name) and target.id in {
@@ -110,6 +129,22 @@ def _protected(tree: ast.Module, module: str) -> tuple[str, ...]:
         if module.endswith(".core.cache") and isinstance(node, ast.ClassDef):
             if node.name == "StationSnapshot":
                 contracts.append(ast.dump(node, include_attributes=False))
+
+    visited = set()
+    while dependencies:
+        name = dependencies.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        assignment = assignments.get(name)
+        if assignment is None:
+            continue
+        contracts.append(ast.dump(assignment, include_attributes=False))
+        if assignment.value is not None:
+            dependencies.update(
+                child.id for child in ast.walk(assignment.value)
+                if isinstance(child, ast.Name)
+            )
     return tuple(sorted(contracts))
 
 
