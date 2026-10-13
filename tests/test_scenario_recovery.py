@@ -8,9 +8,18 @@ from custom_components.yandex_station.core.cache import (
     StationSnapshot,
 )
 from custom_components.yandex_station.core.policy import EntryPolicy, ScenariosState
-from custom_components.yandex_station.core.yandex_quasar import YandexQuasar, encode
+from custom_components.yandex_station.core.yandex_quasar import (
+    YandexQuasar, encode, scenario_speaker_tts,
+)
 from .test_cache import device_record
-from .test_scenario_reconciliation import scenario_steps
+
+
+def wire_scenario(sid, device_id="dev_123", trigger=None):
+    payload = scenario_speaker_tts(
+        f"ХА {device_id}", trigger or encode(device_id), device_id, "пустышка"
+    )
+    return {"id": sid, **payload}
+
 
 
 def quasar_with(session=None, *, scenarios=None, cache=None):
@@ -35,12 +44,93 @@ def quasar_with(session=None, *, scenarios=None, cache=None):
     return quasar, speaker, cache, session
 
 
+def test_created_scenario_binds_after_catalog_detail_and_restart_without_post():
+    async def scenario():
+        quasar, speaker, _, session = quasar_with()
+        session.ensure_csrf = AsyncMock(return_value="csrf")
+        response = AsyncMock()
+        response.json.return_value = {"status": "ok", "scenario_id": "scen_created"}
+        session.post = AsyncMock(return_value=response)
+        quasar.add_scenario = YandexQuasar.add_scenario.__get__(quasar)
+        await quasar.load_speakers()
+        assert speaker["scenario_id"] == "scen_created"
+        created = quasar.scenarios[0]
+        assert created["steps"] == wire_scenario("scen_created")["steps"]
+        assert {**session.post.await_args.kwargs["json"], "id": "scen_created"} == created
+
+        restarted, restored, _, network = quasar_with()
+        catalog = AsyncMock()
+        catalog.json.return_value = {
+            "status": "ok",
+            "scenarios": [{"id": created["id"], "triggers": created["triggers"]}],
+        }
+        detail = AsyncMock()
+        detail.json.return_value = {"status": "ok", "scenario": created}
+
+        async def fetch(url, **kwargs):
+            return detail if url.endswith("/edit") else catalog
+
+        network.get = AsyncMock(side_effect=fetch)
+        await restarted.load_scenarios()
+        await restarted.load_speakers()
+        assert restored["scenario_id"] == "scen_created"
+        restarted.add_scenario.assert_not_called()
+        assert network.get.await_count == 2
+
+    asyncio.run(scenario())
+
+
+def test_inconsistent_or_additional_device_target_never_binds():
+    async def scenario():
+        for mutate in (
+            lambda item: item["value"].update(id="other-device"),
+            lambda item: item.update(id="other-device"),
+        ):
+            record = wire_scenario("scen_bad")
+            mutate(record["steps"][0]["parameters"]["items"][0])
+            quasar, speaker, _, _ = quasar_with(scenarios=[record])
+            await quasar.load_speakers()
+            assert speaker["scenario_id"] is None
+            assert speaker["scenario_unresolved"]
+            quasar.add_scenario.assert_not_called()
+
+        record = wire_scenario("scen_extra")
+        extra = wire_scenario("other", "other-device")["steps"][0]["parameters"]["items"][0]
+        record["steps"][0]["parameters"]["items"].append(extra)
+        quasar, speaker, _, _ = quasar_with(scenarios=[record])
+        await quasar.load_speakers()
+        assert speaker["scenario_id"] is None
+        assert speaker["scenario_unresolved"]
+        quasar.add_scenario.assert_not_called()
+
+    asyncio.run(scenario())
+
+def test_creation_without_durable_store_never_posts():
+    async def scenario():
+        quasar, speaker, _, session = quasar_with()
+        quasar.cache_manager = None
+        session.ensure_csrf = AsyncMock(return_value="csrf")
+        await quasar.load_speakers()
+        assert speaker["scenario_id"] is None
+        quasar.add_scenario.assert_not_called()
+        session.ensure_csrf.assert_not_awaited()
+
+        quasar.load_scenarios = AsyncMock()
+        try:
+            await quasar.retry_scenario_creation("dev_123", confirm_risk=True)
+            assert False, "durable marker required"
+        except RuntimeError as error:
+            assert str(error) == "marker_unavailable"
+        quasar.add_scenario.assert_not_called()
+
+    asyncio.run(scenario())
+
+
 def test_multiple_trigger_matches_leave_binding_unresolved_and_ban_post():
     async def scenario():
         hash_code = encode("dev_123")
         scenarios = [
-            {"id": "scen_a", "triggers": [{"value": hash_code}],
-             "steps": scenario_steps("dev_123")},
+            wire_scenario("scen_a"),
             {"id": "scen_b",
              "triggers": [{"type": "other"}, {"value": hash_code}]},
         ]
@@ -57,10 +147,7 @@ def test_multiple_trigger_matches_leave_binding_unresolved_and_ban_post():
 def test_foreign_target_is_not_proof_of_absence():
     async def scenario():
         hash_code = encode("dev_123")
-        scenarios = [
-            {"id": "scen_foreign", "triggers": [{"value": hash_code}],
-             "steps": scenario_steps("someone-else-device")},
-        ]
+        scenarios = [wire_scenario("scen_foreign", "someone-else-device", hash_code)]
         quasar, speaker, cache, session = quasar_with(scenarios=scenarios)
         await quasar.load_speakers()
         assert speaker["scenario_id"] is None
@@ -80,10 +167,8 @@ def test_nested_and_typed_triggers_are_all_matched():
                  {"type": "scenario.trigger.other", "value": "noise"},
                  {"type": "scenario.trigger.voice", "value": hash_code},
              ],
-             "steps": scenario_steps("dev_123")},
-            {"id": "scen_nested",
-             "triggers": [{"trigger": {"value": hash_code}}],
-             "steps": scenario_steps("dev_123")},
+             "steps": wire_scenario("scen_typed")["steps"]},
+            wire_scenario("scen_nested"),
         ]
         quasar, speaker, _, _ = quasar_with()
         # каждая запись проверяется отдельным вызовом: typed и nested по очереди
@@ -98,6 +183,20 @@ def test_nested_and_typed_triggers_are_all_matched():
     asyncio.run(scenario())
 
 
+def test_nested_nonvoice_trigger_does_not_bind():
+    async def scenario():
+        record = wire_scenario("scen_wrong_type")
+        record["triggers"][0]["trigger"]["type"] = "scenario.trigger.other"
+        quasar, speaker, cache, _ = quasar_with(scenarios=[record])
+        cache.snapshot.scenario_creation["dev_123"] = {
+            "trigger": encode("dev_123"), "state": SCENARIO_STATE_PENDING,
+        }
+        await quasar.load_speakers()
+        assert speaker["scenario_id"] is None
+        quasar.add_scenario.assert_not_called()
+
+    asyncio.run(scenario())
+
 def test_incomplete_candidate_resolves_via_detail_get():
     async def scenario():
         hash_code = encode("dev_123")
@@ -106,7 +205,7 @@ def test_incomplete_candidate_resolves_via_detail_get():
         detail = AsyncMock()
         detail.json.return_value = {
             "status": "ok",
-            "scenario": {"id": "scen_detail", "steps": scenario_steps("dev_123")},
+            "scenario": wire_scenario("scen_detail"),
         }
 
         async def fake_get(url, **kwargs):
@@ -163,8 +262,7 @@ def test_retry_scenario_creation_binds_existing_match_without_post():
         quasar.load_scenarios = AsyncMock(
             side_effect=lambda: setattr(
                 quasar, "scenarios",
-                [{"id": "scen_late", "triggers": [{"value": hash_code}],
-                  "steps": scenario_steps("dev_123")}],
+                [wire_scenario("scen_late")],
             )
         )
         result = await quasar.retry_scenario_creation("dev_123", confirm_risk=True)
@@ -211,12 +309,7 @@ def test_retry_scenario_creation_refuses_conflict_and_unavailable():
     async def scenario():
         hash_code = encode("dev_123")
         quasar, speaker, _, _ = quasar_with(
-            scenarios=[
-                {"id": "scen_a", "triggers": [{"value": hash_code}],
-                 "steps": scenario_steps("dev_123")},
-                {"id": "scen_b", "triggers": [{"value": hash_code}],
-                 "steps": scenario_steps("dev_123")},
-            ]
+            scenarios=[wire_scenario("scen_a"), wire_scenario("scen_b")]
         )
         quasar.load_scenarios = AsyncMock()  # конфликт проверяется на готовом каталоге
         try:
