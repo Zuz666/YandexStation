@@ -94,7 +94,7 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
     except TypeError:
         hass = HomeAssistant()
     hass.config.config_dir = str(config)
-    if mode.startswith("entries_") or mode in {"options_flow", "flow_during_drain"}:
+    if mode.startswith("entries_") or mode in {"success", "options_flow", "flow_during_drain"}:
         from homeassistant import loader
         if hasattr(loader, "async_setup"):
             loader.async_setup(hass)
@@ -359,6 +359,19 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
                             return True
                     delayed_task = asyncio.create_task(delayed_consumer())
             root = config / "custom_components" / "yandex_station"
+            if mode == "success":
+                import json
+                from homeassistant.helpers import translation
+                translation_key = f"component.{DOMAIN}.options.step.recovery.title"
+                for language in ("en", "ru"):
+                    resources = await translation.async_get_translations(
+                        hass, language, "options", {DOMAIN}
+                    )
+                    assert translation_key in resources
+                    path = root / "translations" / f"{language}.json"
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    payload["options"]["step"]["recovery"]["title"] = f"Updated {language}"
+                    path.write_text(json.dumps(payload), encoding="utf-8")
             if mode in {"success", "drain", "drain_head_service", "parallel_reload",
                         "cancel_waiter", "cancel_during_import", "entries_success",
                         "entries_rollback",
@@ -602,6 +615,12 @@ if not builtins.hot_reload_release.wait(10):
                     assert context.admission_open
                     assert await _get_body(client, signed) == b"original-audio"
             else:
+                if mode == "success":
+                    for language in ("en", "ru"):
+                        resources = await translation.async_get_translations(
+                            hass, language, "options", {DOMAIN}
+                        )
+                        assert resources[translation_key] == f"Updated {language}"
                 if mode in {"entries_setup_retry", "entries_retry_mix", "entries_mixed"}:
                     assert result["status"] == "partial", result
                     retry_id = {
