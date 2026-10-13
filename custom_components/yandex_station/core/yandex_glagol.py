@@ -22,10 +22,10 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class YandexGlagol:
-    """Класс для работы с колонкой по локальному протоколу.
+    """Local Glagol WebSocket client for a single speaker.
 
-    Всё mutable состояние (токен, сокет, waiters) принадлежит экземпляру
-    (RFC v2 §5): две колонки одного процесса никогда не делят waiters.
+    All mutable state (token, socket, waiters) belongs to the instance so
+    speakers never share request waiters.
     """
 
     def __init__(
@@ -73,11 +73,11 @@ class YandexGlagol:
             raise RuntimeError("speaker_not_owned")
 
         if self.quasar is not None:
-            # single-flight на устройство: параллельные вызовы ждут один запрос
+            # Single-flight per device: concurrent callers await the same fetch
             token = await self.quasar.async_fetch_device_token(self.device)
         else:
             if getattr(self.session, "policy", None) and not self.session.policy.effective_cloud_allowed:
-                self.debug("Облачное получение токена заблокировано force_offline_local")
+                self.debug("Cloud device token fetch blocked by force_offline_local")
                 return None
             token = await self._async_fetch_token_direct()
 
@@ -88,7 +88,7 @@ class YandexGlagol:
         return token
 
     async def _async_fetch_token_direct(self) -> Optional[str]:
-        self.debug("Обновление токена устройства")
+        self.debug("Refreshing device token")
         payload = {
             "device_id": self.device["quasar_info"]["device_id"],
             "platform": self.device["quasar_info"]["platform"],
@@ -113,15 +113,15 @@ class YandexGlagol:
             self.url = endpoint
             self._connect_task = asyncio.create_task(self._connect(0))
         elif endpoint != self.url:
-            self.debug("Обновление локального адреса устройства")
+            self.debug("Updating local speaker endpoint")
             self.url = endpoint
             # Force the current reader to reconnect to the new host or port.
             if self.ws and not self.ws.closed:
                 await self.ws.close()
 
     async def stop(self):
-        """Запрещает reconnect, отменяет и дожидается задач, закрывает сокет."""
-        self.debug("Останавливаем локальное подключение")
+        """Disable reconnects, cancel and await active tasks, and close the socket."""
+        self.debug("Stopping local connection")
         self._stopped = True
         self.url = None
         if self._connect_task is not None:
@@ -131,7 +131,7 @@ class YandexGlagol:
             except asyncio.CancelledError:
                 pass
             except Exception as e:
-                self.debug(f"Остановка подключения: {type(e).__name__}")
+                self.debug(f"Connection stop error: {type(e).__name__}")
             self._connect_task = None
         if self.ws is not None and not self.ws.closed:
             await self.ws.close()
@@ -144,11 +144,11 @@ class YandexGlagol:
             self.update_handler(None)
 
     async def _handle_token_rejection(self, rejected_token: str) -> int:
-        """Positive decoder: peer CLOSE (4000, "Invalid token") для этого соединения.
+        """Handle peer CLOSE (4000, 'Invalid token') for this connection.
 
-        Сбрасывает только эту пару (устройство, platform): local state, RAM tuple
-        и durable marker; затем не более одного single-flight fetch при разрешённом
-        cloud. Возвращает минимальный fails для backoff повтора.
+        Invalidates only this (device_id, platform) tuple in local state, RAM,
+        and durable storage, then performs at most one single-flight token fetch
+        when cloud access is allowed. Returns the initial failure count for backoff.
         """
         did = self.device.get("quasar_info", {}).get("device_id")
         _LOGGER.warning(
@@ -176,11 +176,11 @@ class YandexGlagol:
                     self.device_token = new_token
                     self.token_state = TokenState.CANDIDATE
                     return 0
-        # без нового кандидата повтор не раньше стандартного backoff
+        # Without a replacement candidate, wait for standard reconnect backoff
         return 2
 
     async def _connect(self, fails: int):
-        self.debug("Локальное подключение")
+        self.debug("Connecting to local speaker")
 
         fails += 1  # will be reset with first accepted msg from station
         connection_token = self.device_token
@@ -189,9 +189,8 @@ class YandexGlagol:
 
         try:
             if not connection_token:
-                # токен не добывается здесь: single-flight fetch запускается
-                # recovery после публикации сущностей (RFC v2 §5)
-                self.debug("Токен устройства отсутствует, локальное подключение ожидает")
+                # Token is fetched by post-publication recovery, not inside the reader
+                self.debug("Device token is missing; local connection is waiting")
                 return
             if self.token_state is not TokenState.ACCEPTED:
                 self.token_state = TokenState.CANDIDATE
@@ -211,14 +210,14 @@ class YandexGlagol:
                     try:
                         data = json.loads(msg.data)
                     except ValueError:
-                        self.debug("Пропущен некорректный TEXT frame")
+                        self.debug("Ignored malformed TEXT frame")
                         continue
                     if not isinstance(data, dict):
-                        self.debug("Пропущен не-словарный TEXT frame")
+                        self.debug("Ignored non-object TEXT frame")
                         continue
                     fails = 0  # any decodable message - reset fails
 
-                    # принятый токен подтверждается принятым state/обменом
+                    # Confirmed state message marks the candidate token as accepted
                     if "state" in data and connection_token == self.device_token:
                         self.token_state = TokenState.ACCEPTED
 
@@ -253,8 +252,8 @@ class YandexGlagol:
                         self.update_handler(data)
 
                 elif msg.type == WSMsgType.BINARY:
-                    # неизвестный BINARY не говорит ничего о токене и не сбрасывает backoff
-                    self.debug("Неизвестный BINARY frame проигнорирован")
+                    # Ignore unknown binary frames without resetting backoff or token state
+                    self.debug("Ignored unknown BINARY frame")
                     continue
 
                 elif msg.type == WSMsgType.CLOSE:
@@ -266,7 +265,7 @@ class YandexGlagol:
                     )
                     if rejected:
                         fails = await self._handle_token_rejection(connection_token)
-                    # любой CLOSE завершает reader после классификации
+                    # Any CLOSE frame terminates the current reader loop
                     break
 
                 elif msg.type in (WSMsgType.CLOSING, WSMsgType.CLOSED, WSMsgType.ERROR):
@@ -276,16 +275,16 @@ class YandexGlagol:
                     raise msg.data
 
         except (ClientConnectorError, ConnectionResetError, ServerTimeoutError) as e:
-            self.debug(f"Ошибка подключения: {repr(e)}")
+            self.debug(f"Connection error: {repr(e)}")
 
         except asyncio.CancelledError:
-            self.debug("Останавливаем подключение: CancelledError")
+            self.debug("Stopping connection: CancelledError")
             self._cancelled = True
             raise
 
         except RuntimeError as e:
-            # сюда попадаем при остановке HA ("Session is closed")
-            self.debug(f"Останавливаем подключение: {repr(e)}")
+            # Raised when the Home Assistant client session is closed during shutdown
+            self.debug(f"Stopping connection: {repr(e)}")
             self._stopped = True
 
         except Exception as e:
@@ -296,13 +295,13 @@ class YandexGlagol:
                 await ws.close()
             if self.ws is ws:
                 self.ws = None
-            # потребитель узнаёт о разрыве при любом выходе, включая отмену
+            # Notify the consumer on any disconnect, including task cancellation
             if self.update_handler:
                 try:
                     self.update_handler(None)
                 except Exception:
                     pass
-            # отменённая/остановленная задача не планирует свой повтор
+            # Cancelled or stopped readers never schedule a reconnect
             if self._stopped or self._cancelled or not self.url:
                 self._connect_task = None
             else:
@@ -312,7 +311,7 @@ class YandexGlagol:
         if fails:
             # 0s, 30s, 60s, ... 5 min
             delay = 30 * min(fails - 1, 10)
-            self.debug(f"Таймаут до следующего подключения {delay}")
+            self.debug(f"Reconnect backoff: {delay}s")
             await asyncio.sleep(delay)
         if self._stopped or self._cancelled or not self.url:
             return

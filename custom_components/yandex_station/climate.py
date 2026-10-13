@@ -212,7 +212,7 @@ class YandexRemoteCarSeat(ClimateEntity, YandexEntity):
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
 
     def internal_init(self, capabilities: dict, properties: dict):
-        # {'instance': 'heating_mode', 'looped': False, 'name': 'режим обогрева', 'random_access': True, 'range': {'max': 3, 'min': 1, 'precision': 1}, 'retrievable': True, 'unit': ''}
+        # {'instance': 'heating_mode', 'looped': False, 'random_access': True, 'range': {'max': 3, 'min': 1, 'precision': 1}, 'retrievable': True, 'unit': ''}
         if mode := capabilities.get("heating_mode"):
             modes = range(mode["range"]["min"], mode["range"]["max"] + 1)
             self._attr_preset_modes = [str(i) for i in modes]

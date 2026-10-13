@@ -37,7 +37,7 @@ RE_PRIVATE = re.compile(
 )
 
 NOTIFY_TEXT = (
-    '<a href="%s" target="_blank">Открыть лог<a> | '
+    '<a href="%s" target="_blank">Open log<a> | '
     "[README](https://github.com/AlexxIT/YandexStation)"
 )
 
@@ -90,7 +90,7 @@ class YandexDebug(logging.Handler, HomeAssistantView):
 
 
 def fix_dialog_text(text: str) -> str:
-    # known problem words: запа, таблетк, трусы
+    # Uppercase Cyrillic words inside speaker tags for proper Alice pronunciation
     return re.sub("[а-яё]+", lambda m: m.group(0).upper(), text)
 
 
@@ -115,7 +115,7 @@ def update_form(name: str, **kwargs):
 
 
 def find_station(devices, name: str = None):
-    """Найти станцию по ID, имени или просто первую попавшуюся."""
+    """Find a speaker entity ID by Glagol ID, device name, or return the first one."""
     for device in devices:
         if device.get("entity") and (
             device["quasar_info"]["device_id"] == name
@@ -134,7 +134,7 @@ async def error(hass: HomeAssistant, text: str):
 
 
 def clean_v1(hass_dir):
-    """Подчищаем за первой версией компонента."""
+    """Remove legacy v1 credential files from the configuration directory."""
     path = hass_dir.path(".yandex_station.txt")
     if os.path.isfile(path):
         os.remove(path)
@@ -383,7 +383,7 @@ def fix_recognition_lang(hass: HomeAssistant, folder: str, lng: str):
 
 
 def fix_cloud_text(text: str) -> str:
-    # на июнь 2023 единственное ограничение - 100 символов
+    # Cloud text command length is limited to 100 characters
     text = re.sub(r"  +", " ", text)
     return text.strip()[:100]
 
