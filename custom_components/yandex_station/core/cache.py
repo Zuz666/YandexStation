@@ -201,7 +201,10 @@ def _clean_scenario_entry(entry) -> dict | None:
         return None
     trigger = entry.get("trigger")
     state = entry.get("state")
-    if not isinstance(trigger, str) or not trigger or state not in SCENARIO_STATES:
+    if (
+        not isinstance(trigger, str) or not trigger
+        or not isinstance(state, str) or state not in SCENARIO_STATES
+    ):
         return None
     updated_at = entry.get("updated_at")
     if updated_at is not None and not isinstance(updated_at, str):

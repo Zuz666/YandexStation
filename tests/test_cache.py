@@ -253,27 +253,32 @@ def test_ambiguous_legacy_token_is_not_assigned_to_a_platform(tmp_path):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("journal", [None, [], {
-    "healthy": {"trigger": "known", "state": SCENARIO_STATE_CONFIRMED},
-    "damaged": {"trigger": "unknown", "state": "corrupt"},
-}])
+@pytest.mark.parametrize("journal", [None, []] + [{
+    "healthy": {
+        "trigger": "known", "state": SCENARIO_STATE_CONFIRMED,
+        "updated_at": "2026-10-01T00:00:00+00:00",
+    },
+    "damaged": {"trigger": "unknown", "state": state},
+} for state in ("corrupt", [], {})])
 def test_corrupt_journal_remains_untrusted_after_inventory_and_restart(tmp_path, journal):
     async def scenario():
         async with cache_runtime(tmp_path) as (manager, _):
             payload = snapshot_payload()
             payload["scenario_creation"] = journal
+            expected_journal = (
+                {"healthy": journal["healthy"]} if isinstance(journal, dict) else {}
+            )
             write_storage(tmp_path, payload)
             cache = manager()
             snapshot = await cache.async_load()
             assert snapshot.devices == [device_record()]
+            assert snapshot.scenario_creation == expected_journal
             assert cache.scenario_creation_trusted is False
             await cache.async_save_devices([device_record()])
             restored = await manager().async_load()
             assert restored.scenario_creation_trusted is False
-            if isinstance(journal, dict):
-                assert restored.scenario_creation == {"healthy": {
-                    "trigger": "known", "state": SCENARIO_STATE_CONFIRMED, "updated_at": None,
-                }}
+            assert restored.devices == [device_record()]
+            assert restored.scenario_creation == expected_journal
 
     asyncio.run(scenario())
 
