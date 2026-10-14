@@ -21,6 +21,15 @@ INCLUDE_KEYS = ("id", "name", "type", "room_name", "skill_id", "house_name")
 _LOGGER = logging.getLogger(__name__)
 
 
+def device_config_entry_ids(device):
+    """Read singular Core ownership while preserving legacy/composite owners."""
+    if hasattr(type(device), "config_entry_id") and not getattr(
+        device, "is_composite_device", False
+    ):
+        return (device.config_entry_id,)
+    return device.config_entries
+
+
 async def async_translate_entity_names(hass, entities, platform: str):
     """Supply translated names only on Core predating native entity naming."""
     if (MAJOR_VERSION, MINOR_VERSION) >= (2023, 4):
@@ -253,7 +262,8 @@ def _registry_speaker_owner(hass, glagol_id):
         one = device_registry.async_get_device(identifiers={(DOMAIN, glagol_id)})
         matches = [one] if one is not None else []
     device_owners = {
-        cid for match in matches if match is not None for cid in match.config_entries if cid
+        cid for match in matches if match is not None
+        for cid in device_config_entry_ids(match) if cid
     }
     if not records:
         return None, len(device_owners) > 1
@@ -356,7 +366,7 @@ async def async_claim_speaker(hass, entry, glagol_id: str) -> None:
             owners = {item.config_entry_id for item in entities if item.config_entry_id}
             for match in matches:
                 if match is not None:
-                    owners.update(match.config_entries)
+                    owners.update(device_config_entry_ids(match))
             if previous := lifecycle.speaker_owners.get(glagol_id):
                 owners.add(previous)
             for owner in owners - {entry.entry_id}:
@@ -386,7 +396,7 @@ async def async_claim_speaker(hass, entry, glagol_id: str) -> None:
                     for match in matches:
                         if match is not None and match.id != device.id:
                             devices.async_remove_device(match.id)
-                    if entry.entry_id not in device.config_entries:
+                    if entry.entry_id not in device_config_entry_ids(device):
                         devices.async_update_device(
                             device.id, new_config_entry_id=entry.entry_id
                         )
