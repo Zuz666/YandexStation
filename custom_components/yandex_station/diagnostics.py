@@ -10,6 +10,7 @@ from .core.cache import CacheManager
 from .core.const import DATA_CONFIG, DOMAIN
 from .core.lifecycle import get_lifecycle
 from .core.policy import EntryPolicy
+from .hass.hass_utils import device_config_entry_ids
 
 _AUTH_STATES = frozenset({"unknown", "valid", "reauth_required"})
 _CSRF_STATES = frozenset({"unknown", "candidate", "unavailable"})
@@ -191,9 +192,10 @@ async def async_get_device_diagnostics(
         value for domain, value in device.identifiers
         if domain == DOMAIN and isinstance(value, str)
     }
-    if config_entry.entry_id in identifiers and config_entry.entry_id in device.config_entries:
+    owners = device_config_entry_ids(device)
+    if config_entry.entry_id in identifiers and config_entry.entry_id in owners:
         return info
-    if config_entry.entry_id not in device.config_entries or runtime is None:
+    if config_entry.entry_id not in owners or runtime is None:
         info["error"] = "device_not_found"
         return info
     match = next((

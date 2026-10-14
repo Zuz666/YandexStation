@@ -215,7 +215,11 @@ def test_disabled_owner_requires_explicit_claim_without_identity_or_token_transf
             assert registry.async_get(lyrics.entity_id).config_entry_id == 'entry-b'
             updated_device = device_registry.async_get(hass).async_get(device.id)
             assert updated_device.name_by_user == 'User device name'
-            assert updated_device.area_id == area.id and updated_device.config_entries == {'entry-b'}
+            assert updated_device.area_id == area.id
+            if hasattr(type(updated_device), 'config_entry_id'):
+                assert updated_device.config_entry_id == 'entry-b'
+            else:
+                assert updated_device.config_entries == {'entry-b'}
             assert b.cache_manager.snapshot.to_dict() == before
             assert await async_resolve_speaker_owners(hass, entries['b'], b) == {'shared-local'}
             assert entries['a'].disabled_by is not None
@@ -284,7 +288,10 @@ def test_claim_selects_canonical_media_device_across_registration_orders(tmp_pat
             assert canonical is not None
             assert canonical.name_by_user == 'Canonical speaker device'
             assert canonical.area_id == area.id
-            assert canonical.config_entries == {'entry-b'}
+            if hasattr(type(canonical), 'config_entry_id'):
+                assert canonical.config_entry_id == 'entry-b'
+            else:
+                assert canonical.config_entries == {'entry-b'}
             if devices_by_suffix['b'].id != devices_by_suffix['a'].id:
                 assert device_registry.async_get(hass).async_get(devices_by_suffix['b'].id) is None
 
