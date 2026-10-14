@@ -666,12 +666,21 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                 device_entry = device_registry.async_get_device(
                     identifiers={(DOMAIN, self._attr_unique_id)}
                 )
-            if device_entry is not None:
+            if device_entry is None:
+                _LOGGER.debug(
+                    "Firmware metadata: operation=update_device_info reason=device_not_found"
+                )
+                return
+            if device_entry.sw_version != sw_version:
                 device_registry.async_update_device(
                     device_entry.id, sw_version=sw_version
                 )
-        except:  # noqa
-            pass
+        except Exception as error:
+            _LOGGER.debug(
+                "Firmware metadata: operation=update_device_info "
+                "reason=registry_error exception=%s",
+                type(error).__name__,
+            )
 
     @callback
     def async_set_state(self, data: dict):
@@ -709,14 +718,14 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         state = data["state"]
         state.pop("timeSinceLastVoiceActivity", None)
 
+        if sw_version := data.get("softwareVersion"):
+            self.update_device_info(sw_version)
+
         # skip same state
         if self.local_state == state:
             return
 
         self.local_state = state
-
-        if sw_version := data.get("softwareVersion"):
-            self.update_device_info(sw_version)
 
         # Restore from mute if needed
         # if self.prev_volume and state['volume']:
