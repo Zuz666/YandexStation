@@ -8,11 +8,13 @@ from custom_components.yandex_station.core.cache import CacheManager
 from custom_components.yandex_station.core.const import DOMAIN
 from custom_components.yandex_station.core.policy import AuthState, DevicesState, EntryPolicy
 from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
+from custom_components.yandex_station.core.yandex_session import YandexSession
 from custom_components.yandex_station.diagnostics import (
     async_get_config_entry_diagnostics, async_get_device_diagnostics,
 )
 from .test_cache import device_record
 from .test_options_and_reauth import core_flow
+from .test_session_resilience import make_client
 
 
 def test_diagnostics_account_device_and_missing_runtime_are_json_safe(tmp_path):
@@ -52,8 +54,13 @@ def test_diagnostics_account_device_and_missing_runtime_are_json_safe(tmp_path):
             await cache.async_save_scenario_marker(
                 device["id"], "SYNTHETIC_TRIGGER_SECRET", "pending_unknown"
             )
+            session = YandexSession(make_client(), x_token="SYNTHETIC_X_TOKEN_SECRET")
+            session.music_token = "SYNTHETIC_MUSIC_TOKEN_SECRET"
+            hass.config_entries.async_update_entry(entry, data={
+                **entry.data, "x_token": session.x_token, "music_token": session.music_token,
+            })
             runtime = YandexQuasar(
-                MagicMock(), policy=EntryPolicy(enable_diagnostic_sensors=True),
+                session, policy=EntryPolicy(enable_diagnostic_sensors=True),
                 cache_manager=cache,
             )
             runtime.devices = [device]
@@ -75,6 +82,8 @@ def test_diagnostics_account_device_and_missing_runtime_are_json_safe(tmp_path):
                 account = await async_get_config_entry_diagnostics(hass, entry)
                 assert account["readiness"]["auth_state"] == "valid"
                 assert account["cache"]["status"] == "cache_ready"
+                assert account["tokens"]["x_token_present"] is True
+                assert account["tokens"]["music_token_present"] is True
                 assert account["scenario_journal"]["pending_unknown"] == 1
                 assert account["devices"][0]["scenario_journal_state"] == "pending_unknown"
                 assert account["devices"][0]["kind"] == "smart_speaker"
@@ -110,7 +119,7 @@ def test_diagnostics_account_device_and_missing_runtime_are_json_safe(tmp_path):
                     serialized = json.dumps(payload)
                     for secret in (
                         "SECRET", "synthetic-cloud-id", "synthetic-glagol-id",
-                        "previous", "music", "uid-1", "10.0.0.2",
+                        session.x_token, session.music_token, "uid-1", "10.0.0.2",
                         "SYNTHETIC_ACCOUNT_SECRET", "SYNTHETIC_MODULE_SECRET",
                         "SYNTHETIC_VALUE_SECRET",
                     ):

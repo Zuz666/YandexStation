@@ -164,7 +164,72 @@
       }
     }
   },
+  "system_health": {
+    "info": {
+      "accounts": "Configured accounts",
+      "code_reload_enabled": "Code reload enabled",
+      "code_reload_in_progress": "Code reload in progress",
+      "last_reload_status": "Last code reload status",
+      "last_reload_reason": "Last code reload result",
+      "last_reload_duration_ms": "Last code reload duration (ms)",
+      "runtime_loaded": "Runtime loaded",
+      "entry_state": "Entry state",
+      "setup_reason": "Recorded setup issue",
+      "reload_pending": "Account reload pending",
+      "cloud_readiness": "Cloud readiness",
+      "policy_force_offline_local": "Forced offline mode",
+      "policy_use_cached_devices": "Use cached catalog",
+      "policy_enable_scenarios": "Scenarios enabled",
+      "policy_enable_diagnostic_sensors": "Diagnostic sensors enabled",
+      "policy_cloud_updates": "Cloud updates enabled",
+      "policy_local_updates": "Local updates enabled",
+      "cache_status": "Cache state",
+      "cache_age_seconds": "Inventory snapshot age (s)",
+      "cache_device_count": "Cached devices",
+      "cache_scenario_creation_trusted": "Scenario creation journal trusted",
+      "scenario_journal_pending_unknown": "Unconfirmed scenario creations",
+      "scenario_journal_confirmed": "Confirmed scenario creations",
+      "readiness_auth_state": "Known authorization state",
+      "readiness_csrf_state": "Known CSRF state",
+      "readiness_devices_state": "Device catalog state",
+      "readiness_scenarios_state": "Scenario catalog state",
+      "readiness_inventory_source": "Inventory source",
+      "tokens_cookies_present": "Cookies present (not validated)",
+      "tokens_x_token_present": "X-token present",
+      "tokens_music_token_present": "Music token present",
+      "tokens_csrf_present": "CSRF candidate present",
+      "tokens_csrf_age_seconds": "CSRF candidate age (s)",
+      "device_tokens_cached_candidates": "Cached local token candidates",
+      "device_tokens_cached_rejected": "Rejected cached local tokens",
+      "device_tokens_missing": "Local connections without a token",
+      "device_tokens_candidate": "Local connections using an unconfirmed token",
+      "device_tokens_accepted": "Local connections with an accepted token",
+      "device_tokens_rejected": "Local connections with a rejected token",
+      "cloud_connection_state": "Cloud WebSocket state",
+      "cloud_connection_connected_at": "Cloud WebSocket connected at",
+      "cloud_connection_last_message_at": "Last cloud WebSocket message",
+      "cloud_connection_last_error": "Last cloud WebSocket error",
+      "cloud_connection_retry_at": "Next cloud WebSocket attempt",
+      "cloud_check_status": "Last manual cloud check",
+      "cloud_check_checked_at": "Manual cloud check time",
+      "cloud_check_duration_ms": "Manual cloud check duration (ms)",
+      "cloud_check_device_count": "Devices returned by cloud check",
+      "cloud_check_reason": "Manual cloud check result",
+      "cloud_check_http_status": "Manual cloud check HTTP status"
+    }
+  },
   "entity": {
+    "button": {
+      "check_cloud": {
+        "name": "Check cloud"
+      },
+      "reload_account": {
+        "name": "Reload this account"
+      },
+      "reload_code": {
+        "name": "Reload code — all accounts"
+      }
+    },
     "sensor": {
       "cloud_health": {
         "name": "Cloud connection status",

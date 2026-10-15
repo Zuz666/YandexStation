@@ -210,6 +210,12 @@ class LifecycleManager:
             self._internal_capability = None
             self._internal_entry_id = None
 
+    def _consumer_requester(self):
+        consumer = self._consumer_depth.get()
+        if consumer is not None and not consumer[0].done():
+            return consumer[0]
+        return None
+
     def request_entry_reload(self, entry_id: str) -> bool:
         """Reserve once; dispatch only after the requesting task has returned."""
         if (
@@ -219,7 +225,7 @@ class LifecycleManager:
             return False
         if entry_id in self._reload_requests:
             return True
-        requester = asyncio.current_task()
+        requester = self._consumer_requester() or asyncio.current_task()
 
         def start(_=None):
             if entry_id not in self._reload_requests:
@@ -386,17 +392,34 @@ class LifecycleManager:
                 self._scan_sources
             )
 
+    def account_reload_service_handler(self):
+        async def handle(call):
+            entry_id = call.data["entry_id"]
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+            if entry is None or entry.domain != DOMAIN:
+                raise HomeAssistantError("entry_not_found")
+            if not self.entry_enabled(entry):
+                raise HomeAssistantError("entry_disabled")
+            if not self.entry_admitted(entry_id) or not self.request_entry_reload(entry_id):
+                raise HomeAssistantError("reload_in_progress")
+
+        return handle
+
     def reload_service_handler(self):
         """Keep the admin handler in the stable module across code generations."""
         async def handle(_call):
             config = self.hass.data.get(DOMAIN, {}).get("config", {})
+            requester = self._consumer_requester()
             result = await self.async_hot_reload(
-                self.hass, enable_code_reload=config.get("enable_code_reload", False)
+                self.hass, enable_code_reload=config.get("enable_code_reload", False),
+                after=requester,
             )
+            if requester is not None and result["status"] != "accepted":
+                raise HomeAssistantError("reload_code: " + result["reason"])
             try:
                 from homeassistant.core import SupportsResponse
             except ImportError:
-                if result["status"] != "success":
+                if result["status"] not in {"success", "accepted"}:
                     raise HomeAssistantError(
                         "reload_code: " + result["reason"]
                     )
@@ -443,23 +466,49 @@ class LifecycleManager:
         return result
 
     async def async_hot_reload(
-        self, hass: HomeAssistant, enable_code_reload: bool = False
+        self, hass: HomeAssistant, enable_code_reload: bool = False,
+        *, after: asyncio.Task | None = None,
     ) -> dict[str, Any]:
-        """A cancelled service waiter cannot cancel an in-flight import."""
+        """Own the request independently of its waiter or initiating consumer."""
         if not enable_code_reload:
             return self._refuse("hot_reload_disabled")
         if self._reload_task is not None and not self._reload_task.done():
             return self._refuse("reload_already_in_progress")
         if self._stopping or self.entry_ids or self._reload_requests:
             return self._refuse("entry_operation_in_progress")
+        if after is not None:
+            if self.context is None or self.context.implementation is None:
+                return self._refuse("runtime_not_initialized", status="restart_required")
+            if (HA_VERSION, sys.version_info[:3]) not in _PINNED_CORES:
+                return self._refuse("unsupported_runtime")
+            if self._source_baseline is None:
+                return self._refuse("baseline_missing", status="restart_required")
+            entries = {entry.entry_id for entry in hass.config_entries.async_entries(DOMAIN)}
+            if self._flows_active(hass.config_entries, entries):
+                return self._refuse("flow_in_progress")
         self.hass = hass
-        task = hass.async_create_task(self._async_run_hot_reload())
+        task = hass.async_create_task(
+            self._async_reload_after_consumer(after) if after is not None
+            else self._async_run_hot_reload()
+        )
         self._reload_task = task
         task.add_done_callback(
             lambda finished: setattr(self, "_reload_task", None)
             if self._reload_task is finished else None
         )
+        if after is not None:
+            result = {"status": "accepted", "reason": "reload_requested"}
+            self.last_reload_result = result
+            return result
         return await asyncio.shield(task)
+
+    async def _async_reload_after_consumer(self, requester):
+        # Observe completion, not the result: cancelling the initiating button
+        # must not cancel an already authorized, lifecycle-owned operation.
+        await asyncio.wait({requester})
+        if self._stopping:
+            return self._refuse("entry_operation_in_progress")
+        return await self._async_run_hot_reload()
 
     async def _async_run_hot_reload(self) -> dict[str, Any]:
         async with self._reload_lock:

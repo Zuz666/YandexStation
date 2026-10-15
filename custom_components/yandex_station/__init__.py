@@ -45,6 +45,7 @@ _LOGGER = logging.getLogger(__name__)
 # only for speakers
 SPEAKER_PLATFORMS = [
     "binary_sensor",
+    "button",
     "calendar",
     "camera",
     "media_player",
@@ -174,6 +175,10 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
     service.async_register_admin_service(
         hass, DOMAIN, "reload_code", lifecycle.reload_service_handler(),
         **service_options,
+    )
+    service.async_register_admin_service(
+        hass, DOMAIN, "reload_account", lifecycle.account_reload_service_handler(),
+        schema=vol.Schema({vol.Required("entry_id"): cv.string}),
     )
 
     return True

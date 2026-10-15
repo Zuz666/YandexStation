@@ -24,7 +24,6 @@ from .core.entity import YandexCustomEntity
 from .core.yandex_quasar import YandexQuasar
 from .hass import hass_utils
 
-from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.util import slugify
 from .core.const import DOMAIN
@@ -171,13 +170,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     quasar: YandexQuasar | None = hass.data.get(DOMAIN, {}).get(entry.unique_id)
 
     if quasar and quasar.policy.enable_diagnostic_sensors:
-        service_device = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name=f"Яндекс ({entry.title or entry.unique_id})",
-            manufacturer="Yandex",
-            model="Account & Local Resilience Gateway",
-            entry_type=DeviceEntryType.SERVICE,
-        )
+        service_device = hass_utils.account_device_info(entry)
         entities.append(YandexCloudHealthSensor(quasar, entry, service_device))
         entities.append(YandexInventorySourceSensor(quasar, entry, service_device))
 
