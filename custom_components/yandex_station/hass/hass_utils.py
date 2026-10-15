@@ -6,6 +6,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_INCLUDE, MAJOR_VERSION, MINOR_VERSION
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers.entity import DeviceInfo
 
 from ..core.cache import CacheManager
 from ..core.const import (
@@ -28,6 +29,18 @@ def device_config_entry_ids(device):
     ):
         return (device.config_entry_id,)
     return device.config_entries
+
+
+def account_device_info(entry: ConfigEntry) -> DeviceInfo:
+    """Keep commands and optional diagnostics on the same account service device."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, entry.entry_id)},
+        name=f"Яндекс ({entry.title or entry.unique_id})",
+        manufacturer="Yandex",
+        model="Account & Local Resilience Gateway",
+        entry_type=dr.DeviceEntryType.SERVICE,
+        configuration_url="homeassistant://config/repairs?dialog=system-health",
+    )
 
 
 async def async_translate_entity_names(hass, entities, platform: str):

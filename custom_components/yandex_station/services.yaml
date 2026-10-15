@@ -6,6 +6,17 @@ reload_code:
   name: Reload Code
   description: Experimental hot-reload of Yandex Station python modules without restarting Home Assistant Core.
 
+reload_account:
+  name: Reload Account
+  description: Reload one enabled Yandex Station config entry without clearing its cache or credentials. Administrator access is required.
+  fields:
+    entry_id:
+      name: Account entry ID
+      description: The config entry ID of the Yandex account to reload.
+      required: true
+      selector:
+        text:
+
 send_command:
   name: Send Command
   description: Send command to Yandex.Station.

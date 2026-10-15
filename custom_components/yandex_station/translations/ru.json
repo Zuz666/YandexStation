@@ -164,7 +164,72 @@
       }
     }
   },
+  "system_health": {
+    "info": {
+      "accounts": "Настроенные аккаунты",
+      "code_reload_enabled": "Перезагрузка кода разрешена",
+      "code_reload_in_progress": "Выполняется перезагрузка кода",
+      "last_reload_status": "Статус последней перезагрузки кода",
+      "last_reload_reason": "Результат последней перезагрузки кода",
+      "last_reload_duration_ms": "Длительность последней перезагрузки кода (мс)",
+      "runtime_loaded": "Аккаунт загружен",
+      "entry_state": "Состояние записи интеграции",
+      "setup_reason": "Зафиксированная проблема загрузки",
+      "reload_pending": "Ожидается перезагрузка аккаунта",
+      "cloud_readiness": "Готовность облака",
+      "policy_force_offline_local": "Принудительный офлайн-режим",
+      "policy_use_cached_devices": "Использовать кэш каталога",
+      "policy_enable_scenarios": "Сценарии разрешены",
+      "policy_enable_diagnostic_sensors": "Диагностические сенсоры разрешены",
+      "policy_cloud_updates": "Облачные обновления разрешены",
+      "policy_local_updates": "Локальные обновления разрешены",
+      "cache_status": "Состояние кэша",
+      "cache_age_seconds": "Возраст снимка каталога (с)",
+      "cache_device_count": "Устройств в кэше",
+      "cache_scenario_creation_trusted": "Журнал создания сценариев доверенный",
+      "scenario_journal_pending_unknown": "Неподтверждённые создания сценариев",
+      "scenario_journal_confirmed": "Подтверждённые создания сценариев",
+      "readiness_auth_state": "Известное состояние авторизации",
+      "readiness_csrf_state": "Известное состояние CSRF",
+      "readiness_devices_state": "Состояние каталога устройств",
+      "readiness_scenarios_state": "Состояние каталога сценариев",
+      "readiness_inventory_source": "Источник каталога",
+      "tokens_cookies_present": "Есть cookies (без проверки действительности)",
+      "tokens_x_token_present": "Есть x_token",
+      "tokens_music_token_present": "Есть music_token",
+      "tokens_csrf_present": "Есть кандидат CSRF",
+      "tokens_csrf_age_seconds": "Возраст кандидата CSRF (с)",
+      "device_tokens_cached_candidates": "Кандидатов локальных токенов в кэше",
+      "device_tokens_cached_rejected": "Отклонённых локальных токенов в кэше",
+      "device_tokens_missing": "Локальных подключений без токена",
+      "device_tokens_candidate": "Локальных подключений с непроверенным токеном",
+      "device_tokens_accepted": "Локальных подключений с принятым токеном",
+      "device_tokens_rejected": "Локальных подключений с отклонённым токеном",
+      "cloud_connection_state": "Состояние облачного WebSocket",
+      "cloud_connection_connected_at": "Облачный WebSocket подключён",
+      "cloud_connection_last_message_at": "Последнее сообщение облачного WebSocket",
+      "cloud_connection_last_error": "Последняя ошибка облачного WebSocket",
+      "cloud_connection_retry_at": "Следующая попытка облачного WebSocket",
+      "cloud_check_status": "Последняя ручная проверка облака",
+      "cloud_check_checked_at": "Время ручной проверки облака",
+      "cloud_check_duration_ms": "Длительность ручной проверки облака (мс)",
+      "cloud_check_device_count": "Устройств в ответе проверки облака",
+      "cloud_check_reason": "Результат ручной проверки облака",
+      "cloud_check_http_status": "HTTP-статус ручной проверки облака"
+    }
+  },
   "entity": {
+    "button": {
+      "check_cloud": {
+        "name": "Проверить облако"
+      },
+      "reload_account": {
+        "name": "Перезагрузить этот аккаунт"
+      },
+      "reload_code": {
+        "name": "Перезагрузить код — все аккаунты"
+      }
+    },
     "sensor": {
       "cloud_health": {
         "name": "Статус связи с облаком",
