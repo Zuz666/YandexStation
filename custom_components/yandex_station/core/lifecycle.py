@@ -465,6 +465,16 @@ class LifecycleManager:
         self.last_reload_result = result
         return result
 
+    def _sync_reload_refusal(self) -> dict[str, Any] | None:
+        """Runtime qualification shared by admission and post-consumer stages."""
+        if self.context is None or self.context.implementation is None:
+            return self._refuse("runtime_not_initialized", status="restart_required")
+        if (HA_VERSION, sys.version_info[:3]) not in _PINNED_CORES:
+            return self._refuse("unsupported_runtime")
+        if self._source_baseline is None:
+            return self._refuse("baseline_missing", status="restart_required")
+        return None
+
     async def async_hot_reload(
         self, hass: HomeAssistant, enable_code_reload: bool = False,
         *, after: asyncio.Task | None = None,
@@ -477,12 +487,9 @@ class LifecycleManager:
         if self._stopping or self.entry_ids or self._reload_requests:
             return self._refuse("entry_operation_in_progress")
         if after is not None:
-            if self.context is None or self.context.implementation is None:
-                return self._refuse("runtime_not_initialized", status="restart_required")
-            if (HA_VERSION, sys.version_info[:3]) not in _PINNED_CORES:
-                return self._refuse("unsupported_runtime")
-            if self._source_baseline is None:
-                return self._refuse("baseline_missing", status="restart_required")
+            refusal = self._sync_reload_refusal()
+            if refusal is not None:
+                return refusal
             entries = {entry.entry_id for entry in hass.config_entries.async_entries(DOMAIN)}
             if self._flows_active(hass.config_entries, entries):
                 return self._refuse("flow_in_progress")
@@ -515,12 +522,9 @@ class LifecycleManager:
             loop = asyncio.get_running_loop()
             started = loop.time()
             timings = {}
-            if self.context is None or self.context.implementation is None:
-                return self._refuse("runtime_not_initialized", status="restart_required")
-            if (HA_VERSION, sys.version_info[:3]) not in _PINNED_CORES:
-                return self._refuse("unsupported_runtime")
-            if self._source_baseline is None:
-                return self._refuse("baseline_missing", status="restart_required")
+            refusal = self._sync_reload_refusal()
+            if refusal is not None:
+                return refusal
             if self.entry_ids or self._reload_requests:
                 return self._refuse("entry_operation_in_progress")
             config_entries = self.hass.config_entries

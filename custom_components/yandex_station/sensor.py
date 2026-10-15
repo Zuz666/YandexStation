@@ -27,7 +27,6 @@ from .hass import hass_utils
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.util import slugify
 from .core.const import DOMAIN
-from .core.policy import AuthState, DevicesState
 _LOGGER = logging.getLogger(__name__)
 
 if (MAJOR_VERSION, MINOR_VERSION) >= (2026, 7):
@@ -225,19 +224,18 @@ class YandexCustomSensor(SensorEntity, YandexCustomEntity):
             self._attr_native_value = properties[self.instance]
 
 
-class YandexCloudHealthSensor(SensorEntity):
-    """Diagnostic sensor reporting the computed cloud readiness state."""
+class YandexAccountReadinessSensor(SensorEntity):
+    """Account diagnostic sensor republishing readiness without polling."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_should_poll = False
     _attr_has_entity_name = True
-    _attr_translation_key = "cloud_health"
-    _attr_icon = "mdi:cloud-check"
+    _unique_id_suffix: str
 
     def __init__(self, quasar: YandexQuasar, entry, device_info: DeviceInfo):
         self.quasar = quasar
         self.entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_cloud_health"
+        self._attr_unique_id = f"{entry.entry_id}_{self._unique_id_suffix}"
         self.entity_id = f"sensor.yandex_station_{slugify(self._attr_unique_id)}"
         self._attr_device_info = device_info
 
@@ -249,6 +247,14 @@ class YandexCloudHealthSensor(SensorEntity):
     def _handle_readiness_update(self, message):
         if self.hass:
             self.async_write_ha_state()
+
+
+class YandexCloudHealthSensor(YandexAccountReadinessSensor):
+    """Diagnostic sensor reporting the computed cloud readiness state."""
+
+    _attr_translation_key = "cloud_health"
+    _attr_icon = "mdi:cloud-check"
+    _unique_id_suffix = "cloud_health"
 
     @property
     def native_value(self) -> str:
@@ -267,31 +273,13 @@ class YandexCloudHealthSensor(SensorEntity):
         }
 
 
-class YandexInventorySourceSensor(SensorEntity):
+class YandexInventorySourceSensor(YandexAccountReadinessSensor):
     """Diagnostic sensor reporting whether catalog is from cloud or cache."""
 
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_should_poll = False
-    _attr_has_entity_name = True
     _attr_translation_key = "inventory_source"
     _attr_entity_registry_enabled_default = False
     _attr_icon = "mdi:database-sync"
-
-    def __init__(self, quasar: YandexQuasar, entry, device_info: DeviceInfo):
-        self.quasar = quasar
-        self.entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_inventory_source"
-        self.entity_id = f"sensor.yandex_station_{slugify(self._attr_unique_id)}"
-        self._attr_device_info = device_info
-
-    async def async_added_to_hass(self):
-        self.async_on_remove(
-            self.quasar.subscribe_update("readiness", self._handle_readiness_update)
-        )
-
-    def _handle_readiness_update(self, message):
-        if self.hass:
-            self.async_write_ha_state()
+    _unique_id_suffix = "inventory_source"
 
     @property
     def native_value(self) -> str:
@@ -389,20 +377,6 @@ class YandexTransportSensor(SensorEntity):
             return entity.transport
         if entity and getattr(entity, "local_state", None) is not None:
             return "local"
-        if not self.device.get("capabilities"):
+        if not self.quasar.cloud_control_ready(self.device):
             return "unavailable"
-        if not getattr(self.quasar, "policy", None):
-            return "unavailable"
-        if not self.quasar.policy.effective_cloud_allowed:
-            return "unavailable"
-        if not self.quasar.policy.enable_scenarios:
-            return "unavailable"
-        if not self.device.get("scenario_id"):
-            return "unavailable"
-        readiness = getattr(self.quasar, "readiness", None)
-        if readiness:
-            if readiness.auth_state != AuthState.VALID:
-                return "unavailable"
-            if readiness.devices_state != DevicesState.READY:
-                return "unavailable"
         return "cloud"

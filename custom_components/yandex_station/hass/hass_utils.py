@@ -206,17 +206,26 @@ async def _async_account_speakers(hass, entry, *, snapshot_only=False):
             await cache.async_close()
 
 
+def _supports_device_queries(device_registry) -> bool:
+    """Modern Core queries several devices; HA 2023.2 fetches at most one."""
+    return "async_get_devices" in getattr(type(device_registry), "__dict__", {})
+
+
+def _identifier_devices(hass, glagol_id):
+    """One compatibility lookup per inspection; never cache across awaits."""
+    device_registry = dr.async_get(hass)
+    if _supports_device_queries(device_registry):
+        return device_registry, list(
+            device_registry.async_get_devices(identifiers={(DOMAIN, glagol_id)})
+        )
+    one = device_registry.async_get_device(identifiers={(DOMAIN, glagol_id)})
+    return device_registry, [one] if one is not None else []
+
+
 def _speaker_registry_entries(hass, glagol_id):
     """The media identity is canonical; companion identities share its device."""
     registry = er.async_get(hass)
-    device_registry = dr.async_get(hass)
-    if "async_get_devices" in getattr(type(device_registry), "__dict__", {}):
-        matches = list(
-            device_registry.async_get_devices(identifiers={(DOMAIN, glagol_id)})
-        )
-    else:
-        one = device_registry.async_get_device(identifiers={(DOMAIN, glagol_id)})
-        matches = [one] if one is not None else []
+    device_registry, matches = _identifier_devices(hass, glagol_id)
     by_id = {item.id: item for item in matches if item is not None}
     suffixes = {
         "camera": ("lyrics",), "calendar": ("calendar",),
@@ -257,23 +266,15 @@ def _speaker_registry_entries(hass, glagol_id):
             if record_devices
             else (matches[0] if matches else None)
         )
-    return device, records
+    return device, records, matches
 
 
 def _registry_speaker_owner(hass, glagol_id):
     """Return (owner, conflict); an orphan record is not permission to take over."""
-    _, records = _speaker_registry_entries(hass, glagol_id)
+    _, records, matches = _speaker_registry_entries(hass, glagol_id)
     for item in records:
         if item.domain == "media_player" and item.unique_id == glagol_id:
             return item.config_entry_id or "", False
-    device_registry = dr.async_get(hass)
-    if "async_get_devices" in getattr(type(device_registry), "__dict__", {}):
-        matches = list(
-            device_registry.async_get_devices(identifiers={(DOMAIN, glagol_id)})
-        )
-    else:
-        one = device_registry.async_get_device(identifiers={(DOMAIN, glagol_id)})
-        matches = [one] if one is not None else []
     device_owners = {
         cid for match in matches if match is not None
         for cid in device_config_entry_ids(match) if cid
@@ -366,13 +367,9 @@ async def async_claim_speaker(hass, entry, glagol_id: str) -> None:
                 raise ValueError("entry_disabled")
             if not isinstance(glagol_id, str) or glagol_id not in records:
                 raise ValueError("ownership_conflict")
-            device, entities = _speaker_registry_entries(hass, glagol_id)
+            device, entities, matches = _speaker_registry_entries(hass, glagol_id)
             devices = dr.async_get(hass)
-            if "async_get_devices" in getattr(type(devices), "__dict__", {}):
-                matches = list(
-                    devices.async_get_devices(identifiers={(DOMAIN, glagol_id)})
-                )
-            else:
+            if not _supports_device_queries(devices):
                 matches = [device] if device is not None else []
             if device is not None and all(m.id != device.id for m in matches):
                 matches.append(device)
@@ -405,7 +402,7 @@ async def async_claim_speaker(hass, entry, glagol_id: str) -> None:
                 if updates:
                     registry.async_update_entity(entity.entity_id, **updates)
             if device is not None:
-                if "async_get_devices" in getattr(type(devices), "__dict__", {}):
+                if _supports_device_queries(devices):
                     for match in matches:
                         if match is not None and match.id != device.id:
                             devices.async_remove_device(match.id)

@@ -728,19 +728,9 @@ class YandexSession(BasicSession):
         }
 
     def _ordered_cookie_probes(self) -> list[dict[str, str]]:
-        probes: list[dict[str, str]] = []
-        for endpoint in self.config.cookie_storage_endpoints:
-            if not isinstance(endpoint, dict):
-                continue
-            url = endpoint.get("url")
-            validator = endpoint.get("validator")
-            if not isinstance(url, str) or not url:
-                continue
-            if validator not in ("status_ok", "uid_in_storage"):
-                continue
-            probes.append({"url": url, "validator": validator})
-
-        # the last successful probe is tried first, the rest keep order
+        # SessionConfig.__post_init__ already normalized/validated the
+        # endpoints; only last-good-first ordering is decided here.
+        probes = list(self.config.cookie_storage_endpoints)
         if self._last_good_probe_url:
             probes.sort(key=lambda probe: probe["url"] != self._last_good_probe_url)
         return probes
@@ -837,7 +827,8 @@ class YandexSession(BasicSession):
         """
         task = self._csrf_fetch_task
         if task is not None and not task.done():
-            return await self._join_csrf_fetch(task)
+            # shield: one caller's deadline must not cancel the shared attempt
+            return await asyncio.shield(task)
 
         if self.csrf_token is not None:
             obtained = self._csrf_obtained_at
@@ -853,19 +844,12 @@ class YandexSession(BasicSession):
 
         task = asyncio.create_task(self._csrf_fetch_pass())
         self._csrf_fetch_task = task
-        return await self._join_csrf_fetch(task)
-
-    @staticmethod
-    async def _join_csrf_fetch(task: asyncio.Task) -> str | None:
-        # shield: one command's deadline must not cancel the shared attempt
         return await asyncio.shield(task)
 
     async def _csrf_fetch_pass(self) -> str | None:
         """One pass over the configured CSRF endpoints (fallback bypass)."""
         self.retry_after.pop("csrf", None)
         for url in self.config.csrf_endpoints:
-            if not isinstance(url, str) or not url:
-                continue
             try:
                 r = await self._get(url, role="csrf")
                 if r.status != 200:
@@ -941,6 +925,11 @@ class YandexSession(BasicSession):
         self._csrf_retry_at = 0.0
         self._csrf_backoff.reset()
 
+    def _record_http_failure(self, role: str, response) -> None:
+        """Record the Retry-After hint and release the failed response."""
+        self._record_retry_after(role, response.headers)
+        response.release()
+
     async def get_music_token(self, x_token: str) -> str:
         """Get music token using x-token. Usual you should'n call this method."""
         _LOGGER.debug("Get music token")
@@ -959,8 +948,7 @@ class YandexSession(BasicSession):
             data=payload,
         )
         if r.status != 200:
-            self._record_retry_after("music", r.headers)
-            r.release()
+            self._record_http_failure("music", r)
             raise CloudRequestError("music", r.status)
         try:
             resp = await r.json()
@@ -971,8 +959,6 @@ class YandexSession(BasicSession):
         return resp["access_token"]
 
     async def get(self, url: str, *, role: str, **kwargs) -> ClientResponse:
-        if role == "glagol_token":
-            return await self.request_glagol(url, role=role, **kwargs)
         return await self.request("get", url, role=role, **kwargs)
 
     async def post(self, url: str, *, role: str, **kwargs) -> ClientResponse:
@@ -1052,8 +1038,7 @@ class YandexSession(BasicSession):
             self.retry_after.pop(role, None)
             return r
 
-        self._record_retry_after(role, r.headers)
-        r.release()
+        self._record_http_failure(role, r)
 
         if r.status == 403 and sent_token is not None:
             self._csrf_invalidate_current(
@@ -1090,8 +1075,7 @@ class YandexSession(BasicSession):
         if r.status == 200:
             self.retry_after.pop(role, None)
             return r
-        self._record_retry_after(role, r.headers)
-        r.release()
+        self._record_http_failure(role, r)
         if r.status in (401, 403):
             self.music_token = None
         raise CloudRequestError(role, r.status)

@@ -19,7 +19,6 @@ from custom_components.yandex_station.core.policy import (
     ScenariosState,
     SendOutcome,
     SessionConfig,
-    TokenState,
 )
 
 _RANDOM = "custom_components.yandex_station.core.policy.random"
@@ -70,8 +69,6 @@ def test_readiness_and_computed_cloud_state():
     assert readiness.csrf_state == CsrfState.UNKNOWN
     assert readiness.devices_state == DevicesState.UNKNOWN
     assert readiness.scenarios_state == ScenariosState.UNKNOWN
-    assert readiness.token_state == TokenState.MISSING
-    assert readiness.local_state is None
 
     assert readiness.computed_cloud_state(EntryPolicy()) == CloudState.UNKNOWN
 

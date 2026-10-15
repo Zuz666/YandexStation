@@ -93,16 +93,9 @@ DEFAULT_MOBILEPROXY_BASE_URL = "https://mobileproxy.passport.yandex.net"
 DEFAULT_GLAGOL_BASE_URL = "https://quasar.yandex.net/glagol"
 DEFAULT_RPC_BASE_URL = "https://rpc.alice.yandex.ru"
 
-_BASE_FIELDS = (
-    ("quasar_base_url", DEFAULT_QUASAR_BASE_URL),
-    ("account_base_url", DEFAULT_ACCOUNT_BASE_URL),
-    ("passport_base_url", DEFAULT_PASSPORT_BASE_URL),
-    ("mobileproxy_base_url", DEFAULT_MOBILEPROXY_BASE_URL),
-    ("glagol_base_url", DEFAULT_GLAGOL_BASE_URL),
-    ("rpc_base_url", DEFAULT_RPC_BASE_URL),
-)
-
-_BASE_ROLE_FIELDS = {
+#: Authoritative role -> (config field, default base URL) table; endpoint
+#: forms, configuration validation and role trust all derive from it.
+ROLE_BASE_FIELDS = {
     "quasar": ("quasar_base_url", DEFAULT_QUASAR_BASE_URL),
     "account": ("account_base_url", DEFAULT_ACCOUNT_BASE_URL),
     "passport": ("passport_base_url", DEFAULT_PASSPORT_BASE_URL),
@@ -112,21 +105,9 @@ _BASE_ROLE_FIELDS = {
 }
 
 #: Explicit request roles; no role is ever inferred from a hostname.
-SESSION_ROLES = frozenset(
-    {
-        "quasar",
-        "account",
-        "passport",
-        "mobileproxy",
-        "glagol_token",
-        "rpc",
-        "cookie_probe",
-        "csrf",
-        "music",
-        "cloud_ws",
-        "local_ws",
-    }
-)
+SESSION_ROLES = frozenset(ROLE_BASE_FIELDS) | {
+    "cookie_probe", "csrf", "music", "cloud_ws", "local_ws",
+}
 
 COOKIE_STORAGE_VALIDATORS = ("status_ok", "uid_in_storage")
 
@@ -159,15 +140,15 @@ _DOCUMENTED_DOMAINS = frozenset({"yandex.ru", "yandex.com"})
 #: Default ports used for exact scheme+host+port origin equality.
 _SCHEME_DEFAULT_PORTS = {"https": 443, "wss": 443, "ws": 80, "http": 80}
 
-#: Deterministic LAN ranges for local websockets (no hostname trust).
-_LAN_V4_NETWORKS = (
+#: Deterministic LAN ranges (no hostname trust); stream media shares them.
+LAN_V4_NETWORKS = (
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("169.254.0.0/16"),
 )
-_LAN_V6_NETWORKS = (
+LAN_V6_NETWORKS = (
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("fe80::/10"),
@@ -251,7 +232,7 @@ def _is_lan_host(host: str) -> bool:
         addr = ipaddress.ip_address(host)
     except ValueError:
         return False
-    networks = _LAN_V4_NETWORKS if addr.version == 4 else _LAN_V6_NETWORKS
+    networks = LAN_V4_NETWORKS if addr.version == 4 else LAN_V6_NETWORKS
     return any(addr in network for network in networks)
 
 
@@ -412,6 +393,19 @@ def retry_after_seconds(value: Any) -> float | None:
         return None
 
 
+def _config_value(
+    entry_options: dict[str, Any],
+    yaml_config: dict[str, Any],
+    key: str,
+    default: Any = None,
+) -> Any:
+    """Entry options override YAML; only None/empty-string count as absent."""
+    for source in (entry_options, yaml_config):
+        if key in source and source[key] not in (None, ""):
+            return source[key]
+    return default
+
+
 @dataclass
 class EntryPolicy:
     enable_scenarios: bool = True
@@ -443,11 +437,7 @@ class EntryPolicy:
         entry_options = entry_options or {}
 
         def get_val(key: str, default: bool) -> bool:
-            if key in entry_options and entry_options[key] not in (None, ""):
-                return bool(entry_options[key])
-            if key in yaml_config and yaml_config[key] not in (None, ""):
-                return bool(yaml_config[key])
-            return default
+            return bool(_config_value(entry_options, yaml_config, key, default))
 
         return cls(
             enable_scenarios=get_val("enable_scenarios", True),
@@ -507,34 +497,27 @@ class SessionConfig:
         yaml_config = yaml_config or {}
         entry_options = entry_options or {}
 
-        def get_opt(key: str, default: Any = None) -> Any:
-            if key in entry_options and entry_options[key] not in (None, ""):
-                return entry_options[key]
-            if key in yaml_config and yaml_config[key] not in (None, ""):
-                return yaml_config[key]
-            return default
+        bases = {
+            attr: _config_value(entry_options, yaml_config, attr, default)
+            for attr, default in ROLE_BASE_FIELDS.values()
+        }
 
         return cls(
-            domain=get_opt("domain"),
-            proxy=get_opt("proxy"),
-            ssl=get_opt("ssl"),
-            quasar_base_url=get_opt("quasar_base_url", DEFAULT_QUASAR_BASE_URL),
-            account_base_url=get_opt("account_base_url", DEFAULT_ACCOUNT_BASE_URL),
-            passport_base_url=get_opt("passport_base_url", DEFAULT_PASSPORT_BASE_URL),
-            mobileproxy_base_url=get_opt(
-                "mobileproxy_base_url", DEFAULT_MOBILEPROXY_BASE_URL
+            domain=_config_value(entry_options, yaml_config, "domain"),
+            proxy=_config_value(entry_options, yaml_config, "proxy"),
+            ssl=_config_value(entry_options, yaml_config, "ssl"),
+            cookie_storage_endpoints=_config_value(
+                entry_options, yaml_config, "cookie_storage_endpoints"
             ),
-            glagol_base_url=get_opt("glagol_base_url", DEFAULT_GLAGOL_BASE_URL),
-            rpc_base_url=get_opt("rpc_base_url", DEFAULT_RPC_BASE_URL),
-            cookie_storage_endpoints=get_opt("cookie_storage_endpoints"),
-            csrf_endpoints=get_opt("csrf_endpoints"),
+            csrf_endpoints=_config_value(entry_options, yaml_config, "csrf_endpoints"),
+            **bases,
         )
 
     def validate(self) -> None:
         """Validate configuration with safe ValueError reasons."""
         if self.domain is not None and self.domain not in _DOCUMENTED_DOMAINS:
             raise ValueError("invalid_endpoint")
-        for attr, default in _BASE_FIELDS:
+        for attr, _default in ROLE_BASE_FIELDS.values():
             _check_https_endpoint(getattr(self, attr))
         if not self.cookie_storage_endpoints:
             raise ValueError("invalid_endpoint")
@@ -563,11 +546,11 @@ class SessionConfig:
         if not url:
             return url
 
-        if role in _BASE_ROLE_FIELDS:
-            attr, default = _BASE_ROLE_FIELDS[role]
+        if role in ROLE_BASE_FIELDS:
+            attr, default = ROLE_BASE_FIELDS[role]
             url = _swap_base_prefix(url, default, getattr(self, attr))
         elif role in ("cookie_probe", "csrf"):
-            for attr, default in _BASE_FIELDS:
+            for attr, default in ROLE_BASE_FIELDS.values():
                 url = _swap_base_prefix(url, default, getattr(self, attr))
 
         if self.domain and role not in ("music", "local_ws"):
@@ -627,15 +610,9 @@ class SessionConfig:
                 configured = _origin_of(self.quasar_base_url)
                 if configured:
                     trusted.add(("wss", configured[1], configured[2]))
-            if origin not in trusted:
-                raise ValueError(
-                    "untrusted_credential_destination"
-                    if credential
-                    else "invalid_endpoint"
-                )
-            return
-
-        if role == "music":
+        elif role == "music":
+            # anonymous Music/CDN downloads may go anywhere over https;
+            # OAuth credentials only to the built-in music hosts
             if scheme != "https":
                 raise ValueError("invalid_endpoint")
             if credential and origin not in {
@@ -643,39 +620,30 @@ class SessionConfig:
             }:
                 raise ValueError("untrusted_credential_destination")
             return
-
-        if scheme != "https":
-            raise ValueError("invalid_endpoint")
-
-        if role in _BASE_ROLE_FIELDS:
-            attr, default = _BASE_ROLE_FIELDS[role]
-            trusted = _variant_origins(default)
-            if credential:
-                if origin not in trusted:
-                    raise ValueError("untrusted_credential_destination")
-                return
-            trusted |= _variant_origins(getattr(self, attr))
-            if origin not in trusted:
-                raise ValueError("invalid_endpoint")
-            return
-
-        # cookie_probe / csrf
-        if role == "cookie_probe":
-            default_urls = [
-                endpoint["url"] for endpoint in DEFAULT_COOKIE_STORAGE_ENDPOINTS
-            ]
-            configured_urls = [
-                endpoint["url"] for endpoint in self.cookie_storage_endpoints
-            ]
         else:
-            default_urls = list(DEFAULT_CSRF_ENDPOINTS)
-            configured_urls = list(self.csrf_endpoints)
-        trusted = set()
-        for default_url in default_urls:
-            trusted |= _variant_origins(default_url)
-        if not credential:
-            for configured_url in configured_urls:
-                trusted |= _variant_origins(configured_url)
+            if scheme != "https":
+                raise ValueError("invalid_endpoint")
+            if role in ROLE_BASE_FIELDS:
+                attr, default = ROLE_BASE_FIELDS[role]
+                trusted = _variant_origins(default)
+                if not credential:
+                    # credential requests never follow external overrides
+                    trusted |= _variant_origins(getattr(self, attr))
+            else:
+                # cookie_probe / csrf: defaults always, configured only
+                # for credential-free probes
+                if role == "cookie_probe":
+                    urls = [e["url"] for e in DEFAULT_COOKIE_STORAGE_ENDPOINTS]
+                    if not credential:
+                        urls += [e["url"] for e in self.cookie_storage_endpoints]
+                else:
+                    urls = list(DEFAULT_CSRF_ENDPOINTS)
+                    if not credential:
+                        urls += self.csrf_endpoints
+                trusted = set()
+                for endpoint_url in urls:
+                    trusted |= _variant_origins(endpoint_url)
+
         if origin not in trusted:
             raise ValueError(
                 "untrusted_credential_destination"
@@ -718,8 +686,6 @@ class Readiness:
     inventory_source: str = "unknown"
     last_snapshot_at: str | None = None
     scenarios_state: ScenariosState = ScenariosState.UNKNOWN
-    local_state: dict[str, Any] | None = None
-    token_state: TokenState = TokenState.MISSING
 
     def computed_cloud_state(self, policy: EntryPolicy) -> CloudState:
         if not policy.effective_cloud_allowed:

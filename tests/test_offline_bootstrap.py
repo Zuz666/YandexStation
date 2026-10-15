@@ -296,7 +296,6 @@ def test_offline_acceptance_a1_full_lifecycle(tmp_path):
 
 
 def test_issued_glagol_token_is_authenticated_and_saved_before_use(tmp_path):
-    from custom_components.yandex_station.core.yandex_glagol import YandexGlagol
     from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
     from custom_components.yandex_station.core.yandex_session import YandexSession
     from .test_cache import cache_runtime, device_record, read_storage
@@ -321,7 +320,6 @@ def test_issued_glagol_token_is_authenticated_and_saved_before_use(tmp_path):
             session = YandexSession(client, music_token="synthetic-music")
             quasar = YandexQuasar(session, cache_manager=cache)
             quasar.owned_glagol_ids = {"glagol-1"}
-            glagol = YandexGlagol(session, device, quasar=quasar)
             saving, release = asyncio.Event(), asyncio.Event()
             original_save = cache.async_save_device_token
 
@@ -331,10 +329,10 @@ def test_issued_glagol_token_is_authenticated_and_saved_before_use(tmp_path):
                 return await original_save(*args)
 
             with patch.object(cache, "async_save_device_token", side_effect=held_save):
-                issuing = asyncio.create_task(glagol.get_device_token())
+                issuing = quasar.async_fetch_device_token(device)
                 try:
                     await asyncio.wait_for(saving.wait(), 2)
-                    assert glagol.device_token is None
+                    # The candidate is neither published nor used before the save
                     assert quasar.device_tokens == {}
                     release.set()
                     assert await issuing == "issued-candidate"

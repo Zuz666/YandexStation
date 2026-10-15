@@ -2,7 +2,6 @@ import logging
 from datetime import timedelta
 
 import voluptuous as vol
-from homeassistant.components import persistent_notification
 from homeassistant.components.binary_sensor import HomeAssistant  # important for tests
 from homeassistant.components.media_player import (
     ATTR_MEDIA_CONTENT_ID,

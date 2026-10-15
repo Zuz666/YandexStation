@@ -408,14 +408,22 @@ def test_durable_marker_checks_content_not_only_revision(tmp_path):
         async with cache_runtime(tmp_path) as (manager, _):
             cache = manager()
             await cache.async_save_devices([device_record()])
-            assert await cache.async_save_and_verify_scenario_marker("dev-1", "trigger", SCENARIO_STATE_PENDING)
-            revision = cache.snapshot.revision
+            await cache.async_save_device_token("glagol-1", "yandexstation", "opaque")
+            assert await cache.async_save_scenario_marker(
+                "dev-1", "trigger", SCENARIO_STATE_PENDING
+            )
             payload = read_storage(cache)
             payload["scenario_creation"]["dev-1"]["trigger"] = "different-trigger"
             write_storage(tmp_path, payload)
-            assert not await cache.async_verify_durable_marker(revision, ("dev-1", SCENARIO_STATE_PENDING))
+            # A durable invalidation notices the tampered revision through
+            # direct disk read-back, not just the revision counter
+            assert not await cache.async_invalidate_device_token(
+                "glagol-1", "yandexstation", "other"
+            )
             with patch.object(cache._store, "async_save", AsyncMock(return_value=None)):
-                assert not await cache.async_save_and_verify_scenario_marker("dev-2", "new-trigger", SCENARIO_STATE_PENDING)
+                assert not await cache.async_save_scenario_marker(
+                    "dev-2", "new-trigger", SCENARIO_STATE_PENDING
+                )
 
     asyncio.run(scenario())
 
@@ -472,7 +480,7 @@ def test_concurrent_inventory_token_and_marker_writes_survive_restart(tmp_path):
             await asyncio.gather(
                 cache.async_save_devices([device_record()]),
                 cache.async_save_device_token("glagol-1", "yandexstation", "candidate"),
-                cache.async_save_and_verify_scenario_marker("dev-1", "trigger", SCENARIO_STATE_PENDING),
+                cache.async_save_scenario_marker("dev-1", "trigger", SCENARIO_STATE_PENDING),
             )
             restored = await manager().async_load()
             assert restored.devices == [device_record()]

@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 from custom_components.yandex_station.core.cache import (
     CacheManager,
@@ -26,8 +26,7 @@ def quasar_with(session=None, *, scenarios=None, cache=None):
     session = session or MagicMock()
     cache = cache or MagicMock(spec=CacheManager)
     cache.snapshot = StationSnapshot(entry_id="e1", account_login="u1")
-    cache.async_save_scenario_marker = AsyncMock()
-    cache.async_save_and_verify_scenario_marker = AsyncMock(return_value=True)
+    cache.async_save_scenario_marker = AsyncMock(return_value=True)
     quasar = YandexQuasar(session, policy=EntryPolicy(), cache_manager=cache)
     quasar.owned_glagol_ids = {"did1"}
     speaker = {
@@ -139,7 +138,7 @@ def test_multiple_trigger_matches_leave_binding_unresolved_and_ban_post():
         assert speaker["scenario_id"] is None
         assert speaker["scenario_unresolved"] is True
         quasar.add_scenario.assert_not_called()
-        cache.async_save_and_verify_scenario_marker.assert_not_called()
+        cache.async_save_scenario_marker.assert_not_called()
 
     asyncio.run(scenario())
 
@@ -294,13 +293,12 @@ def test_retry_scenario_creation_requires_confirm_and_posts_once():
         assert result == "created"
         assert speaker["scenario_id"] == "scen_new"
         quasar.add_scenario.assert_called_once()
-        # Marker is replaced with a new revision without intermediate deletion
-        cache.async_save_and_verify_scenario_marker.assert_called_once_with(
-            "dev_123", encode("dev_123"), SCENARIO_STATE_PENDING
-        )
-        cache.async_save_scenario_marker.assert_called_once_with(
-            "dev_123", encode("dev_123"), SCENARIO_STATE_CONFIRMED
-        )
+        # The pending marker is durably verified before the single POST, then
+        # replaced with a confirmed marker without intermediate deletion
+        assert cache.async_save_scenario_marker.await_args_list == [
+            call("dev_123", encode("dev_123"), SCENARIO_STATE_PENDING),
+            call("dev_123", encode("dev_123"), SCENARIO_STATE_CONFIRMED),
+        ]
 
     asyncio.run(scenario())
 

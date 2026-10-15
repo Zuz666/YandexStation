@@ -22,8 +22,7 @@ from homeassistant.exceptions import HomeAssistantError
 from .core import utils
 from .core.const import DATA_CONFIG, DOMAIN
 from .core.lifecycle import get_lifecycle
-from .core.policy import EntryPolicy, SessionConfig
-from .core.yandex_quasar import YandexQuasar
+from .core.policy import EntryPolicy, ROLE_BASE_FIELDS, SessionConfig
 from .core.yandex_session import LoginResponse, YandexSession
 from .core.cache import CacheManager
 from .hass import hass_utils
@@ -267,14 +266,12 @@ class YandexStationFlowHandler(ConfigFlow, domain=DOMAIN):
 
 
 class OptionsFlowHandler(OptionsFlow):
-    def __init__(self, config_entry: ConfigEntry = None):
+    def __init__(self, config_entry: ConfigEntry):
         self._config_entry = config_entry
 
     @property
     def config_entry(self) -> ConfigEntry:
-        if self._config_entry is not None:
-            return self._config_entry
-        return self.hass.config_entries.async_get_entry(self.handler)
+        return self._config_entry
 
     async def async_step_init(self, user_input: dict = None):
         """Show main options menu."""
@@ -485,35 +482,21 @@ class OptionsFlowHandler(OptionsFlow):
             return f"{resolved} (из YAML)"
 
         placeholders = {
-            "current_quasar": format_effective(
-                "https://iot.quasar.yandex.ru", session_config.quasar_base_url, "quasar"
-            ),
-            "current_account": format_effective(
-                "https://quasar.yandex.ru", session_config.account_base_url, "account"
-            ),
-            "current_passport": format_effective(
-                "https://passport.yandex.ru", session_config.passport_base_url, "passport"
-            ),
-            "current_mobileproxy": format_effective(
-                "https://mobileproxy.passport.yandex.net",
-                session_config.mobileproxy_base_url, "mobileproxy",
-            ),
-            "current_glagol": format_effective(
-                "https://quasar.yandex.net/glagol",
-                session_config.glagol_base_url, "glagol_token",
-            ),
-            "current_rpc": format_effective(
-                "https://rpc.alice.yandex.ru", session_config.rpc_base_url, "rpc",
-            ),
-            "current_cookie": (
+            f"current_{field.removesuffix('_base_url')}": format_effective(
+                default, getattr(session_config, field), role
+            )
+            for role, (field, default) in ROLE_BASE_FIELDS.items()
+        }
+        placeholders.update(
+            current_cookie=(
                 "некорректная конфигурация" if invalid_endpoints
                 else json.dumps(session_config.cookie_storage_endpoints, ensure_ascii=False)
             ),
-            "current_csrf": (
+            current_csrf=(
                 "некорректная конфигурация" if invalid_endpoints
                 else json.dumps(session_config.csrf_endpoints, ensure_ascii=False)
             ),
-        }
+        )
 
         schema_dict = {
             vol.Optional(
@@ -533,12 +516,9 @@ class OptionsFlowHandler(OptionsFlow):
                 default=policy.enable_diagnostic_sensors,
             ): cv.boolean,
         }
-        for key in (
-            "quasar_base_url", "account_base_url", "passport_base_url",
-            "mobileproxy_base_url", "glagol_base_url", "rpc_base_url",
-        ):
+        for field, _default in ROLE_BASE_FIELDS.values():
             schema_dict[vol.Optional(
-                key, default=self.config_entry.options.get(key, "")
+                field, default=self.config_entry.options.get(field, "")
             )] = cv.string
         for key in ("cookie_storage_endpoints", "csrf_endpoints"):
             override = self.config_entry.options.get(key)
@@ -615,11 +595,10 @@ class OptionsFlowHandler(OptionsFlow):
             result["errors"] = {"base": "reload_in_progress"}
             return result
         new_options = dict(self.config_entry.options)
-        endpoint_fields = {
-            "quasar_base_url", "account_base_url", "passport_base_url",
-            "mobileproxy_base_url", "glagol_base_url", "rpc_base_url",
-            "cookie_storage_endpoints", "csrf_endpoints",
-        }
+        endpoint_fields = (
+            {field for field, _default in ROLE_BASE_FIELDS.values()}
+            | {"cookie_storage_endpoints", "csrf_endpoints"}
+        )
         yaml_config = self.hass.data.get(DOMAIN, {}).get(DATA_CONFIG, {})
         inherited_policy = EntryPolicy.from_configs(yaml_config)
         policy_fields = {

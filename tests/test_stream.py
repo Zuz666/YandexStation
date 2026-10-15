@@ -1,12 +1,12 @@
 import asyncio
 import time
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
 import jwt
 from aiohttp import ClientSession, web
-from homeassistant.config_entries import ConfigEntries, ConfigEntry
+from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import HomeAssistant
 
 from custom_components.yandex_station.core.lifecycle import (
@@ -16,16 +16,7 @@ from custom_components.yandex_station.core.policy import EntryPolicy
 from custom_components.yandex_station.core.stream import (
     LanOnlyResolver, StreamImplementation, get_url, validate_media_url,
 )
-
-
-def config_entry():
-    values = dict(version=1, domain="yandex_station", title="Synthetic", data={},
-                  source="user", options={}, unique_id="synthetic", entry_id="entry-1")
-    try:
-        return ConfigEntry(**values, minor_version=1, discovery_keys=MappingProxyType({}),
-                           subentries_data=())
-    except TypeError:
-        return ConfigEntry(**values)
+from .test_cache import config_entry
 
 
 def test_stream_rechecks_policy_on_real_get_head_and_hls(tmp_path):

@@ -23,3 +23,14 @@ devices.types.media_device.tv
 devices.types.media_device.tv.yandex.goya
 devices.types.media_device.tv.yandex.magritte
 ```
+
+## Resilience ownership
+
+- `policy.ROLE_BASE_FIELDS` defines the endpoint roles, option fields and default bases shared by session configuration and the options form.
+- `YandexSession` owns request admission, authentication and single-flight CSRF acquisition. Configuration normalization does not replace destination checks before transport.
+- `YandexQuasar` owns cloud inventory decoding, token acquisition and scenario creation. Automatic eligibility and explicit manual authorization remain separate; neither path retries an uncertain creation.
+- `CacheManager.async_save_scenario_marker()` returns true only after disk read-back confirms the saved revision. A creation POST requires a durable pending marker.
+- `YandexGlagol` owns the local connection and acceptance of the supplied token, not a second cloud token-fetch path.
+- `YandexQuasar.cloud_control_ready()` supplies the shared cloud-route predicate; callers retain ownership, stopping and operation-specific admission checks.
+- Account diagnostic sensors share readiness subscriptions, while keeping their individual state projections and registry identities.
+- `LifecycleManager` keeps reload qualification at both admission and execution. Changes to the stable lifecycle module or removed module bindings require an ordinary Core restart.

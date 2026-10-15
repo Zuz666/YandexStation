@@ -31,7 +31,7 @@ from homeassistant.helpers.restore_state import (
     RestoredExtraData,
 )
 from homeassistant.helpers.template import Template
-from .policy import AuthState, DevicesState, SendOutcome
+from .policy import DevicesState, SendOutcome
 from homeassistant.util import slugify
 
 from . import stream, utils
@@ -255,37 +255,17 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         return "unavailable"
 
     def _is_cloud_control_ready(self) -> bool:
-        if not self.device.get("capabilities"):
-            return False
-        if not getattr(self.quasar, "policy", None):
-            return self.device["quasar_info"]["device_id"] in self.quasar.owned_glagol_ids
+        """This speaker is owned and an executable cloud command may target it."""
         if (
             self.quasar.stopping
             or self.device["quasar_info"]["device_id"] not in self.quasar.owned_glagol_ids
         ):
             return False
-        if not self.device.get("capabilities"):
-            return False
-        if not getattr(self.quasar, "policy", None):
-            return True
-        if not self.quasar.policy.effective_cloud_allowed:
-            return False
-        if not self.quasar.policy.enable_scenarios:
-            return False
-        if not self.device.get("scenario_id"):
-            return False
-        readiness = getattr(self.quasar, "readiness", None)
-        if readiness:
-            if readiness.auth_state != AuthState.VALID:
-                return False
-            if readiness.devices_state != DevicesState.READY:
-                return False
-        return True
+        return self.quasar.cloud_control_ready(self.device)
+
     @property
     def cloud_state(self) -> str:
-        if getattr(self.quasar, "policy", None) and getattr(self.quasar, "readiness", None):
-            return str(self.quasar.readiness.computed_cloud_state(self.quasar.policy))
-        return "unknown"
+        return str(self.quasar.readiness.computed_cloud_state(self.quasar.policy))
 
     @property
     def extra_state_attributes(self):
@@ -294,7 +274,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             data["alice_state"] = self.local_state.get("aliceState")
         if self.is_on is not None:
             data["is_on"] = self.is_on
-        if getattr(self.quasar, "policy", None) and self.quasar.policy.force_offline_local:
+        if self.quasar.policy.force_offline_local:
             data["transport"] = self.transport
             data["cloud_state"] = self.cloud_state
         return data or None

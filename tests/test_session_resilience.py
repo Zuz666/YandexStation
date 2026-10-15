@@ -1005,14 +1005,14 @@ def test_request_glagol_music_token_flow():
         client.post = AsyncMock(side_effect=post)
         client.get = AsyncMock(return_value=make_response(200, json_body=[], has_json=True))
 
-        r = await session.get(GLAGOL_URL, role="glagol_token")
+        r = await session.request_glagol(GLAGOL_URL, role="glagol_token")
         assert r.status == 200
         assert session.music_token == "music_tok"
         sent = client.get.call_args.kwargs["headers"]
         assert sent["Authorization"] == "OAuth music_tok"
 
         # the OAuth token is fetched once and reused
-        await session.get(GLAGOL_URL, role="glagol_token")
+        await session.request_glagol(GLAGOL_URL, role="glagol_token")
         assert client.post.call_count == 1
 
     asyncio.run(scenario())
@@ -1028,7 +1028,7 @@ def test_request_glagol_validates_destination_before_token_fetch():
 
         # a foreign target never triggers the music/OAuth request
         with pytest.raises(ValueError, match="untrusted_credential_destination"):
-            await session.get(GLAGOL_URL, role="glagol_token")
+            await session.request_glagol(GLAGOL_URL, role="glagol_token")
         client.get.assert_not_called()
         client.post.assert_not_called()
 
@@ -1046,7 +1046,7 @@ def test_glagol_403_scoped_to_music_token_without_replay():
 
         client.get = AsyncMock(return_value=make_response(403))
         with pytest.raises(CloudRequestError) as exc:
-            await session.get(GLAGOL_URL, role="glagol_token")
+            await session.request_glagol(GLAGOL_URL, role="glagol_token")
         assert exc.value.role == "glagol_token"
         assert exc.value.status == 403
 
@@ -1065,7 +1065,7 @@ def test_missing_tokens_block_hidden_oauth():
         session = YandexSession(client, config=SessionConfig())
 
         with pytest.raises(RuntimeError, match="x_token_required"):
-            await session.get(GLAGOL_URL, role="glagol_token")
+            await session.request_glagol(GLAGOL_URL, role="glagol_token")
         client.get.assert_not_called()
         client.post.assert_not_called()
 
@@ -1221,7 +1221,7 @@ def test_retry_after_hint_recorded_per_role():
             return_value=make_response(429, headers={"Retry-After": "60"})
         )
         with pytest.raises(CloudRequestError):
-            await glagol_session.get(GLAGOL_URL, role="glagol_token")
+            await glagol_session.request_glagol(GLAGOL_URL, role="glagol_token")
         assert glagol_session.retry_after == {"glagol_token": "60"}
 
     asyncio.run(scenario())

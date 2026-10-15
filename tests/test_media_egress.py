@@ -1,11 +1,11 @@
 import asyncio
 import json
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import jwt
 import pytest
-from homeassistant.config_entries import ConfigEntries, ConfigEntry
+from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
@@ -15,16 +15,7 @@ from custom_components.yandex_station.core.lifecycle import get_lifecycle
 from custom_components.yandex_station.core.policy import EntryPolicy
 from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
 from custom_components.yandex_station.core.yandex_station import YandexStation
-
-
-def entry():
-    values = dict(version=1, domain="yandex_station", title="Synthetic", data={},
-                  source="user", options={}, unique_id="synthetic", entry_id="entry-1")
-    try:
-        return ConfigEntry(**values, minor_version=1, discovery_keys=MappingProxyType({}),
-                           subentries_data=())
-    except TypeError:
-        return ConfigEntry(**values)
+from .test_cache import config_entry
 
 
 def test_offline_local_media_bypasses_cloud_metadata_but_not_stream_policy(tmp_path):
@@ -48,7 +39,7 @@ def test_offline_local_media_bypasses_cloud_metadata_but_not_stream_policy(tmp_p
         station.hass = hass
         station.local_state = {"playerState": {"isPlaying": False}}
         station.glagol = SimpleNamespace(send=AsyncMock())
-        with patch.object(hass.config_entries, "async_get_entry", return_value=entry()):
+        with patch.object(hass.config_entries, "async_get_entry", return_value=config_entry()):
             try:
                 with patch("custom_components.yandex_station.core.utils.get_media_payload",
                            new_callable=AsyncMock) as metadata:

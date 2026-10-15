@@ -278,7 +278,7 @@ def test_failed_durable_marker_verification_aborts_post():
         cache = MagicMock(spec=CacheManager)
         cache.snapshot = StationSnapshot(entry_id="e1", account_login="u1")
         # Verification returns False (e.g. disk write failed)
-        cache.async_save_and_verify_scenario_marker = AsyncMock(return_value=False)
+        cache.async_save_scenario_marker = AsyncMock(return_value=False)
 
         quasar = YandexQuasar(session, cache_manager=cache)
         quasar.owned_glagol_ids = {"did1"}
@@ -308,13 +308,12 @@ def test_concurrent_load_speakers_calls_are_serialized():
         snapshot = StationSnapshot(entry_id="e1", account_login="u1")
         cache.snapshot = snapshot
 
-        async def mock_save_and_verify(dev_id, trigger, state):
+        async def mock_save(dev_id, trigger, state):
             snapshot.scenario_creation[dev_id] = {"trigger": trigger, "state": state}
             await asyncio.sleep(0.01)
             return True
 
-        cache.async_save_and_verify_scenario_marker = AsyncMock(side_effect=mock_save_and_verify)
-        cache.async_save_scenario_marker = AsyncMock()
+        cache.async_save_scenario_marker = AsyncMock(side_effect=mock_save)
 
         quasar = YandexQuasar(session, cache_manager=cache)
         quasar.owned_glagol_ids = {"did1"}

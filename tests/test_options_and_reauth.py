@@ -4,9 +4,6 @@ from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.config_entries import ConfigEntries
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import issue_registry
 
 from custom_components.yandex_station.config_flow import YandexStationFlowHandler
 from custom_components.yandex_station.core.cache import CacheManager
@@ -15,27 +12,21 @@ from custom_components.yandex_station.core.lifecycle import get_lifecycle
 from custom_components.yandex_station.core.policy import EntryPolicy, ScenariosState
 from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
 from custom_components.yandex_station.core.yandex_session import LoginResponse, YandexSession
+from . import core_hass, seed_config_entries
 from .test_cache import config_entry, device_record
 from .test_scenario_recovery import wire_scenario
 
 
 @asynccontextmanager
 async def core_flow(tmp_path, *, options=None, disabled=False):
-    try:
-        hass = HomeAssistant(str(tmp_path))
-    except TypeError:
-        hass = HomeAssistant()
-    hass.config.config_dir = str(tmp_path)
+    hass = core_hass(tmp_path)
     hass.data.setdefault("components", set()).add("yandex_station.config_flow")
-    await issue_registry.async_load(hass)
-    hass.config_entries = ConfigEntries(hass, {})
     record = config_entry("entry-1", "synthetic-login").as_dict()
     record["data"] = {"x_token": "previous", "music_token": "music", "account_uid": "uid-1"}
     record["options"] = options or {}
     if disabled:
         record["disabled_by"] = "user"
-    await hass.config_entries._store.async_save({"entries": [record]})
-    await hass.config_entries.async_initialize()
+    await seed_config_entries(hass, [record])
     hass.data[DOMAIN] = {DATA_CONFIG: {}}
     entry = hass.config_entries.async_get_entry("entry-1")
     lifecycle = get_lifecycle(hass)

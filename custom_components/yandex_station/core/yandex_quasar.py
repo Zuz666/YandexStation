@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
 from aiohttp import ClientError, ContentTypeError, WSMsgType
@@ -69,6 +70,27 @@ def _merge_device_records(old_devices: list, new_devices: list) -> None:
         preserved = {k: device[k] for k in RUNTIME_DEVICE_FIELDS if k in device}
         device.update(new)
         device.update(preserved)
+
+
+def _iter_inventory_households(resp) -> Iterator[dict]:
+    """Yield validated household records from a v3 inventory response.
+
+    Raises ValueError when the envelope, a household, or any device record is
+    malformed, so no caller ever trusts a partial cloud catalog.
+    """
+    if (
+        not isinstance(resp, dict) or resp.get("status") != "ok"
+        or not isinstance(resp.get("households"), list)
+    ):
+        raise ValueError("invalid_response")
+    for house in resp["households"]:
+        if (
+            not isinstance(house, dict) or not isinstance(house.get("name"), str)
+            or not isinstance(house.get("all"), list)
+            or any(not isinstance(device, dict) for device in house["all"])
+        ):
+            raise ValueError("invalid_response")
+        yield house
 
 COMMAND_TIMEOUT = 10
 
@@ -368,20 +390,9 @@ class YandexQuasar(Dispatcher):
         )
         try:
             payload = await response.json()
-            if (
-                not isinstance(payload, dict) or payload.get("status") != "ok"
-                or not isinstance(payload.get("households"), list)
-            ):
-                raise ValueError("invalid_response")
-            count = 0
-            for house in payload["households"]:
-                if (
-                    not isinstance(house, dict) or not isinstance(house.get("name"), str)
-                    or not isinstance(house.get("all"), list)
-                    or any(not isinstance(device, dict) for device in house["all"])
-                ):
-                    raise ValueError("invalid_response")
-                count += len(house["all"])
+            count = sum(
+                len(house["all"]) for house in _iter_inventory_households(payload)
+            )
             return count, response.status
         except (ValueError, ContentTypeError):
             raise _InvalidCloudCheckResponse from None
@@ -467,23 +478,14 @@ class YandexQuasar(Dispatcher):
                 await self.session.refresh_cookies()
             raise
         resp = await r.json()
-        if (
-            not isinstance(resp, dict) or resp.get("status") != "ok"
-            or not isinstance(resp.get("households"), list)
-        ):
-            raise RuntimeError("inventory_unavailable")
-        devices = []
-        for house in resp["households"]:
-            if (
-                not isinstance(house, dict)
-                or not isinstance(house.get("name"), str)
-                or not isinstance(house.get("all"), list)
-                or any(not isinstance(device, dict) for device in house["all"])
-            ):
-                raise RuntimeError("inventory_unavailable")
-            devices.extend(
-                {**device, "house_name": house["name"]} for device in house["all"]
-            )
+        try:
+            devices = [
+                {**device, "house_name": house["name"]}
+                for house in _iter_inventory_households(resp)
+                for device in house["all"]
+            ]
+        except ValueError:
+            raise RuntimeError("inventory_unavailable") from None
         devices = normalize_inventory(devices)
 
         old_records = self.devices
@@ -711,33 +713,36 @@ class YandexQuasar(Dispatcher):
         if not await self.session.ensure_csrf():
             _LOGGER.warning("CSRF unavailable; scenario creation for %s aborted", device_id)
             return
-        verified = await self.cache_manager.async_save_and_verify_scenario_marker(
+        if not await self.cache_manager.async_save_scenario_marker(
             device_id, hash_code, SCENARIO_STATE_PENDING
-        )
-        if not verified:
+        ):
             _LOGGER.warning(
                 "Durable pending marker verification failed on disk for %s; aborting POST",
                 device_id,
             )
             return
-
         try:
-            sid = await self.add_scenario(device_id, hash_code)
-            speaker["scenario_id"] = sid
-            if self.scenarios is not None:
-                self.scenarios.append(
-                    self._created_scenario_record(sid, device_id, hash_code)
-                )
-            if self.cache_manager:
-                await self.cache_manager.async_save_scenario_marker(
-                    device_id, hash_code, SCENARIO_STATE_CONFIRMED
-                )
+            await self._async_execute_scenario_creation(
+                speaker, device_id, hash_code
+            )
         except Exception as e:
             _LOGGER.warning(
                 "Failed to create scenario for %s: %s; pending marker retained",
                 device_id, type(e).__name__,
             )
             speaker["scenario_id"] = None
+
+    async def _async_execute_scenario_creation(
+        self, speaker: dict, device_id: str, hash_code: str
+    ) -> None:
+        """Create and bind once after the caller has durably saved its pending marker."""
+        sid = await self.add_scenario(device_id, hash_code)
+        speaker["scenario_id"] = sid
+        if self.scenarios is not None:
+            self.scenarios.append(self._created_scenario_record(sid, device_id, hash_code))
+        await self.cache_manager.async_save_scenario_marker(
+            device_id, hash_code, SCENARIO_STATE_CONFIRMED
+        )
 
     async def load_speakers(self):
         if self.scenarios is None:
@@ -782,28 +787,20 @@ class YandexQuasar(Dispatcher):
             hash_code = encode(device_id)
             if not await self.session.ensure_csrf():
                 raise RuntimeError("csrf_unavailable")
-            verified = await self.cache_manager.async_save_and_verify_scenario_marker(
+            if not await self.cache_manager.async_save_scenario_marker(
                 device_id, hash_code, SCENARIO_STATE_PENDING
-            )
-            if not verified:
+            ):
                 raise RuntimeError("marker_verification_failed")
             try:
-                sid = await self.add_scenario(device_id, hash_code)
+                await self._async_execute_scenario_creation(
+                    speaker, device_id, hash_code
+                )
             except Exception:
                 _LOGGER.warning(
                     "Manual scenario creation failed for %s; pending marker retained",
                     device_id,
                 )
                 raise
-            speaker["scenario_id"] = sid
-            if self.scenarios is not None:
-                self.scenarios.append(
-                    self._created_scenario_record(sid, device_id, hash_code)
-                )
-            if self.cache_manager:
-                await self.cache_manager.async_save_scenario_marker(
-                    device_id, hash_code, SCENARIO_STATE_CONFIRMED
-                )
             return "created"
     async def load_speaker_config(self, device: dict):
         """Fetch speaker `device_id` and `platform` when omitted from the device list."""
@@ -924,6 +921,27 @@ class YandexQuasar(Dispatcher):
         resp = await r.json()
         assert resp["status"] == "ok", resp
         return resp["scenario_id"]
+
+    def cloud_control_ready(self, device: dict) -> bool:
+        """Whether an executable cloud command may target this device right now.
+
+        Shared by media-player transport reporting and the diagnostic sensor:
+        requires cloud capabilities, scenario policy, a bound scenario, valid
+        credentials and a ready inventory. Ownership, stopping and per-command
+        admission reasons stay with the callers.
+        """
+        if not device.get("capabilities"):
+            return False
+        if not self.policy.effective_cloud_allowed:
+            return False
+        if not self.policy.enable_scenarios:
+            return False
+        if not device.get("scenario_id"):
+            return False
+        return (
+            self.readiness.auth_state == AuthState.VALID
+            and self.readiness.devices_state == DevicesState.READY
+        )
 
     async def send(
         self, device: dict, text: str, is_tts: bool = False
@@ -1421,8 +1439,11 @@ class YandexQuasar(Dispatcher):
         return task
 
     async def _async_fetch_device_token(self, device: dict) -> str | None:
+        """Fetch, decode and durably save one Glagol token; the sole owner of this flow."""
         info = device["quasar_info"]
         did, platform = info["device_id"], info["platform"]
+        if self.stopping or did not in self.owned_glagol_ids:
+            raise RuntimeError("speaker_not_owned")
         if not self.policy.effective_cloud_allowed:
             _LOGGER.debug("Skipping token fetch for %s: cloud blocked by policy", did)
             return None
