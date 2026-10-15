@@ -713,6 +713,20 @@ class YandexSession(BasicSession):
         except Exception:
             return True
 
+    def credential_metadata(self) -> dict:
+        """Describe local credential candidates without validating or exposing them."""
+        return {
+            "cookies_present": any(self._session.cookie_jar),
+            "x_token_present": bool(self.x_token),
+            "music_token_present": bool(self.music_token),
+            "csrf_present": self.csrf_token is not None,
+            "csrf_age_seconds": (
+                max(0, int(time.monotonic() - self._csrf_obtained_at))
+                if self.csrf_token is not None and self._csrf_obtained_at is not None
+                else None
+            ),
+        }
+
     def _ordered_cookie_probes(self) -> list[dict[str, str]]:
         probes: list[dict[str, str]] = []
         for endpoint in self.config.cookie_storage_endpoints:

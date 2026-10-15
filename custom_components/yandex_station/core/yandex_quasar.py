@@ -1,9 +1,9 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
-from aiohttp import ClientError, WSMsgType
+from aiohttp import ClientError, ContentTypeError, WSMsgType
 
 from .quasar_info import has_quasar
 from .yandex_session import CloudRequestError, YandexSession, safe_error_summary
@@ -33,6 +33,10 @@ RUNTIME_DEVICE_FIELDS = (
     "entity", "glagol", "callbacks", "update_task",
     "host", "port", "scenario_id", "hdmi_audio",
 )
+
+
+class _InvalidCloudCheckResponse(ValueError):
+    """A peer response without a recognizable device inventory."""
 
 
 def _device_fingerprint(device: dict) -> tuple:
@@ -291,6 +295,98 @@ class YandexQuasar(Dispatcher):
         self._scenario_worker_task: asyncio.Task | None = None
         self._history_tasks: set[asyncio.Task] = set()
         self.fresh_device_ids: set[str] = set()
+        self.cloud_connection = {
+            "state": "disconnected" if self.policy.effective_cloud_updates else "disabled",
+            "connected_at": None,
+            "last_message_at": None,
+            "last_error": None,
+            "retry_at": None,
+        }
+        self.last_cloud_check: dict | None = None
+        self._cloud_check_task: asyncio.Task | None = None
+
+    async def async_check_cloud(self) -> dict:
+        """Read the authenticated inventory once; never run recovery or save it."""
+        if self.stopping or not self.policy.effective_cloud_allowed:
+            self.last_cloud_check = {
+                "status": "skipped",
+                "reason": "account_stopping" if self.stopping else "cloud_blocked_by_policy",
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "duration_ms": 0,
+            }
+            return self.last_cloud_check
+        task = self._cloud_check_task
+        if task is None or task.done():
+            task = self._cloud_check_task = asyncio.create_task(self._run_cloud_check())
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and self._cloud_check_task is task:
+                self._cloud_check_task = None
+
+    async def _run_cloud_check(self) -> dict:
+        started = asyncio.get_running_loop().time()
+        self.last_cloud_check = {
+            "status": "running", "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        result = {"status": "failed", "reason": "unexpected_error"}
+        try:
+            count, status = await asyncio.wait_for(self._check_cloud_inventory(), 5)
+            result = {
+                "status": "ok", "reason": "completed",
+                "device_count": count, "http_status": status,
+            }
+        except asyncio.CancelledError:
+            result = {"status": "cancelled", "reason": "cancelled"}
+            raise
+        except asyncio.TimeoutError:
+            result["reason"] = "timeout"
+        except CloudRequestError as error:
+            result.update(reason="http_error", http_status=error.status)
+        except _InvalidCloudCheckResponse:
+            result["reason"] = "invalid_response"
+        except ValueError:
+            result["reason"] = "request_blocked_by_policy"
+        except ClientError:
+            result["reason"] = "connection_error"
+        except Exception:
+            # Never publish an exception message, URL, headers or response body.
+            result["reason"] = "unexpected_error"
+        finally:
+            self.last_cloud_check = {
+                **result,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "duration_ms": round(
+                    (asyncio.get_running_loop().time() - started) * 1000
+                ),
+            }
+        return self.last_cloud_check
+
+    async def _check_cloud_inventory(self) -> tuple[int, int]:
+        response = await self.session.get(
+            "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
+        )
+        try:
+            payload = await response.json()
+            if (
+                not isinstance(payload, dict) or payload.get("status") != "ok"
+                or not isinstance(payload.get("households"), list)
+            ):
+                raise ValueError("invalid_response")
+            count = 0
+            for house in payload["households"]:
+                if (
+                    not isinstance(house, dict) or not isinstance(house.get("name"), str)
+                    or not isinstance(house.get("all"), list)
+                    or any(not isinstance(device, dict) for device in house["all"])
+                ):
+                    raise ValueError("invalid_response")
+                count += len(house["all"])
+            return count, response.status
+        except (ValueError, ContentTypeError):
+            raise _InvalidCloudCheckResponse from None
+        finally:
+            response.release()
 
     def _restore_from_snapshot(self, snapshot: StationSnapshot):
         self.fresh_device_ids.clear()
@@ -1107,41 +1203,54 @@ class YandexQuasar(Dispatcher):
 
     async def connect(self):
         if self.policy.effective_use_cached_devices or not self.policy.effective_cloud_allowed:
+            self.cloud_connection["state"] = "disabled"
             _LOGGER.debug("Skipping cloud connect() due to cache-only/offline policy")
             return
 
-        r = await self.session.get(
-            "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
-        )
-        resp = await r.json()
-        assert resp["status"] == "ok", resp
+        self.cloud_connection.update(state="connecting", retry_at=None)
+        ws = None
+        try:
+            r = await self.session.get(
+                "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
+            )
+            resp = await r.json()
+            assert resp["status"] == "ok", resp
 
-        for house in resp["households"]:
-            if "sharing_info" in house:
-                continue
-            for device in house["all"]:
-                self.dispatch_update(device["id"], device)
+            for house in resp["households"]:
+                if "sharing_info" in house:
+                    continue
+                for device in house["all"]:
+                    self.dispatch_update(device["id"], device)
 
-        ws = await self.session.ws_connect(
-            resp["updates_url"], role="cloud_ws", heartbeat=60
-        )
-        async for msg in ws:
-            if msg.type != WSMsgType.TEXT:
-                break
-            resp = msg.json()
-            # "ping", "update_scenario_list"
-            operation = resp.get("operation")
-            if operation == "update_states":
-                try:
-                    resp = json.loads(resp["message"])
-                    for device in resp["updated_devices"]:
-                        self.dispatch_update(device["id"], device)
-                except Exception as e:
-                    _LOGGER.debug(f"Parse quasar update error: {msg.data}", exc_info=e)
+            ws = await self.session.ws_connect(
+                resp["updates_url"], role="cloud_ws", heartbeat=60
+            )
+            self.cloud_connection.update(
+                state="connected", connected_at=datetime.now(timezone.utc).isoformat(),
+                last_error=None,
+            )
+            async for msg in ws:
+                if msg.type != WSMsgType.TEXT:
+                    break
+                self.cloud_connection["last_message_at"] = datetime.now(timezone.utc).isoformat()
+                resp = msg.json()
+                # "ping", "update_scenario_list"
+                operation = resp.get("operation")
+                if operation == "update_states":
+                    try:
+                        resp = json.loads(resp["message"])
+                        for device in resp["updated_devices"]:
+                            self.dispatch_update(device["id"], device)
+                    except Exception as e:
+                        _LOGGER.debug(f"Parse quasar update error: {msg.data}", exc_info=e)
 
-            elif operation == "update_scenario_list":
-                if '"source":"create_scenario_launch"' in resp["message"]:
-                    self._schedule_history()
+                elif operation == "update_scenario_list":
+                    if '"source":"create_scenario_launch"' in resp["message"]:
+                        self._schedule_history()
+        finally:
+            self.cloud_connection["state"] = "disconnected"
+            if ws is not None:
+                await ws.close()
 
     async def devices_passive_update(self, *args):
         if self.policy.effective_use_cached_devices or not self.policy.effective_cloud_allowed:
@@ -1223,14 +1332,22 @@ class YandexQuasar(Dispatcher):
                 await self.connect()
             except Exception as error:
                 reason = safe_error_summary(error)
+                self.cloud_connection["last_error"] = (
+                    "http_error" if isinstance(error, CloudRequestError) else "connection_error"
+                )
             else:
                 backoff.reset()
                 reason = "connection_closed"
+                self.cloud_connection["last_error"] = "connection_closed"
             retry_after = (
                 self.session.retry_after.get("cloud_ws")
                 or self.session.retry_after.get("quasar")
             )
             delay = backoff.next_delay(retry_after)
+            self.cloud_connection.update(
+                state="backoff",
+                retry_at=(datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat(),
+            )
             _LOGGER.debug(
                 "Cloud updates reconnect: reason=%s retry_in=%.1fs", reason, delay
             )
@@ -1327,6 +1444,10 @@ class YandexQuasar(Dispatcher):
     async def async_stop(self):
         """Cancel and await background tasks and Glagol connections (RFC v2 §2.3, §7.3)."""
         self.stopping = True
+        if self._cloud_check_task is not None:
+            self._cloud_check_task.cancel()
+            await asyncio.gather(self._cloud_check_task, return_exceptions=True)
+            self._cloud_check_task = None
         if self._recovery_task is not None:
             self._recovery_task.cancel()
             try:
@@ -1373,6 +1494,7 @@ class YandexQuasar(Dispatcher):
         if self.cache_manager:
             await self.cache_manager.async_close()
         self.dispatcher.clear()
+        self.cloud_connection.update(state="stopped", retry_at=None)
 
     async def set_account_config(self, key: str, value):
         kv = ACCOUNT_CONFIG.get(key)
