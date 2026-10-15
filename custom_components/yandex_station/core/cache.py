@@ -584,18 +584,13 @@ class CacheManager:
 
     async def async_save_scenario_marker(
         self, device_id: str, trigger: str, state: str
-    ) -> int:
-        """Persist pending/confirmed identity without changing inventory freshness."""
-        record = self._scenario_record(device_id, trigger, state)
-        async with self._lock:
-            self._require_open()
-            self._ensure_snapshot().scenario_creation[device_id] = record
-            return await self._async_save_locked()
-
-    async def async_save_and_verify_scenario_marker(
-        self, device_id: str, trigger: str, state: str
     ) -> bool:
-        """A creation attempt requires durable marker verification under this lock."""
+        """Persist pending/confirmed identity; True only once durable on disk.
+
+        The save reads the payload back from disk, so False means this marker
+        (and its whole revision) is not durable and a creation POST must not
+        follow. Inventory freshness remains unchanged.
+        """
         record = self._scenario_record(device_id, trigger, state)
         async with self._lock:
             self._require_open()
@@ -660,16 +655,8 @@ class CacheManager:
         finally:
             self._metadata_task = None
 
-    async def async_verify_durable_marker(
-        self, revision: int, marker: tuple[str, str] | None = None
-    ) -> bool:
-        """Verify the entire revision and, optionally, a particular marker."""
-        async with self._lock:
-            return await self._async_verify_durable_marker_locked(revision, marker)
-
-    async def _async_verify_durable_marker_locked(
-        self, revision: int, marker: tuple[str, str] | None = None
-    ) -> bool:
+    async def _async_verify_durable_marker_locked(self, revision: int) -> bool:
+        """Confirm by direct disk read-back that this exact revision is durable."""
         snapshot = self._snapshot
         if snapshot is None or snapshot.revision != revision:
             return False
@@ -677,10 +664,6 @@ class CacheManager:
         if payload != snapshot.to_dict():
             self._dirty = True
             return False
-        if marker is not None:
-            device_id, state = marker
-            record = payload["scenario_creation"].get(device_id)
-            return isinstance(record, dict) and record.get("state") == state
         return True
 
     async def async_flush(self) -> bool:

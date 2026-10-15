@@ -18,6 +18,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DATA_CONFIG, DOMAIN
 from .lifecycle import StreamContext, get_lifecycle
+from .policy import LAN_V4_NETWORKS, LAN_V6_NETWORKS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,13 +44,6 @@ def get_ext(url: str) -> str:
     return urlsplit(url).path.rsplit(".", 1)[-1]
 
 
-_LAN_V4 = tuple(ipaddress.ip_network(value) for value in (
-    "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
-    "192.168.0.0/16", "169.254.0.0/16",
-))
-_LAN_V6 = tuple(ipaddress.ip_network(value) for value in (
-    "::1/128", "fc00::/7", "fe80::/10",
-))
 _NUMERIC_HOST = re.compile(
     r"(?:0[xX][0-9a-fA-F]+|[0-9]+)"
     r"(?:\.(?:0[xX][0-9a-fA-F]+|[0-9]+))*\.?"
@@ -61,9 +55,12 @@ def _lan_address(address: str) -> bool:
         ip = ipaddress.ip_address(address)
     except ValueError:
         return False
+    # unlike core.policy._is_lan_host, media deliberately unwraps
+    # IPv4-mapped IPv6 literals before the LAN membership check
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
-    return any(ip in network for network in (_LAN_V4 if ip.version == 4 else _LAN_V6))
+    networks = LAN_V4_NETWORKS if ip.version == 4 else LAN_V6_NETWORKS
+    return any(ip in network for network in networks)
 
 
 def _entry_policy(context: StreamContext, entry_id: str):
@@ -88,8 +85,12 @@ def is_offline(context: StreamContext, entry_id: str) -> bool:
     return loaded_policy.force_offline_local or bool(override)
 
 
-def _destination(context: StreamContext, entry_id: str, url: str, offline: bool) -> str:
-    _entry_policy(context, entry_id)
+def _destination(context: StreamContext, url: str, offline: bool) -> str:
+    """Pure URL admission: syntax plus offline LAN rules.
+
+    Entry/lifecycle admission is decided by ``is_offline`` (once per
+    synchronous phase and before every network attempt in ``_request``).
+    """
     if not isinstance(url, str) or not url or url.startswith("//"):
         raise ValueError("media_destination_blocked")
     if url.startswith("/"):
@@ -132,7 +133,7 @@ def _destination(context: StreamContext, entry_id: str, url: str, offline: bool)
 
 def validate_media_url(context: StreamContext, entry_id: str, url: str) -> str:
     """Preflight known destinations; hostname DNS is enforced by the connector."""
-    return _destination(context, entry_id, url, is_offline(context, entry_id))
+    return _destination(context, url, is_offline(context, entry_id))
 
 
 def _sign(context: StreamContext, entry_id: str, url: str, ext: str,
@@ -146,7 +147,7 @@ def _sign(context: StreamContext, entry_id: str, url: str, ext: str,
 def get_url(context: StreamContext, entry_id: str, url: str,
             ext: str | None = None, expires: int = 3600) -> str:
     offline = is_offline(context, entry_id)
-    validated = _destination(context, entry_id, url, offline)
+    validated = _destination(context, url, offline)
     ext = ext.replace("-", ".") if ext else get_ext(validated)
     if ext not in MIME_TYPES or not context.hass_url or expires <= 0:
         raise ValueError("media_url_unavailable")
@@ -226,7 +227,6 @@ class StreamImplementation:
 
     def __init__(self, context: StreamContext):
         self.context = context
-        self.session: ClientSession | None = None
         self._lan_session: ClientSession | None = None
 
     async def async_close(self):
@@ -236,9 +236,8 @@ class StreamImplementation:
 
     def _session(self, offline: bool) -> ClientSession:
         if not offline:
-            if self.session is None:
-                self.session = async_get_clientsession(self.context.hass)
-            return self.session
+            # HA owns the online helper session; it is never closed here
+            return async_get_clientsession(self.context.hass)
         if self._lan_session is None:
             self._lan_session = ClientSession(
                 connector=TCPConnector(resolver=LanOnlyResolver(), use_dns_cache=False),
@@ -263,26 +262,27 @@ class StreamImplementation:
         ):
             raise ValueError("invalid_media_token")
         entry_id = data["entry_id"]
+        # is_offline re-checks entry admission with current policy
         offline = is_offline(self.context, entry_id) or data["lan_only"]
-        _destination(self.context, entry_id, data["url"], offline)
         url = (
             async_process_play_media_url(self.context.hass, data["url"])
             if data["url"].startswith("/")
             else data["url"]
         )
-        url = _destination(self.context, entry_id, url, offline)
+        url = _destination(self.context, url, offline)
         return entry_id, url, offline, data["exp"]
 
     async def _request(self, method: str, entry_id: str, url: str,
                        offline: bool, headers: dict | None = None):
         session = self._session(offline)
         for attempt in range(6):
-            url = _destination(self.context, entry_id, url, offline)
-            # An online-issued token cannot bypass a later offline toggle.
+            url = _destination(self.context, url, offline)
+            # An online-issued token cannot bypass a later offline toggle;
+            # is_offline re-checks entry admission before every attempt.
             if is_offline(self.context, entry_id) and not offline:
                 offline = True
                 session = self._session(True)
-                url = _destination(self.context, entry_id, url, True)
+                url = _destination(self.context, url, True)
             response = await session.request(
                 method, url, headers=headers, timeout=STREAM_TIMEOUT, allow_redirects=False
             )
@@ -292,7 +292,7 @@ class StreamImplementation:
             response.release()
             if not location or attempt == 5:
                 raise ValueError("media_redirect_blocked")
-            url = _destination(self.context, entry_id, urljoin(url, location), offline)
+            url = _destination(self.context, urljoin(url, location), offline)
         raise ValueError("media_redirect_blocked")
 
     async def probe_content_type(self, entry_id: str, url: str) -> str | None:
@@ -310,7 +310,7 @@ class StreamImplementation:
     def _hls_body(self, body: str, base_url: str, entry_id: str,
                   offline: bool, expires_at: int) -> str:
         def child(value: str) -> str:
-            url = _destination(self.context, entry_id, urljoin(base_url, value), offline)
+            url = _destination(self.context, urljoin(base_url, value), offline)
             ext = get_ext(url)
             if ext not in MIME_TYPES:
                 raise ValueError("media_segment_blocked")

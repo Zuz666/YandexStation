@@ -65,46 +65,6 @@ class YandexGlagol:
     def name(self):
         return self.device["name"]
 
-    async def get_device_token(self):
-        if self.quasar and (
-            self.quasar.stopping
-            or self.device["quasar_info"]["device_id"] not in self.quasar.owned_glagol_ids
-        ):
-            raise RuntimeError("speaker_not_owned")
-
-        if self.quasar is not None:
-            # Single-flight per device: concurrent callers await the same fetch
-            token = await self.quasar.async_fetch_device_token(self.device)
-        else:
-            if getattr(self.session, "policy", None) and not self.session.policy.effective_cloud_allowed:
-                self.debug("Cloud device token fetch blocked by force_offline_local")
-                return None
-            token = await self._async_fetch_token_direct()
-
-        if token:
-            self.device_token = token
-            if self.token_state is not TokenState.ACCEPTED:
-                self.token_state = TokenState.CANDIDATE
-        return token
-
-    async def _async_fetch_token_direct(self) -> Optional[str]:
-        self.debug("Refreshing device token")
-        payload = {
-            "device_id": self.device["quasar_info"]["device_id"],
-            "platform": self.device["quasar_info"]["platform"],
-        }
-        r = await self.session.request_glagol(
-            "https://quasar.yandex.net/glagol/token",
-            role="glagol_token",
-            params=payload,
-        )
-        # @dext0r: fix bug with wrong content-type
-        resp = json.loads(await r.text())
-        token = resp.get("token") if isinstance(resp, dict) else None
-        if not isinstance(token, str) or not token or resp.get("status") != "ok":
-            raise RuntimeError("device_token_unavailable")
-        return token
-
     async def start_or_restart(self):
         if self._stopped:
             return

@@ -1,10 +1,29 @@
 import asyncio
 
+from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import HomeAssistant, State
+from homeassistant.helpers import issue_registry
 
 from custom_components.yandex_station.core.entity import YandexEntity
 from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
 from custom_components.yandex_station.core.yandex_station import YandexStationBase
+
+def core_hass(config_dir) -> HomeAssistant:
+    """Real Core instance across supported constructor signatures."""
+    try:
+        hass = HomeAssistant(str(config_dir))
+    except TypeError:
+        hass = HomeAssistant()
+    hass.config.config_dir = str(config_dir)
+    return hass
+
+
+async def seed_config_entries(hass, records) -> None:
+    """Seed a real ConfigEntries store before Core initialization."""
+    await issue_registry.async_load(hass)
+    hass.config_entries = ConfigEntries(hass, {})
+    await hass.config_entries._store.async_save({"entries": records})
+    await hass.config_entries.async_initialize()
 
 
 class FakeQuasar(YandexQuasar):

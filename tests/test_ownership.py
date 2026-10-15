@@ -6,35 +6,27 @@ import aiohttp
 
 import pytest
 from homeassistant.components import network
-from homeassistant.config_entries import ConfigEntries
-from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import area_registry, device_registry, entity_registry, issue_registry
+from homeassistant.helpers import area_registry, device_registry, entity_registry
 
 from custom_components.yandex_station.core import utils
 from custom_components.yandex_station.core.cache import CacheManager
 from custom_components.yandex_station.core.const import DATA_CONFIG, DATA_SPEAKERS, DOMAIN
 from custom_components.yandex_station.core.lifecycle import get_lifecycle
 from custom_components.yandex_station.core.policy import EntryPolicy, ScenariosState, SendOutcome
-from custom_components.yandex_station.core.yandex_glagol import YandexGlagol
 from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
 from custom_components.yandex_station.core.yandex_session import YandexSession
 from custom_components.yandex_station.core.yandex_station import YandexStation
 from custom_components.yandex_station.hass.hass_utils import (
     async_claim_speaker, async_resolve_speaker_owners, incluce_devices,
 )
+from . import core_hass, seed_config_entries
 from .test_cache import config_entry, device_record
 
 
 @asynccontextmanager
 async def ownership_runtime(tmp_path, *, disabled=()):
-    try:
-        hass = HomeAssistant(str(tmp_path))
-    except TypeError:
-        hass = HomeAssistant()
-    hass.config.config_dir = str(tmp_path)
-    await issue_registry.async_load(hass)
-    hass.config_entries = ConfigEntries(hass, {})
+    hass = core_hass(tmp_path)
     entries = []
     for suffix in ('a', 'b'):
         record = config_entry('entry-' + suffix, 'login-' + suffix).as_dict()
@@ -44,8 +36,7 @@ async def ownership_runtime(tmp_path, *, disabled=()):
             record['disabled_by'] = 'user'
         entries.append(record)
     # Fixture seed only: consumers use real Core entry lookup and registries.
-    await hass.config_entries._store.async_save({'entries': entries})
-    await hass.config_entries.async_initialize()
+    await seed_config_entries(hass, entries)
     if setup_registry := getattr(device_registry, 'async_setup', None):
         setup_registry(hass)
     await device_registry.async_load(hass)
@@ -323,9 +314,8 @@ def test_unassigned_owner_cannot_connect_fetch_tokens_send_or_bypass_yaml_includ
             station = YandexStation(quasar, device)
             await station.init_local_mode()
             assert station.glagol is None and not station.available
-            glagol = YandexGlagol(quasar.session, device, quasar=quasar)
             with pytest.raises(RuntimeError, match='speaker_not_owned'):
-                await glagol.get_device_token()
+                await quasar.async_fetch_device_token(device)
             quasar.policy.force_offline_local = False
             quasar.readiness.scenarios_state = ScenariosState.READY
             device['scenario_id'] = 'synthetic-scenario'

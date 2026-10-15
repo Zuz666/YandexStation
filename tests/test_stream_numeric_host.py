@@ -1,24 +1,15 @@
 import asyncio
 import socket
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from homeassistant.config_entries import ConfigEntries, ConfigEntry
+from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import HomeAssistant
 
 from custom_components.yandex_station.core.lifecycle import get_lifecycle
 from custom_components.yandex_station.core.policy import EntryPolicy
 from custom_components.yandex_station.core.stream import StreamImplementation, get_content_type
-
-
-def config_entry():
-    fields = dict(version=1, domain="yandex_station", title="Synthetic", data={},
-                  source="user", options={}, unique_id="synthetic", entry_id="entry-1")
-    try:
-        return ConfigEntry(**fields, minor_version=1, discovery_keys=MappingProxyType({}),
-                           subentries_data=())
-    except TypeError:
-        return ConfigEntry(**fields)
+from .test_cache import config_entry
 
 
 def test_numeric_ip_like_host_cannot_bypass_actual_offline_connector(tmp_path):
