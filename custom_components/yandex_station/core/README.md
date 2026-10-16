@@ -34,3 +34,10 @@ devices.types.media_device.tv.yandex.magritte
 - `YandexQuasar.cloud_control_ready()` supplies the shared cloud-route predicate; callers retain ownership, stopping and operation-specific admission checks.
 - Account diagnostic sensors share readiness subscriptions, while keeping their individual state projections and registry identities.
 - `LifecycleManager` keeps reload qualification at both admission and execution. Changes to the stable lifecycle module or removed module bindings require an ordinary Core restart.
+
+## Glagol token recovery logs
+
+`glagol_token_rejected` (WARNING) records a confirmed peer CLOSE `4000 / Invalid token`.
+`glagol_token_recovered` (INFO) closes that incident once a state message confirms the current connection's token. Its `elapsed` measures monotonic seconds from the first rejection, including intervening retries. Ordinary connections and subsequent state messages do not emit recovery INFO; stopping the client clears the pending incident.
+
+Both events use the same device identifier and never include token values. Recovery messages require INFO or DEBUG logging; they are hidden at WARNING.

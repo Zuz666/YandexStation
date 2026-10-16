@@ -40,6 +40,7 @@ class YandexGlagol:
         self.quasar = quasar
         self.device_token = token
         self.token_state = TokenState.CANDIDATE if token else TokenState.MISSING
+        self._token_rejected_at: float | None = None
         self.url: Optional[str] = None
         self.ws: Optional[ClientWebSocketResponse] = None
         self.update_handler: Callable = None
@@ -83,6 +84,7 @@ class YandexGlagol:
         """Disable reconnects, cancel and await active tasks, and close the socket."""
         self.debug("Stopping local connection")
         self._stopped = True
+        self._token_rejected_at = None
         self.url = None
         if self._connect_task is not None:
             self._connect_task.cancel()
@@ -111,6 +113,8 @@ class YandexGlagol:
         when cloud access is allowed. Returns the initial failure count for backoff.
         """
         did = self.device.get("quasar_info", {}).get("device_id")
+        if self._token_rejected_at is None:
+            self._token_rejected_at = time.monotonic()
         _LOGGER.warning(
             "glagol_token_rejected: device=%s code=4000", did,
         )
@@ -180,6 +184,13 @@ class YandexGlagol:
                     # Confirmed state message marks the candidate token as accepted
                     if "state" in data and connection_token == self.device_token:
                         self.token_state = TokenState.ACCEPTED
+                        if self._token_rejected_at is not None and ws is self.ws:
+                            _LOGGER.info(
+                                "glagol_token_recovered: device=%s elapsed=%.2fs",
+                                self.device.get("quasar_info", {}).get("device_id"),
+                                time.monotonic() - self._token_rejected_at,
+                            )
+                            self._token_rejected_at = None
 
                     request_id = data.get("requestId")
                     if request_id in self.waiters:

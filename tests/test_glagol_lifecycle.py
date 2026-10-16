@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -116,6 +117,77 @@ def test_invalid_token_close_invalidates_and_refetches_once():
             "glagol-1", "yandexstation", "synthetic-candidate"
         )
         handler.assert_called_with(None)
+
+    asyncio.run(scenario())
+
+
+def test_token_recovery_is_logged_only_after_current_state_once_per_incident(caplog):
+    async def scenario():
+        caplog.set_level(
+            logging.INFO, logger="custom_components.yandex_station.core.yandex_glagol"
+        )
+        glagol, session, _ = make_glagol(None)
+
+        def recovered():
+            return [r for r in caplog.records if r.levelno == logging.INFO]
+
+        async def receive(*messages):
+            session.ws_connect.return_value = FakeWS([*messages, ws_close()])
+            await glagol._connect(0)
+
+        state = ws_text('{"state":{"volume":0.3}}')
+        await receive(state)  # A normal initial connection is not a recovery.
+        assert not recovered()
+
+        for candidate in ("synthetic-replacement-1", "synthetic-replacement-2"):
+            caplog.clear()
+            await receive(ws_close(4000, "Invalid token"))
+            assert glagol.token_state is TokenState.REJECTED
+            glagol.device_token = candidate
+            await receive(ws_text("{bad"), ws_text("[]"), ws_text('{"status":"ok"}'))
+            assert not recovered()  # Fetch/handshake/replies do not prove acceptance.
+            await receive(state, state)
+            assert glagol.token_state is TokenState.ACCEPTED
+            assert len(recovered()) == 1
+            assert recovered()[0].args[0] == "glagol-1"
+            assert recovered()[0].args[1] >= 0
+            await receive(state)  # Neither another state nor reconnect repeats INFO.
+            assert len(recovered()) == 1
+            assert candidate not in caplog.text
+        await glagol.stop()
+
+    asyncio.run(scenario())
+
+
+def test_token_recovery_ignores_superseded_connection_and_is_instance_local(caplog):
+    async def scenario():
+        caplog.set_level(
+            logging.INFO, logger="custom_components.yandex_station.core.yandex_glagol"
+        )
+        glagol, session, _ = make_glagol(FakeWS([]))
+        await glagol._handle_token_rejection(glagol.device_token)
+        glagol.device_token = "synthetic-replacement"
+        other, _, _ = make_glagol(FakeWS([ws_text('{"state":{}}'), ws_close()]))
+        await other._connect(0)
+
+        for superseded in ("token", "socket"):
+            ws = FakeWS([ws_text('{"state":{}}'), ws_close()])
+            session.ws_connect.return_value = ws
+
+            async def supersede(payload):
+                if superseded == "token":
+                    glagol.device_token = "synthetic-newer"
+                else:
+                    glagol.ws = FakeWS([])
+
+            ws.send_json = AsyncMock(side_effect=supersede)
+            await glagol._connect(0)
+        assert not [r for r in caplog.records if r.levelno == logging.INFO]
+        session.ws_connect.return_value = FakeWS([ws_text('{"state":{}}'), ws_close()])
+        await glagol._connect(0)
+        assert len([r for r in caplog.records if r.levelno == logging.INFO]) == 1
+        await glagol.stop()
+        await other.stop()
 
     asyncio.run(scenario())
 
