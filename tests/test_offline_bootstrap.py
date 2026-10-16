@@ -375,3 +375,56 @@ def test_cached_hdmi_state_restores_without_cloud_read(tmp_path, hdmi_audio):
             quasar.get_device_config.assert_not_awaited()
 
     asyncio.run(scenario())
+
+
+def test_cached_auto_setup_publishes_before_equalizer_and_hdmi_cloud_reads(tmp_path):
+    from homeassistant.helpers import device_registry, entity_registry
+    from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
+    from custom_components.yandex_station.core.yandex_station import YandexStation
+    from custom_components.yandex_station.select import YandexEqualizer
+    from .test_cache import device_record
+    from .test_options_and_reauth import core_flow
+    from .test_session_resilience import make_client, make_response
+
+    async def scenario():
+        async with core_flow(tmp_path) as (hass, entry, lifecycle):
+            if setup_registry := getattr(device_registry, "async_setup", None):
+                setup_registry(hass)
+            await device_registry.async_load(hass)
+            await entity_registry.async_load(hass)
+            hass.data[DOMAIN][DATA_SPEAKERS] = {}
+            cache = CacheManager(
+                hass, entry.entry_id, account_login=entry.unique_id,
+                account_uid=entry.data["account_uid"],
+            )
+            await cache.async_save_devices([device_record()])
+            await cache.async_close()
+            client = make_client()
+            client.get = AsyncMock(return_value=make_response(
+                200, json_body={"status": "ok", "quasar_config": {"hdmiAudio": True},
+                                "quasar_config_version": 1},
+                has_json=True,
+            ))
+            consumers = []
+
+            async def publish(current, platforms):
+                quasar = hass.data[DOMAIN][entry.unique_id]
+                station = YandexStation(quasar, quasar.speakers[0])
+                equalizer = YandexEqualizer(quasar, quasar.speakers[0])
+                consumers.extend((station, equalizer))
+                await equalizer.async_update()
+                await station.init_hdmi_audio()
+                assert client.get.await_count == 0
+
+            with patch(
+                "custom_components.yandex_station.core.utils.async_create_clientsession",
+                return_value=client,
+            ), patch.object(
+                hass.config_entries, "async_forward_entry_setups", side_effect=publish,
+            ), patch.object(YandexQuasar, "start"):
+                assert await async_setup_entry(hass, entry)
+            await consumers[1].async_update()
+            assert client.get.await_count == 1
+            await lifecycle.runtimes[entry.entry_id].async_stop()
+
+    asyncio.run(scenario())

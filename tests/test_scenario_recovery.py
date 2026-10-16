@@ -347,14 +347,172 @@ def test_scenario_worker_retries_until_ready_and_finishes():
         original = RecoveryBackoff.next_delay
         RecoveryBackoff.next_delay = lambda self, retry_after=None: 0
         quasar.load_scenarios = flaky_load
-        speaker_resolved = MagicMock(return_value=None)
-        quasar._resolve_speaker_scenario = speaker_resolved
+        def bind_resolve(target, *, allow_creation=True):
+            target["scenario_id"] = "scen_ok"
+
+        quasar._resolve_speaker_scenario = bind_resolve
         try:
             await quasar._scenario_worker()
         finally:
             RecoveryBackoff.next_delay = original
         assert len(attempts) == 2
-        speaker_resolved.assert_called_once_with(speaker)
+        assert speaker["scenario_id"] == "scen_ok"
         assert quasar._scenario_worker_task is None
+
+    asyncio.run(scenario())
+
+
+def test_scenario_worker_keeps_retrying_while_binding_pending_unknown():
+    """Finding 8: pending_unknown must keep the worker armed (delayed visibility)."""
+    async def scenario():
+        from custom_components.yandex_station.core.policy import RecoveryBackoff
+
+        quasar, speaker, cache, session = quasar_with()
+        cache.snapshot.scenario_creation["dev_123"] = {
+            "trigger": encode("dev_123"), "state": SCENARIO_STATE_PENDING,
+        }
+        attempts = []
+
+        async def flaky_load():
+            attempts.append(1)
+            quasar.readiness.scenarios_state = ScenariosState.READY
+            # First pass: the created scenario is not visible in the list yet
+            quasar.scenarios = [] if len(attempts) < 2 else [wire_scenario("scen_late")]
+
+        original = RecoveryBackoff.next_delay
+        RecoveryBackoff.next_delay = lambda self, retry_after=None: 0
+        quasar.load_scenarios = flaky_load
+        try:
+            await quasar._scenario_worker()
+        finally:
+            RecoveryBackoff.next_delay = original
+        assert len(attempts) == 2
+        assert speaker["scenario_id"] == "scen_late"
+        assert quasar._scenario_worker_task is None
+
+    asyncio.run(scenario())
+
+
+def test_scenario_worker_keeps_retrying_while_candidate_detail_unavailable():
+    """Finding 8: an unresolved binding must keep the worker armed."""
+    async def scenario():
+        from custom_components.yandex_station.core.policy import RecoveryBackoff
+
+        quasar, speaker, cache, session = quasar_with()
+        candidate = {"id": "scen_detail", "triggers": [{"value": encode("dev_123")}]}
+        attempts = []
+
+        async def flaky_load():
+            attempts.append(1)
+            quasar.readiness.scenarios_state = ScenariosState.READY
+            quasar.scenarios = [candidate]
+
+        broken = AsyncMock()
+        broken.json = AsyncMock(return_value={"status": "error"})
+        complete = AsyncMock()
+        complete.json = AsyncMock(return_value={
+            "status": "ok", "scenario": wire_scenario("scen_detail"),
+        })
+        responses = [broken, complete]
+
+        async def fetch(url, **kwargs):
+            return responses.pop(0)
+
+        original = RecoveryBackoff.next_delay
+        RecoveryBackoff.next_delay = lambda self, retry_after=None: 0
+        session.get = AsyncMock(side_effect=fetch)
+        quasar.load_scenarios = flaky_load
+        try:
+            await quasar._scenario_worker()
+        finally:
+            RecoveryBackoff.next_delay = original
+        assert len(attempts) == 2
+        assert speaker["scenario_id"] == "scen_detail"
+        assert quasar._scenario_worker_task is None
+
+    asyncio.run(scenario())
+
+
+def test_confirmed_marker_stays_get_only_and_rebinds_when_scenario_becomes_visible():
+    """RFC v2 §5.2.5 (finding 9): confirmed without match repeats GETs only.
+
+    Catalog absence is never proof the scenario is gone, so no automatic
+    re-POST may happen; the worker stays armed until the scenario is
+    visible again and binds it.
+    """
+    async def scenario():
+        from custom_components.yandex_station.core.policy import RecoveryBackoff
+
+        quasar, speaker, cache, session = quasar_with()
+        session.ensure_csrf = AsyncMock(return_value=True)
+        cache.snapshot.scenario_creation["dev_123"] = {
+            "trigger": encode("dev_123"), "state": SCENARIO_STATE_CONFIRMED,
+        }
+        quasar.add_scenario = AsyncMock()
+        attempts = []
+
+        async def flaky_load():
+            attempts.append(1)
+            quasar.readiness.scenarios_state = ScenariosState.READY
+            # Two absent catalogs, then the scenario becomes visible
+            quasar.scenarios = [] if len(attempts) < 3 else [wire_scenario("scen_back")]
+
+        original = RecoveryBackoff.next_delay
+        RecoveryBackoff.next_delay = lambda self, retry_after=None: 0
+        quasar.load_scenarios = flaky_load
+        try:
+            await quasar._scenario_worker()
+        finally:
+            RecoveryBackoff.next_delay = original
+
+        assert len(attempts) == 3
+        quasar.add_scenario.assert_not_called()
+        assert speaker["scenario_id"] == "scen_back"
+        cache.async_save_scenario_marker.assert_called_once_with(
+            "dev_123", encode("dev_123"), SCENARIO_STATE_CONFIRMED
+        )
+
+    asyncio.run(scenario())
+
+
+def test_manual_retry_publishes_final_binding_to_transport_sensor():
+    """Finding 21: manual retry must move the real transport sensor state."""
+    async def scenario():
+        from custom_components.yandex_station.core.policy import (
+            AuthState, DevicesState, Readiness as RealReadiness,
+        )
+        from custom_components.yandex_station.sensor import YandexTransportSensor
+
+        quasar, speaker, cache, session = quasar_with()
+        # Real readiness: bound speaker must project as cloud-controllable
+        quasar.readiness = RealReadiness(
+            auth_state=AuthState.VALID,
+            devices_state=DevicesState.READY,
+            scenarios_state=ScenariosState.READY,
+        )
+        quasar.load_scenarios = AsyncMock(
+            side_effect=lambda: setattr(
+                quasar, "scenarios", [wire_scenario("scen_bound")],
+            )
+        )
+        entry = MagicMock(entry_id="entry-1")
+        sensor = YandexTransportSensor(
+            quasar, entry, speaker,
+        )
+        sensor.hass = MagicMock()
+        writes = []
+        sensor.async_write_ha_state = lambda: writes.append(sensor.native_value)
+        await sensor.async_added_to_hass()
+
+        assert sensor.native_value == "unavailable"  # no binding yet
+        assert writes == []
+
+        result = await quasar.retry_scenario_creation("dev_123", confirm_risk=True)
+
+        assert result == "bound"
+        assert speaker["scenario_id"] == "scen_bound"
+        # The readiness dispatch re-rendered the sensor with the new state
+        assert sensor.native_value == "cloud"
+        assert writes == ["cloud"]
 
     asyncio.run(scenario())

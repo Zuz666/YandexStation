@@ -295,7 +295,7 @@ class LifecycleManager:
                     or name in protected
                     or name in {
                         "async_added_to_hass", "async_will_remove_from_hass",
-                        "async_remove",
+                        "async_remove", "async_stop_local_mode",
                     }
                     or not inspect.iscoroutinefunction(method)
                 ):
@@ -641,6 +641,14 @@ class LifecycleManager:
                     timings_ms=timings,
                 )
             timings["import_ms"] = round((loop.time() - swap_started) * 1000)
+            # Import is the generation commit point: sys.modules now run these
+            # digest-verified sources even if the rebind or a later entry setup
+            # fails, and rollback itself rebinds through sys.modules[_ROOT], so
+            # the binding guard must compare against this generation instead of
+            # the one captured at startup. A failed import keeps the previous
+            # baseline: `imported` is a partial swap no scan describes, and the
+            # runtime is restart_required either way.
+            self._source_baseline = current
 
             previous = old_implementation
             self.context.implementation = None

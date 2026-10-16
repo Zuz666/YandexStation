@@ -172,6 +172,169 @@ def test_stream_rechecks_policy_on_real_get_head_and_hls(tmp_path):
     asyncio.run(scenario())
 
 
+def test_hls_encrypted_key_children_are_signed_and_gated(tmp_path):
+    async def scenario():
+        try:
+            hass = HomeAssistant(str(tmp_path))
+        except TypeError:
+            hass = HomeAssistant()
+        hass.config.config_dir = str(tmp_path)
+        hass.config_entries = ConfigEntries(hass, {})
+        lifecycle = get_lifecycle(hass)
+        context = lifecycle.context
+        # offline policy keeps every child destination on the LAN
+        policy = EntryPolicy(force_offline_local=True)
+        lifecycle.runtimes["entry-1"] = SimpleNamespace(policy=policy, stopping=False)
+        entry = config_entry()
+        seen = []
+        dispatcher = StableStreamDispatcher(context)
+
+        async def media(request):
+            seen.append(request.path)
+            host = request.host
+            if request.path.endswith(".m3u8"):
+                if request.path == "/segextless.m3u8":
+                    # same extensionless URI, but as a plain segment line
+                    body = "#EXTM3U\n/key\n/segment.ts\n"
+                else:
+                    playlists = {
+                        "/enc.m3u8": f'URI="http://{host}/encryption.key"',
+                        # extensionless and unknown-extension key URIs are
+                        # keys, not media segments
+                        "/extless.m3u8": f'URI="http://{host}/key"',
+                        "/bint.m3u8": f'URI="http://{host}/key.bin"',
+                        "/pub.m3u8": 'URI="http://198.51.100.10/encryption.key"',
+                    }
+                    body = (
+                        "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,"
+                        f'{playlists[request.path]}\n/segment.ts\n'
+                    )
+                return web.Response(
+                    text=body, content_type="application/vnd.apple.mpegurl"
+                )
+            if request.path in ("/encryption.key", "/key", "/key.bin"):
+                return web.Response(body=b"0123456789abcdef")
+            if request.path == "/segment.ts":
+                return web.Response(body=b"segment-data")
+            raise AssertionError(f"unexpected media path: {request.path}")
+
+        async def signed_route(request):
+            token, ext = request.match_info["token"], request.match_info["ext"]
+            if request.method == "HEAD":
+                return await dispatcher.head(request, token, ext)
+            return await dispatcher.get(request, token, ext)
+
+        app = web.Application()
+        app.router.add_route("*", "/api/yandex_station/{token}.{ext}", signed_route)
+        app.router.add_route("*", "/{name}", media)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        context.hass_url = f"http://127.0.0.1:{port}"
+        context.implementation = StreamImplementation(context)
+        with patch.object(hass.config_entries, "async_get_entry", return_value=entry):
+            try:
+                async with ClientSession() as client:
+
+                    async def rewritten_key_url(name):
+                        """Fetch a playlist and return its signed key child."""
+                        playlist = get_url(
+                            context, "entry-1", f"{context.hass_url}/{name}.m3u8"
+                        )
+                        async with client.get(playlist) as result:
+                            assert result.status == 200, name
+                            lines = (await result.text()).splitlines()
+                        key_line = next(l for l in lines if l.startswith("#EXT-X-KEY"))
+                        signed_key = key_line.split('URI="', 1)[1].rstrip('"')
+                        assert signed_key.startswith(
+                            f"{context.hass_url}/api/yandex_station/"
+                        )
+                        assert signed_key.endswith(".key")
+                        return lines, signed_key
+
+                    # encrypted loopback playlist plays end to end: the key
+                    # child is rewritten to a signed local resource and the
+                    # bytes stream back as opaque octets
+                    lines, signed_key = await rewritten_key_url("enc")
+                    token = urlsplit(signed_key).path.rsplit("/", 1)[1].rsplit(".", 1)[0]
+                    claims = jwt.decode(token, context.key, algorithms=["HS256"])
+                    assert claims["entry_id"] == "entry-1"
+                    assert claims["lan_only"] is True
+                    assert claims["kind"] == "key"
+                    assert claims["url"] == f"http://127.0.0.1:{port}/encryption.key"
+                    async with client.get(signed_key) as result:
+                        assert result.status == 200
+                        assert await result.read() == b"0123456789abcdef"
+                        assert result.headers["Content-Type"].startswith(
+                            "application/octet-stream"
+                        )
+                    segment = next(l for l in lines if not l.startswith("#"))
+                    async with client.get(segment) as result:
+                        assert result.status == 200
+                        assert await result.read() == b"segment-data"
+
+                    # key URIs without a media extension still proxy as key
+                    # resources when extracted from the EXT-X-KEY tag
+                    for name, upstream in (
+                        ("extless", f"http://127.0.0.1:{port}/key"),
+                        ("bint", f"http://127.0.0.1:{port}/key.bin"),
+                    ):
+                        _, signed = await rewritten_key_url(name)
+                        key_token = urlsplit(signed).path.rsplit("/", 1)[1]
+                        key_token = key_token.rsplit(".", 1)[0]
+                        key_claims = jwt.decode(
+                            key_token, context.key, algorithms=["HS256"]
+                        )
+                        assert key_claims["kind"] == "key"
+                        assert key_claims["url"] == upstream
+                        async with client.get(signed) as result:
+                            assert result.status == 200, name
+                            assert await result.read() == b"0123456789abcdef"
+
+                    # negative security: the same extensionless URI as a
+                    # plain segment line is not a key resource and stays
+                    # blocked - no generic extensionless proxy exists
+                    blocked = get_url(
+                        context, "entry-1", f"{context.hass_url}/segextless.m3u8"
+                    )
+                    async with client.get(blocked) as result:
+                        assert result.status == 403
+
+                    # negative security: a public key host never passes the
+                    # offline LAN gate, whatever the extension
+                    public = get_url(
+                        context, "entry-1", f"{context.hass_url}/pub.m3u8"
+                    )
+                    async with client.get(public) as result:
+                        assert result.status == 403
+
+                    # negative security: a forged kind-less .key token is
+                    # never accepted; key URLs exist only as extracted
+                    # playlist children
+                    forged = jwt.encode(
+                        {"url": f"http://127.0.0.1:{port}/encryption.key",
+                         "entry_id": "entry-1", "lan_only": True,
+                         "exp": int(time.time()) + 60},
+                        context.key, algorithm="HS256")
+                    async with client.get(
+                        f"{context.hass_url}/api/yandex_station/{forged}.key"
+                    ) as result:
+                        assert result.status == 403
+
+                    # the blocked playlist was fetched upstream; denial
+                    # happened at child admission, before any key egress
+                    assert "/segextless.m3u8" in seen and "/pub.m3u8" in seen
+                    assert seen.count("/encryption.key") == 1
+            finally:
+                await context.implementation.async_close()
+                await runner.cleanup()
+                await hass.async_stop()
+
+    asyncio.run(scenario())
+
+
 def test_lan_resolver_rejects_mixed_public_answers(monkeypatch):
     async def scenario():
         loop = asyncio.get_running_loop()

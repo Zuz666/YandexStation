@@ -521,6 +521,73 @@ def test_passport_redirect_chain_validated():
     asyncio.run(scenario())
 
 
+def test_prefixed_passport_base_finish_marker_recognized():
+    async def scenario():
+        # a configured passport base with a path prefix resolves the default
+        # passport origin onto the prefixed mirror; the finish marker must
+        # be recognized relative to that prefix
+        cfg = SessionConfig(passport_base_url="https://passport.yandex.com/prefix")
+
+        # relative finish location on the prefixed mirror base
+        client = make_client(cookie_domains=())
+        session = YandexSession(client, x_token="xtok", config=cfg)
+        client.post = AsyncMock(return_value=exchange_ok())
+
+        def route(url, **kwargs):
+            if "/auth/session" in url:
+                return finish_redirect(location="/auth/finish?uuid=1")
+            if "get_account_config" in url:
+                return make_response(200, json_body={"status": "ok"}, has_json=True)
+            raise AssertionError(f"unexpected destination: {url}")
+
+        client.get = AsyncMock(side_effect=route)
+
+        assert await session.refresh_cookies() is AuthOutcome.AUTHENTICATED
+        # the finish marker itself is never followed with another request
+        assert sum("/auth/finish" in u for u in get_urls(client)) == 0
+
+        # absolute finish location on the default host is swapped onto the
+        # prefixed base and recognized the same way
+        client2 = make_client(cookie_domains=())
+        session2 = YandexSession(client2, x_token="xtok", config=cfg)
+        client2.post = AsyncMock(return_value=exchange_ok())
+
+        def route2(url, **kwargs):
+            if "/auth/session" in url:
+                return finish_redirect(
+                    location="https://passport.yandex.ru/auth/finish?uuid=2"
+                )
+            if "get_account_config" in url:
+                return make_response(200, json_body={"status": "ok"}, has_json=True)
+            raise AssertionError(f"unexpected destination: {url}")
+
+        client2.get = AsyncMock(side_effect=route2)
+
+        assert await session2.refresh_cookies() is AuthOutcome.AUTHENTICATED
+        assert sum("/auth/finish" in u for u in get_urls(client2)) == 0
+
+        # a finish-looking path outside the configured prefix never counts
+        # as the exact marker
+        client3 = make_client(cookie_domains=())
+        session3 = YandexSession(client3, x_token="xtok", config=cfg)
+        client3.post = AsyncMock(return_value=exchange_ok())
+
+        def route3(url, **kwargs):
+            if "/auth/session" in url:
+                return finish_redirect(location="/other/auth/finish?uuid=3")
+            if "/other/auth/finish" in url:
+                # a real finish endpoint answers without another redirect
+                return make_response(200)
+            raise AssertionError(f"unexpected destination: {url}")
+
+        client3.get = AsyncMock(side_effect=route3)
+
+        assert await session3.refresh_cookies() is AuthOutcome.UNAVAILABLE
+        assert any("/other/auth/finish" in u for u in get_urls(client3))
+
+    asyncio.run(scenario())
+
+
 # ---------------------------------------------------------------------------
 # CSRF candidate lifecycle
 # ---------------------------------------------------------------------------
@@ -930,6 +997,80 @@ def test_async_stop_cancels_owned_csrf_fetch():
         # teardown does not block later work on a fresh lifecycle
         with pytest.raises(asyncio.CancelledError):
             await caller
+
+    asyncio.run(scenario())
+
+
+def test_csrf_state_changes_notify_readiness_listener():
+    async def scenario():
+        client = make_client(cookie_domains=())
+        cfg = SessionConfig(csrf_endpoints=["https://yandex.ru/iot"])
+        session = YandexSession(client, config=cfg)
+        events = []
+        session.add_readiness_listener(
+            lambda: events.append(str(session.readiness.csrf_state))
+        )
+
+        # successful pass: UNKNOWN -> CANDIDATE is a delivered state change
+        client.get = AsyncMock(return_value=csrf_page("candidate_1"))
+        assert await session.ensure_csrf() == "candidate_1"
+        assert events == ["candidate"]
+
+        # a same-state refresh publishes nothing: state change, not every frame
+        session._apply_csrf_candidate("candidate_1b")
+        assert session.readiness.csrf_state == CsrfState.CANDIDATE
+        assert events == ["candidate"]
+
+        # stale drop then failed pass: exactly one CANDIDATE -> UNAVAILABLE
+        session._csrf_obtained_at = time.monotonic() - (CSRF_FRESH_SECS + 60)
+        client.get = AsyncMock(return_value=make_response(500))
+        assert await session.ensure_csrf() is None
+        assert events == ["candidate", "unavailable"]
+
+        # repeated failed passes never republish the same state
+        session._csrf_retry_at = 0.0
+        client.get = AsyncMock(return_value=make_response(500))
+        assert await session.ensure_csrf() is None
+        assert events == ["candidate", "unavailable"]
+
+        # 403 invalidation of the live candidate publishes the transition
+        session._csrf_retry_at = 0.0
+        client.get = AsyncMock(return_value=csrf_page("candidate_2"))
+        assert await session.ensure_csrf() == "candidate_2"
+        client.put = AsyncMock(return_value=captured_forbidden())
+        with pytest.raises(CloudRequestError):
+            await session.put(SCENARIO_PUT_URL, role="quasar", json={"scenario": {}})
+        assert events == ["candidate", "unavailable", "candidate", "unavailable"]
+
+    asyncio.run(scenario())
+
+
+def test_readiness_listener_failures_and_unsubscribe_are_isolated():
+    async def scenario():
+        client = make_client(cookie_domains=())
+        cfg = SessionConfig(csrf_endpoints=["https://yandex.ru/iot"])
+        session = YandexSession(client, config=cfg)
+        events = []
+        unsubscribe = session.add_readiness_listener(lambda: events.append(1))
+
+        def broken_listener():
+            raise RuntimeError("listener teardown bug")
+
+        session.add_readiness_listener(broken_listener)
+
+        # a broken listener never breaks the shared fetch pass
+        client.get = AsyncMock(return_value=csrf_page("candidate_1"))
+        assert await session.ensure_csrf() == "candidate_1"
+        assert events == [1]
+
+        # unsubscribed listeners receive nothing afterwards; the still
+        # registered broken listener must stay swallowed
+        unsubscribe()
+        session._csrf_retry_at = 0.0
+        session._csrf_obtained_at = time.monotonic() - (CSRF_FRESH_SECS + 60)
+        client.get = AsyncMock(return_value=make_response(500))
+        assert await session.ensure_csrf() is None
+        assert events == [1]
 
     asyncio.run(scenario())
 

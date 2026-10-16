@@ -300,6 +300,14 @@ class YandexQuasar(Dispatcher):
         self.policy = policy or getattr(session, "policy", None) or EntryPolicy()
         self.readiness = readiness or getattr(session, "readiness", None) or Readiness()
         self.cache_manager = cache_manager
+        self._session_readiness_unsub = None
+        # Session readiness transitions (e.g. CSRF) publish through the shared
+        # dispatcher without polling; mock or absent sessions never fire.
+        add_listener = getattr(self.session, "add_readiness_listener", None)
+        if add_listener is not None:
+            self._session_readiness_unsub = add_listener(
+                lambda: self.dispatch_update("readiness", {})
+            )
         self.devices = []
         self.scenarios = None
         self.device_tokens = {}
@@ -498,6 +506,10 @@ class YandexQuasar(Dispatcher):
             await self.cache_manager.async_save_devices(
                 devices, account_uid=self.session.account_uid
             )
+            snapshot = self.cache_manager.snapshot
+            if snapshot is not None:
+                # Publish the fresh Store timestamp to readiness subscribers
+                self.readiness.last_snapshot_at = snapshot.updated_at
         self.readiness.auth_state = AuthState.VALID
         self.readiness.devices_state = DevicesState.READY
         self.readiness.inventory_source = "cloud"
@@ -775,6 +787,9 @@ class YandexQuasar(Dispatcher):
             self.scenarios = self.scenarios if self.scenarios is not None else []
             await self._resolve_speaker_scenario(speaker, allow_creation=False)
             if speaker.get("scenario_id"):
+                # The binding change must reach readiness subscribers (transport
+                # sensor) without waiting for an unrelated signal
+                self.dispatch_update("readiness", {})
                 return "bound"
             if speaker.get("scenario_unresolved"):
                 raise RuntimeError("scenario_conflict")
@@ -801,6 +816,7 @@ class YandexQuasar(Dispatcher):
                     device_id,
                 )
                 raise
+            self.dispatch_update("readiness", {})
             return "created"
     async def load_speaker_config(self, device: dict):
         """Fetch speaker `device_id` and `platform` when omitted from the device list."""
@@ -859,11 +875,12 @@ class YandexQuasar(Dispatcher):
             while not self.stopping:
                 await self.load_scenarios()
                 state = self.readiness.scenarios_state
-                if state == ScenariosState.READY:
-                    await self.load_speakers()
-                    return
                 if state == ScenariosState.DISABLED:
                     return
+                if state == ScenariosState.READY:
+                    await self.load_speakers()
+                    if self._scenario_reconciliation_complete():
+                        return
                 delay = backoff.next_delay(self.session.retry_after.get("quasar"))
                 _LOGGER.debug("Scenario worker retry in %.1fs", delay)
                 await asyncio.sleep(delay)
@@ -875,16 +892,28 @@ class YandexQuasar(Dispatcher):
             if self._scenario_worker_task is current:
                 self._scenario_worker_task = None
 
+    def _scenario_reconciliation_complete(self) -> bool:
+        """True when every owned speaker holds an executable binding.
+
+        Unbound speakers keep the worker armed (RFC v2 §5.2): pending_unknown
+        and confirmed markers reconcile through GETs only — catalog absence
+        never proves the scenario gone — and unresolved candidates may
+        recover once their details become fetchable.
+        """
+        return all(speaker.get("scenario_id") for speaker in self.owned_speakers)
+
     def _schedule_history(self):
-        """Schedule a tracked voice-trigger history check when cloud is active."""
+        """Schedule a tracked voice-trigger history check when scenarios are active."""
         if self.stopping or not (
             self.policy.effective_cloud_allowed
+            and self.policy.enable_scenarios
             and not self.policy.effective_use_cached_devices
         ):
             return
         task = asyncio.create_task(self.get_voice_trigger(3))
         self._history_tasks.add(task)
         task.add_done_callback(self._history_tasks.discard)
+
     async def update_scenario(self, name: str):
         # check if we known scenario name
         sid = next((i["id"] for i in self.scenarios if i["name"] == name), None)
@@ -1025,6 +1054,9 @@ class YandexQuasar(Dispatcher):
                 self.scenarios = None
                 self.readiness.scenarios_state = ScenariosState.UNAVAILABLE
                 self.dispatch_update("readiness", {})
+                # Stale binding: re-arm GET reconciliation (RFC v2 §5.2) to
+                # rebind or keep polling; the user's command is never replayed
+                self._ensure_scenario_worker()
             outcome = (
                 SendOutcome.UNKNOWN_OUTCOME if action_dispatched else SendOutcome.UNAVAILABLE
             )
@@ -1293,6 +1325,7 @@ class YandexQuasar(Dispatcher):
     async def get_voice_trigger(self, retries: int = 0):
         if self.stopping or not (
             self.policy.effective_cloud_allowed
+            and self.policy.enable_scenarios
             and not self.policy.effective_use_cached_devices
         ):
             return
@@ -1375,7 +1408,7 @@ class YandexQuasar(Dispatcher):
         """Start post-publication cloud recovery and optional cloud WebSocket updates."""
         if not self.policy.effective_cloud_allowed or self.stopping:
             return
-        if self._recovery_task is None:
+        if self._recovery_task is None or self._recovery_task.done():
             self._recovery_task = asyncio.create_task(
                 self._async_recover_after_publication()
             )
@@ -1383,49 +1416,49 @@ class YandexQuasar(Dispatcher):
             self.updates_task = asyncio.create_task(self.run_forever())
 
     async def _async_recover_after_publication(self):
-        """Run post-publication cloud sync, scenario worker, and missing token fetches.
+        """Recover inventory and tokens independently; never replay user commands."""
+        backoff = RecoveryBackoff()
+        inventory_pending = not self.policy.effective_use_cached_devices
+        first_pass = True
+        self._ensure_scenario_worker()
+        while not self.stopping and self.policy.effective_cloud_allowed:
+            if inventory_pending:
+                try:
+                    if not await self._sync_cloud_devices():
+                        return  # Membership changed: ordinary entry reload owns publication.
+                    inventory_pending = False
+                except Exception as error:
+                    _LOGGER.debug("Inventory recovery: %s", safe_error_summary(error))
 
-        If device membership changed, an ordinary reload has already been scheduled
-        and this task exits without replacing active consumers.
-        """
-        try:
-            if not self.policy.effective_use_cached_devices:
-                if not await self._sync_cloud_devices():
-                    return
-            if self.stopping:
-                return
-            # Scenario worker runs with its own backoff and exits once reconciled
-            self._ensure_scenario_worker()
-            if any(
-                getattr(s.get("entity"), "local_state", False) is None
-                for s in self.owned_speakers
-            ):
-                await self.update_online_stats()
-            if self.stopping:
-                return
-            # Single-flight token fetch only for speakers without a known token
+            tokens_pending = False
             for speaker in self.owned_speakers + self.owned_modules:
-                info = speaker["quasar_info"]
-                if info["device_id"] in self.device_tokens:
-                    continue
-                token = await self.async_fetch_device_token(speaker)
                 if self.stopping:
                     return
+                info = speaker["quasar_info"]
+                token = self.device_tokens.get(info["device_id"], {}).get(info["platform"])
+                initialize = first_pass
+                if not token:
+                    try:
+                        token = await self.async_fetch_device_token(speaker)
+                        initialize = initialize or bool(token)
+                    except Exception as error:
+                        _LOGGER.debug("Token recovery: %s", safe_error_summary(error))
+                    tokens_pending |= not bool(token)
                 entity = speaker.get("entity")
-                if token and entity is not None and getattr(entity, "hass", None):
+                if initialize and entity is not None and getattr(entity, "hass", None):
                     try:
                         await entity.init_local_mode()
-                    except Exception as e:
-                        _LOGGER.debug(
-                            "Local reconnect after token fetch failed: %s",
-                            type(e).__name__,
-                        )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            _LOGGER.warning(
-                "Recovery after publication failed: %s", safe_error_summary(e)
-            )
+                    except Exception as error:
+                        _LOGGER.debug("Local recovery: %s", safe_error_summary(error))
+            first_pass = False
+            if not inventory_pending and not tokens_pending:
+                break
+            await asyncio.sleep(backoff.next_delay(self.session.retry_after.get("quasar")))
+        if not self.stopping and any(
+            getattr(s.get("entity"), "local_state", False) is None
+            for s in self.owned_speakers
+        ):
+            await self.update_online_stats()
 
     def async_fetch_device_token(self, device: dict) -> asyncio.Task:
         """Fetch a Glagol device token using a single-flight task per speaker."""
@@ -1465,6 +1498,15 @@ class YandexQuasar(Dispatcher):
     async def async_stop(self):
         """Cancel and await background tasks and Glagol connections (RFC v2 §2.3, §7.3)."""
         self.stopping = True
+        # Detach the session readiness listener before any teardown so a
+        # producer transition cannot dispatch into removed consumers
+        unsubscribe = self._session_readiness_unsub
+        self._session_readiness_unsub = None
+        if unsubscribe is not None:
+            try:
+                unsubscribe()
+            except Exception:
+                pass
         if self._cloud_check_task is not None:
             self._cloud_check_task.cancel()
             await asyncio.gather(self._cloud_check_task, return_exceptions=True)
@@ -1505,11 +1547,11 @@ class YandexQuasar(Dispatcher):
 
         for speaker in self.speakers + self.modules:
             entity = speaker.get("entity")
-            if entity and getattr(entity, "glagol", None):
+            if entity:
                 try:
-                    await entity.glagol.stop()
-                except Exception:
-                    pass
+                    await entity.async_stop_local_mode()
+                except Exception as error:
+                    _LOGGER.debug("Local teardown: %s", safe_error_summary(error))
 
         await self.session.async_stop()
         if self.cache_manager:

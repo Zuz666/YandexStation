@@ -6,7 +6,7 @@ import pickle
 import re
 import time
 from enum import Enum
-from typing import Awaitable
+from typing import Awaitable, Callable
 from urllib.parse import urljoin, urlsplit
 
 from aiohttp import (
@@ -383,6 +383,8 @@ class YandexSession(BasicSession):
         self._last_request_ts = 0.0
         self._last_good_probe_url = None
         self._update_listeners = []
+        # sync readiness transition listeners; fired only on state changes
+        self._readiness_listeners: list[Callable[[], None]] = []
 
         setattr(session.cookie_jar, "_quote_cookie", False)
 
@@ -409,6 +411,8 @@ class YandexSession(BasicSession):
         """
         task = self._csrf_fetch_task
         self._csrf_fetch_task = None
+        # teardown detaches every readiness listener with the entry
+        self._readiness_listeners.clear()
         if task is None or task.done():
             return
         task.cancel()
@@ -604,12 +608,20 @@ class YandexSession(BasicSession):
 
         Every Location is resolved and validated as a passport credential
         destination before anything is followed; success requires the exact
-        ``/auth/finish`` path on a validated target, so a foreign host
-        offering ``/auth/finish`` never counts. The secret ``track_id`` is
-        sent only to the first verified destination.
+        ``/auth/finish`` path - at the origin root or relative to the
+        configured passport base prefix - on a validated target, so a
+        foreign host offering ``/auth/finish`` never counts. The secret
+        ``track_id`` is sent only to the first verified destination.
         """
         url: str | None = f"{host.rstrip('/')}/auth/session/"
         sent_track = False
+        # Relative redirect targets resolve against the origin root, but a
+        # target on the default passport host is swapped onto the configured
+        # base, carrying its path prefix; both finish forms are the marker.
+        base_path = urlsplit(self.config.passport_base_url).path.rstrip("/")
+        finish_paths = {"/auth/finish"}
+        if base_path:
+            finish_paths.add(base_path + "/auth/finish")
 
         for hop in range(MAX_AUTH_REDIRECTS + 1):
             resolved = self.config.resolve_url(url, "passport")
@@ -633,7 +645,7 @@ class YandexSession(BasicSession):
             except ValueError as err:
                 _LOGGER.warning("Passport redirect blocked: reason=%s", safe_error_summary(err))
                 return False
-            if urlsplit(target_resolved).path == "/auth/finish":
+            if urlsplit(target_resolved).path in finish_paths:
                 return True
             if hop == MAX_AUTH_REDIRECTS:
                 return False
@@ -836,7 +848,7 @@ class YandexSession(BasicSession):
                 return self.csrf_token
             # proactive window passed: drop the opaque candidate first
             self.csrf_token = None
-            self.readiness.csrf_state = CsrfState.UNAVAILABLE
+            self._set_csrf_state(CsrfState.UNAVAILABLE)
 
         if time.monotonic() < self._csrf_retry_at:
             # cooldown: no fetch and no queue; commands finish unavailable
@@ -874,7 +886,7 @@ class YandexSession(BasicSession):
             time.monotonic()
             + self._csrf_backoff.next_delay(self.retry_after.get("csrf")),
         )
-        self.readiness.csrf_state = CsrfState.UNAVAILABLE
+        self._set_csrf_state(CsrfState.UNAVAILABLE)
         _LOGGER.debug(
             "CSRF unavailable: retry_in=%.1fs",
             max(0.0, self._csrf_retry_at - time.monotonic()),
@@ -890,7 +902,7 @@ class YandexSession(BasicSession):
         self.csrf_token = token
         self._csrf_generation += 1
         self._csrf_obtained_at = time.monotonic()
-        self.readiness.csrf_state = CsrfState.CANDIDATE
+        self._set_csrf_state(CsrfState.CANDIDATE)
         self.retry_after.pop("csrf", None)
 
     def _csrf_invalidate_current(
@@ -908,11 +920,42 @@ class YandexSession(BasicSession):
         if self.csrf_token != sent_token or self._csrf_generation != sent_generation:
             return
         self.csrf_token = None
-        self.readiness.csrf_state = CsrfState.UNAVAILABLE
+        self._set_csrf_state(CsrfState.UNAVAILABLE)
         self._csrf_retry_at = max(
             self._csrf_retry_at,
             time.monotonic() + self._csrf_backoff.next_delay(retry_after),
         )
+
+    def add_readiness_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Register a sync listener fired on readiness state transitions.
+
+        Duplicate callbacks register once; the returned closure removes the
+        listener again. Listeners run inline in the mutating coroutine, so
+        they must not block; a failing listener is logged and never breaks
+        the shared single-flight pass.
+        """
+        if callback not in self._readiness_listeners:
+            self._readiness_listeners.append(callback)
+
+        def remove_listener() -> None:
+            if callback in self._readiness_listeners:
+                self._readiness_listeners.remove(callback)
+
+        return remove_listener
+
+    def _set_csrf_state(self, state: CsrfState) -> None:
+        """Assign csrf_state and publish only real transitions."""
+        if self.readiness.csrf_state == state:
+            return
+        self.readiness.csrf_state = state
+        for callback in list(self._readiness_listeners):
+            try:
+                callback()
+            except Exception as error:
+                _LOGGER.debug(
+                    "Readiness listener failed: reason=%s",
+                    safe_error_summary(error),
+                )
 
     def _csrf_confirm_current(self, sent_token: str, sent_generation: int) -> None:
         """Only success of a still-live token+generation pair resets the chain."""

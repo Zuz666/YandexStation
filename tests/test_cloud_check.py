@@ -214,3 +214,53 @@ def test_cloud_check_distinguishes_blocked_destination_from_invalid_response():
         await quasar.async_stop()
 
     asyncio.run(scenario())
+
+
+def test_cloud_ws_scenario_history_skipped_when_scenarios_option_disabled():
+    """Finding 10: enable_scenarios=False must suppress scenario history HTTP."""
+    async def scenario():
+        processed = asyncio.Event()
+
+        class Socket:
+            closed = False
+
+            def __aiter__(self):
+                return self.messages()
+
+            async def messages(self):
+                yield WSMessage(WSMsgType.TEXT, '{"operation":"ping"}', "")
+                yield WSMessage(
+                    WSMsgType.TEXT,
+                    '{"operation":"update_scenario_list","message":"{\\"source\\":\\"create_scenario_launch\\"}"}',
+                    "",
+                )
+                processed.set()
+                await asyncio.Event().wait()
+
+            async def close(self):
+                self.closed = True
+
+        socket = Socket()
+        client = make_client()
+        client.get = AsyncMock(return_value=make_response(200, has_json=True, json_body={
+            "status": "ok", "households": [], "updates_url": "wss://push.yandex.ru/update",
+        }))
+        client.ws_connect = AsyncMock(return_value=socket)
+        quasar = YandexQuasar(
+            YandexSession(client), policy=EntryPolicy(enable_scenarios=False)
+        )
+        connection = asyncio.create_task(quasar.connect())
+        try:
+            await asyncio.wait_for(processed.wait(), 2)
+            # Let any wrongly scheduled history task run before asserting
+            await asyncio.sleep(0.05)
+            assert client.get.await_count == 1  # inventory only, no scenario HTTP
+            await quasar.get_voice_trigger(3)
+            assert client.get.await_count == 1
+        finally:
+            connection.cancel()
+            await asyncio.gather(connection, return_exceptions=True)
+            await quasar.async_stop()
+        assert socket.closed
+
+    asyncio.run(scenario())

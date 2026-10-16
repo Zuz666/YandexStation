@@ -102,6 +102,11 @@ class YandexStationLocalConnection(BinarySensorEntity):
         self.async_on_remove(
             self.quasar.subscribe_update(f"{self._did}_glagol", self._on_glagol_update)
         )
+        self.async_on_remove(
+            self.quasar.subscribe_update(
+                f"{self._did}_glagol_firmware", self._on_firmware_update
+            )
+        )
 
     def _on_glagol_update(self, data: dict | None):
         if data and "state" in data:
@@ -111,6 +116,12 @@ class YandexStationLocalConnection(BinarySensorEntity):
             self._last_heartbeat = dt_util.utcnow().isoformat()
         else:
             self._attr_is_on = False
+        if self.hass:
+            self.async_write_ha_state()
+
+    def _on_firmware_update(self, data: dict):
+        """Firmware-only update: connectivity and heartbeat stay untouched."""
+        self._software_version = data.get("softwareVersion")
         if self.hass:
             self.async_write_ha_state()
 

@@ -266,6 +266,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                     raise ConfigEntryNotReady(safe_error_summary(error)) from error
             finally:
                 lifecycle.finish_bootstrap(entry.entry_id)
+            # Platform initialization must not delay cached publication with cloud IO.
+            yandex.cloud_ready = False
             if yandex.readiness.auth_state == AuthState.REAUTH_REQUIRED:
                 entry.async_start_reauth(hass)
             await hass_utils.load_fake_devies(hass, quasar)
@@ -293,6 +295,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 quasar.platforms = platforms = _platforms(lifecycle, False)
             # Set up all platforms before starting background cloud recovery and token fetch
             await hass.config_entries.async_forward_entry_setups(entry, platforms)
+            yandex.cloud_ready = True
             if policy.effective_cloud_allowed:
                 quasar.start()
             return True
@@ -400,6 +403,16 @@ async def _init_local_discovery(hass: HomeAssistant):
     await hass.async_add_executor_job(listener.start, zeroconf)
 
 
+_ENTITY_TARGET_FIELDS = ("entity_id", "device_id", "area_id", "floor_id", "label_id")
+
+
+def _remove_entity_target_fields(call: ServiceCall) -> dict:
+    """Strip target fields; native helper fallback for cores before HA 2023.7."""
+    if remove := getattr(service, "remove_entity_service_fields", None):
+        return remove(call)
+    return {k: v for k, v in call.data.items() if k not in _ENTITY_TARGET_FIELDS}
+
+
 async def _init_services(hass: HomeAssistant):
     """Init Yandex Station TTS service."""
     lifecycle = get_lifecycle(hass)
@@ -438,7 +451,7 @@ async def _init_services(hass: HomeAssistant):
                 or not entity.glagol
             ):
                 continue
-            data = service.remove_entity_service_fields(call)
+            data = _remove_entity_target_fields(call)
             data.setdefault("command", "sendText")
             if external := data.get("external"):
                 data = utils.external_command(**external)

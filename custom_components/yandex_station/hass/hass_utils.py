@@ -355,8 +355,41 @@ async def async_claimable_speakers(hass, entry) -> dict[str, str]:
     return {did: device["name"] for did, device in records.items()}
 
 
+_CLAIM_DIAGNOSTIC_SUFFIXES = {
+    "sensor": ("transport", "alice_state"),
+    "binary_sensor": ("local_connection",),
+}
+
+
+def _claim_diagnostic_ids(hass, entry, glagol_id, entities) -> dict[str, str]:
+    """Plan a collision-free identity transfer before any registry mutation."""
+    registry = er.async_get(hass)
+    updates = {}
+    for domain, suffixes in _CLAIM_DIAGNOSTIC_SUFFIXES.items():
+        for suffix in suffixes:
+            target = f"{entry.entry_id}_{glagol_id}_{suffix}"
+            sources = [
+                entity for entity in entities
+                if entity.domain == domain and entity.unique_id in (
+                    f"{glagol_id}_{suffix}",
+                    f"{entity.config_entry_id}_{glagol_id}_{suffix}",
+                )
+            ]
+            occupied = registry.async_get_entity_id(domain, DOMAIN, target)
+            if len(sources) > 1 or (
+                sources and occupied not in (None, sources[0].entity_id)
+            ) or (
+                occupied and registry.async_get(occupied).config_entry_id != entry.entry_id
+                and not sources
+            ):
+                raise ValueError("ownership_conflict")
+            if sources and sources[0].unique_id != target:
+                updates[sources[0].entity_id] = target
+    return updates
+
+
 async def async_claim_speaker(hass, entry, glagol_id: str) -> None:
-    """Explicitly transfer registry ownership without copying account state."""
+    """Explicitly transfer ownership and scoped diagnostic IDs, not account state."""
     lifecycle = get_lifecycle(hass)
     async with lifecycle.consumer():
         async with lifecycle.ownership_lock:
@@ -390,11 +423,14 @@ async def async_claim_speaker(hass, entry, glagol_id: str) -> None:
                     old_runtime is not None and not old_runtime.stopping
                 ):
                     raise ValueError("ownership_conflict")
+            diagnostic_ids = _claim_diagnostic_ids(hass, entry, glagol_id, entities)
             if not lifecycle.request_entry_reload(entry.entry_id):
                 raise RuntimeError("reload_in_progress")
             registry = er.async_get(hass)
             for entity in entities:
                 updates = {}
+                if entity.entity_id in diagnostic_ids:
+                    updates["new_unique_id"] = diagnostic_ids[entity.entity_id]
                 if entity.config_entry_id != entry.entry_id:
                     updates["config_entry_id"] = entry.entry_id
                 if device is not None and entity.device_id != device.id:

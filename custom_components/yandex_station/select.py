@@ -102,6 +102,8 @@ class YandexEqualizer(SelectEntity):
             self._attr_available = False
             self._attr_should_poll = False
             return
+        if getattr(self.quasar.session, "cloud_ready", True) is False:
+            return
         try:
             config, _ = await self.quasar.get_device_config(self.device)
             if eq := config.get("equalizer"):
