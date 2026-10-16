@@ -156,6 +156,16 @@ def test_disabled_owner_is_taken_over_automatically_preserving_entity_id_and_met
             _, lyrics = register_speaker(hass, entries['a'], domain='camera', suffix='_lyrics')
             area = area_registry.async_get(hass).async_create('Preserved area')
             registry = entity_registry.async_get(hass)
+            transport = registry.async_get_or_create(
+                'sensor', DOMAIN, 'entry-a_shared-local_transport',
+                config_entry=entries['a'], device_id=device.id,
+                suggested_object_id='preserved_transport',
+            )
+            local = registry.async_get_or_create(
+                'binary_sensor', DOMAIN, 'entry-a_shared-local_local_connection',
+                config_entry=entries['a'], device_id=device.id,
+                suggested_object_id='preserved_local',
+            )
             registry.async_update_entity(
                 media.entity_id, name='User speaker name', area_id=area.id,
                 disabled_by=entity_registry.RegistryEntryDisabler.USER,
@@ -176,6 +186,17 @@ def test_disabled_owner_is_taken_over_automatically_preserving_entity_id_and_met
             assert updated.disabled_by == entity_registry.RegistryEntryDisabler.USER
             assert registry.async_get(lyrics.entity_id).unique_id == lyrics.unique_id
             assert registry.async_get(lyrics.entity_id).config_entry_id == 'entry-b'
+            assert registry.async_get(transport.entity_id).unique_id == 'entry-b_shared-local_transport'
+            assert registry.async_get(transport.entity_id).config_entry_id == 'entry-b'
+            assert registry.async_get(local.entity_id).unique_id == 'entry-b_shared-local_local_connection'
+            assert registry.async_get(local.entity_id).config_entry_id == 'entry-b'
+            from custom_components.yandex_station import binary_sensor, sensor
+            b.policy.enable_diagnostic_sensors = True
+            added_sensors, added_binary = [], []
+            await sensor.async_setup_entry(hass, entries['b'], added_sensors.extend)
+            await binary_sensor.async_setup_entry(hass, entries['b'], added_binary.extend)
+            assert any(e.unique_id == 'entry-b_shared-local_transport' for e in added_sensors)
+            assert any(e.unique_id == 'entry-b_shared-local_local_connection' for e in added_binary)
             updated_device = device_registry.async_get(hass).async_get(device.id)
             assert updated_device.name_by_user == 'User device name'
             assert updated_device.area_id == area.id
