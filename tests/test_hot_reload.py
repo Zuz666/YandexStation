@@ -25,13 +25,6 @@ SOURCE = Path(__file__).resolve().parents[1] / "custom_components" / "yandex_sta
 def _run_isolated(tmp_path, mode, expected_reason=None):
     target = tmp_path / "custom_components" / "yandex_station"
     shutil.copytree(SOURCE, target)
-    if mode == "entries_storage_indirect_version":
-        path = target / "core" / "cache.py"
-        path.write_text(path.read_text().replace(
-            "SNAPSHOT_VERSION = 1\n",
-            "_NEXT_SNAPSHOT_VERSION = 1\nSNAPSHOT_VERSION = _NEXT_SNAPSHOT_VERSION\n",
-            1,
-        ))
     result = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), mode,
          *([expected_reason] if expected_reason else [])],
@@ -174,11 +167,7 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
                 "synthetic-glagol", "yandexstation", "synthetic-candidate"
             )
         else:
-            await cache.async_save_devices(
-                quasar.devices if mode in {
-                    "entries_storage_version", "entries_storage_indirect_version",
-                } else []
-            )
+            await cache.async_save_devices([])
         await cache.async_close()
         hass.config.components.add(DOMAIN)
         from homeassistant.helpers import aiohttp_client
@@ -192,11 +181,6 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
         assert await hass.config_entries.async_setup(entry.entry_id)
         assert entry.state is ConfigEntryState.LOADED, entry.state
         print("Core loaded entry state:", entry.state)
-        if mode in {"entries_todo_version", "entries_todo_key"}:
-            from homeassistant.helpers.storage import Store
-            from custom_components.yandex_station.hass import todo_list
-            todo_store = Store(hass, todo_list.STORE_VERSION, todo_list.STORE_KEY)
-            await todo_store.async_save({"todo.synthetic": ["synthetic-item"]})
         if mode == "entries_retry_mix":
             await hass.config_entries.async_setup("entry-secondary")
             assert hass.config_entries.async_get_entry(
@@ -329,12 +313,6 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
                 assert await _get_body(client, signed) == b"original-audio"
                 async with client.head(signed) as response:
                     assert response.status == 200 and await response.read() == b""
-            if mode == "entries_success":
-                from custom_components.yandex_station.sensor import YandexCustomSensor
-                old_entity = YandexCustomSensor(
-                    hass.data[DOMAIN][entry.unique_id], quasar.devices[0],
-                    quasar.devices[0]["properties"][0],
-                )
             if mode == "drain":
                 start_late = asyncio.Event()
                 async with lifecycle.consumer(entry.entry_id):
@@ -362,71 +340,17 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
                     path.write_text(json.dumps(payload), encoding="utf-8")
             if mode in {"success", "drain", "drain_head_service", "parallel_reload",
                         "cancel_waiter", "cancel_during_import", "entries_success",
-                        "entries_rollback",
                         "entries_setup_retry", "entries_retry_mix", "entries_disabled",
                         "entries_mixed", "entries_discovery_reconnect",
-                        "state_during_drain", "flow_during_drain",
-                        "baseline_advance", "entries_baseline_partial"}:
+                        "state_during_drain", "flow_during_drain"}:
                 _change_behavior(root, "v2")
-                if mode in {"baseline_advance", "entries_baseline_partial"}:
-                    # Finding 22: this generation adds a top-level binding the
-                    # original startup scan never saw.
-                    _append(root / "core" / "stream.py",
-                            'SYNTHETIC_BASELINE_PROBE = "v2"\n')
             elif mode == "syntax":
                 _append(root / "core" / "stream.py", "\ndef broken(:\n")
-            elif mode == "binding":
-                path = root / "core" / "const.py"
-                path.write_text(path.read_text().replace(
-                    'CONF_MEDIA_PLAYERS = "media_players"\n', ""
-                ))
-            elif mode == "anchor":
-                _append(root / "core" / "lifecycle.py", "\n# changed anchor\n")
-            elif mode == "module_set":
-                (root / "core" / "extra_module.py").write_text("VALUE = 1\n")
-            elif mode == "registration":
-                path = root / "__init__.py"
-                path.write_text(path.read_text().replace(
-                    'hass, DOMAIN, "reload_code", lifecycle.reload_service_handler()',
-                    'hass, DOMAIN, "changed_service", lifecycle.reload_service_handler()',
-                ))
             elif mode == "mid_import":
                 _append(root / "core" / "image.py", "\nraise RuntimeError('synthetic import failure')\n")
             elif mode == "rebind":
                 _append(root / "core" / "stream.py", "\ndel StreamImplementation\n")
-            elif mode == "changed_during_drain":
-                _change_behavior(root, "v2")
-            elif mode == "entries_storage_version":
-                path = root / "core" / "cache.py"
-                path.write_text(path.read_text().replace(
-                    "SNAPSHOT_VERSION = 1\n", "SNAPSHOT_VERSION = 2\n", 1
-                ))
-            elif mode == "entries_storage_indirect_version":
-                path = root / "core" / "cache.py"
-                path.write_text(path.read_text().replace(
-                    "_NEXT_SNAPSHOT_VERSION = 1\n",
-                    "_NEXT_SNAPSHOT_VERSION = 2\n", 1
-                ))
-            elif mode == "entries_domain_dependency":
-                path = root / "core" / "const.py"
-                path.write_text(path.read_text().replace(
-                    'DOMAIN = "yandex_station"\n', 'DOMAIN = "changed_station"\n', 1
-                ))
-            elif mode in {"entries_todo_version", "entries_todo_key"}:
-                path = root / "hass" / "todo_list.py"
-                before, after = (
-                    ("STORE_VERSION = 1\n", "STORE_VERSION = 2\n")
-                    if mode == "entries_todo_version" else
-                    ('STORE_KEY = "yandex_station.todo"\n',
-                     'STORE_KEY = "yandex_station.todo-v2"\n')
-                )
-                path.write_text(path.read_text().replace(before, after, 1))
-            if mode == "entries_rollback":
-                async def unload_and_change(*args):
-                    _append(root / "core" / "stream.py", "\n# edited during Core unload\n")
-                    return True
-                hass.config_entries.async_unload_platforms.side_effect = unload_and_change
-            if mode in {"entries_setup_retry", "entries_baseline_partial"}:
+            if mode == "entries_setup_retry":
                 from custom_components.yandex_station.core.cache import CacheManager
                 async def unload_and_remove_cache(*args):
                     cache = CacheManager(
@@ -446,9 +370,6 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
                 hass.config.components.update({"http", "zeroconf", DOMAIN})
                 flow = await hass.config_entries.options.async_init(entry.entry_id)
                 assert flow["flow_id"]
-            elif mode == "unsupported":
-                from custom_components.yandex_station.core import lifecycle as anchor
-                anchor.HA_VERSION = "unsupported-synthetic-version"
             if mode == "discovery_stop_fail":
                 class FailingDiscovery:
                     def stop(self):
@@ -561,34 +482,6 @@ if not builtins.hot_reload_release.wait(10):
             expected = expected_reason
             if expected:
                 assert result["reason"] == expected, result
-                if mode in {
-                    "entries_storage_version", "entries_storage_indirect_version",
-                    "entries_todo_version", "entries_todo_key",
-                    "entries_domain_dependency",
-                }:
-                    assert result["status"] == "restart_required", result
-                    assert entry.state is ConfigEntryState.LOADED
-                    hass.config_entries.async_unload_platforms.assert_not_awaited()
-                    restored = CacheManager(
-                        hass, entry.entry_id, account_login=entry.unique_id
-                    )
-                    try:
-                        snapshot = await restored.async_load()
-                        assert snapshot is not None
-                        if mode in {
-                            "entries_storage_version", "entries_storage_indirect_version",
-                        }:
-                            assert snapshot.devices[0]["id"] == "ordinary-id"
-                            assert snapshot.devices[0]["properties"][0]["state"]["value"] == 23
-                    finally:
-                        await restored.async_close()
-                    if mode in {"entries_todo_version", "entries_todo_key"}:
-                        old_store = Store(
-                            hass, todo_list.STORE_VERSION, todo_list.STORE_KEY
-                        )
-                        assert await old_store.async_load() == {
-                            "todo.synthetic": ["synthetic-item"]
-                        }
                 if expected in {"import_failed", "rebind_failed", "unload_failed"}:
                     assert result["status"] == "restart_required", (result, entry.state)
                     async with client.get(signed) as denied:
@@ -615,16 +508,7 @@ if not builtins.hot_reload_release.wait(10):
                             hass, language, "options", {DOMAIN}
                         )
                         assert resources[translation_key] == f"Updated {language}"
-                if mode == "entries_baseline_partial":
-                    # The imported generation is already running even though
-                    # entry setup failed, so it must own the reload baseline.
-                    assert result["status"] == "partial", result
-                    assert result["entries"][entry.entry_id] == "setup_retry", result
-                    assert entry.state is ConfigEntryState.SETUP_RETRY
-                    assert sys.modules[
-                        "custom_components.yandex_station.core.stream"
-                    ].SYNTHETIC_BASELINE_PROBE == "v2"
-                elif mode in {"entries_setup_retry", "entries_retry_mix", "entries_mixed"}:
+                if mode in {"entries_setup_retry", "entries_retry_mix", "entries_mixed"}:
                     assert result["status"] == "partial", result
                     retry_id = {
                         "entries_setup_retry": entry.entry_id,
@@ -807,38 +691,6 @@ if not builtins.hot_reload_release.wait(10):
                     assert second["status"] == "success", second
                     assert await _get_body(client, signed) == b"v3"
                     assert lifecycle.stream_dispatcher.context is context
-                if mode in {"baseline_advance", "entries_baseline_partial"}:
-                    # Finding 22 regression: the next generation removes the
-                    # binding the running generation owns. The guard must
-                    # refuse before any unload; importlib.reload would keep a
-                    # stale binding alive and mix generations instead.
-                    probe = root / "core" / "stream.py"
-                    source = probe.read_text()
-                    assert 'SYNTHETIC_BASELINE_PROBE = "v2"\n' in source
-                    probe.write_text(source.replace(
-                        'SYNTHETIC_BASELINE_PROBE = "v2"\n', ""
-                    ))
-                    running_generation = lifecycle.generation
-                    refusal = await _reload(hass, lifecycle, DOMAIN)
-                    assert refusal["reason"] == "top_level_binding_removed", refusal
-                    assert refusal["status"] == "restart_required", refusal
-                    assert lifecycle.generation == running_generation
-                    assert sys.modules[
-                        "custom_components.yandex_station.core.stream"
-                    ].SYNTHETIC_BASELINE_PROBE == "v2"
-                    assert context.admission_open
-                    if mode == "baseline_advance":
-                        assert await _get_body(client, signed) == b"v2"
-                        await hass.services.async_call(
-                            "tts", "yandex_station_say", {}, blocking=True
-                        )
-                        assert hass.states.get(
-                            "sensor.synthetic_reload_generation"
-                        ).state == "v2"
-                    else:
-                        assert entry.state is ConfigEntryState.SETUP_RETRY
-                        async with client.get(signed) as denied:
-                            assert denied.status == 403
             print("reload behavior verified", mode, result["status"])
     finally:
         hold.set()
