@@ -723,6 +723,25 @@ def test_captured_put_403_refreshes_csrf_and_retries_once():
         assert session.csrf_token is None
         assert session._csrf_retry_at > time.monotonic()
 
+        # Case 4: other plain-text 403 body or non-exact MIME -> neither refetch nor replay
+        for headers, body in (
+            ({"Content-Type": "text/plain; charset=utf-8"}, "Access denied\n"),
+            ({"Content-Type": "text/plain-custom"}, "Forbidden\n"),
+        ):
+            session._csrf_retry_at = 0.0
+            await prime_csrf(session, client, "candidate_5")
+            client.get = AsyncMock(return_value=csrf_page("candidate_6"))
+            other_403 = make_response(403, text=body, headers=headers)
+            client.put = AsyncMock(return_value=other_403)
+            session._last_request_ts = 0.0
+            with pytest.raises(CloudRequestError) as exc3:
+                await session.put(SCENARIO_PUT_URL, role="quasar", json={"scenario": {}})
+            assert exc3.value.status == 403
+            assert client.get.call_count == 0
+            assert client.put.call_count == 1
+            assert session.csrf_token is None
+            assert session._csrf_retry_at > time.monotonic()
+
     asyncio.run(scenario())
 
 

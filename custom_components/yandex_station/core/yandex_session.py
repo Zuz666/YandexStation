@@ -1015,6 +1015,24 @@ class YandexSession(BasicSession):
         return await self.request("put", url, role=role, **kwargs)
 
     @staticmethod
+    async def _is_boundary_csrf_403(response: ClientResponse) -> bool:
+        """Match the exact text/plain 'Forbidden\\n' CSRF filter response before release."""
+        mime = (
+            (response.headers.get("Content-Type") or "")
+            .partition(";")[0]
+            .strip()
+            .lower()
+        )
+        if mime != "text/plain":
+            return False
+        try:
+            if int(response.headers.get("Content-Length") or 10) > 64:
+                return False
+            return (await response.text()) == "Forbidden\n"
+        except Exception:
+            return False
+
+    @staticmethod
     def _check_ws_handshake(role: str, kwargs: dict) -> None:
         """Cloud account credentials stay off websocket headers."""
         credential_header = BasicSession._has_credentials(kwargs)
@@ -1090,12 +1108,15 @@ class YandexSession(BasicSession):
             self.retry_after.pop(role, None)
             return r
 
+        boundary_403 = (
+            r.status == 403
+            and sent_token is not None
+            and await self._is_boundary_csrf_403(r)
+        )
         self._record_http_failure(role, r)
 
         if r.status == 403 and sent_token is not None:
             retry_after = self.retry_after.get(role)
-            ctype = (r.headers.get("Content-Type") or "").lower()
-            boundary_403 = ctype.startswith("text/plain")
             invalidated = self._csrf_invalidate_current(
                 sent_token,
                 sent_generation,
