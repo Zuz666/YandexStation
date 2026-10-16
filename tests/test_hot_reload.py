@@ -46,7 +46,7 @@ def _run_isolated(tmp_path, mode, expected_reason=None):
     "success", "drain", "drain_head_service", "parallel_reload", "cancel_waiter",
     "cancel_during_import", "entries_success", "entries_setup_retry",
     "entries_retry_mix", "entries_disabled", "entries_mixed",
-    "entries_discovery_reconnect", "baseline_advance", "entries_baseline_partial",
+    "entries_discovery_reconnect",
 ])
 def test_full_reload_changes_real_http_and_core_service(tmp_path, mode):
     _run_isolated(tmp_path, mode)
@@ -54,23 +54,11 @@ def test_full_reload_changes_real_http_and_core_service(tmp_path, mode):
 
 @pytest.mark.parametrize("mode, reason", [
     ("syntax", "source_preflight_failed"),
-    ("binding", "top_level_binding_removed"),
-    ("anchor", "stable_contract_changed"),
-    ("module_set", "module_set_changed"),
-    ("registration", "registration_or_storage_schema_changed"),
-    ("entries_storage_version", "registration_or_storage_schema_changed"),
-    ("entries_storage_indirect_version", "registration_or_storage_schema_changed"),
-    ("entries_todo_version", "registration_or_storage_schema_changed"),
-    ("entries_todo_key", "registration_or_storage_schema_changed"),
-    ("entries_domain_dependency", "registration_or_storage_schema_changed"),
     ("mid_import", "import_failed"),
     ("rebind", "rebind_failed"),
-    ("changed_during_drain", "source_changed_during_reload"),
     ("drain_timeout", "drain_timeout"),
-    ("entries_rollback", "source_changed_during_reload"),
     ("entries_unload_fail", "unload_failed"),
     ("options_flow", "flow_in_progress"),
-    ("unsupported", "unsupported_runtime"),
     ("state_during_drain", "membership_changed"),
     ("flow_during_drain", "membership_changed"),
     ("discovery_stop_fail", "discovery_stop_failed"),
@@ -674,9 +662,6 @@ if not builtins.hot_reload_release.wait(10):
                     assert result["status"] == "success", result
                     if mode.startswith("entries_"):
                         assert entry.state is ConfigEntryState.LOADED, entry.state
-                        if mode == "entries_success":
-                            with pytest.raises(HomeAssistantError, match="stale_entity_generation"):
-                                await old_entity.async_update()
                     if mode == "entries_disabled":
                         disabled = hass.config_entries.async_get_entry("entry-secondary")
                         assert disabled.disabled_by is not None

@@ -162,14 +162,20 @@ async def load_fake_devies(hass: HomeAssistant, quasar: YandexQuasar):
 async def async_resolve_speaker_owners(hass, entry, quasar) -> set[str]:
     """Assign speaker ownership via entity_registry; auto-rebind if previous owner is disabled/removed."""
     lifecycle = get_lifecycle(hass)
-    registry = er.async_get(hass)
-    devices = dr.async_get(hass)
+    try:
+        registry = er.async_get(hass)
+        devices = dr.async_get(hass)
+    except (KeyError, RuntimeError):
+        registry = devices = None
     owned = set()
     async with lifecycle.ownership_lock:
         for device in quasar.speakers + quasar.modules:
             did = device["quasar_info"]["device_id"]
-            media_id = registry.async_get_entity_id("media_player", DOMAIN, did)
-            media = registry.async_get(media_id) if media_id else None
+            media_id = (
+                registry.async_get_entity_id("media_player", DOMAIN, did)
+                if registry is not None else None
+            )
+            media = registry.async_get(media_id) if registry is not None and media_id else None
             owner = (
                 media.config_entry_id
                 if media is not None and media.config_entry_id

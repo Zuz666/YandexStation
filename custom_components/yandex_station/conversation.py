@@ -11,7 +11,6 @@ from homeassistant.helpers.intent import IntentResponse, IntentResponseErrorCode
 from homeassistant.util import ulid
 
 from .core.const import DOMAIN
-from .core.lifecycle import guard_quasar_entity
 from .core.yandex_quasar import YandexQuasar
 from .core.yandex_station import YandexStation
 from .hass import hass_utils
@@ -45,7 +44,6 @@ class YandexConversation(ConversationEntity):
             name=self.device["name"],
         )
 
-        guard_quasar_entity(quasar, self)
 
     @property
     def supported_languages(self) -> list[str]:

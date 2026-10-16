@@ -36,7 +36,7 @@ from homeassistant.util import slugify
 
 from . import stream, utils
 from .const import DATA_CONFIG, DOMAIN
-from .lifecycle import get_lifecycle, guard_quasar_entity
+from .lifecycle import get_lifecycle
 from .quasar_info import QUASAR_INFO, is_tv
 from .yandex_glagol import YandexGlagol
 from .yandex_music import get_file_info
@@ -234,7 +234,6 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             self._apply_hdmi_audio(device["hdmi_audio"])
 
         self.async_on_remove(quasar.subscribe_update(device["id"], self.on_update))
-        guard_quasar_entity(quasar, self)
 
     def _media_stream_context(self):
         cache = self.quasar.cache_manager
