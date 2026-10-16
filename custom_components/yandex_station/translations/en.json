@@ -82,7 +82,8 @@
       "init": {
         "title": "Yandex.Station Settings",
         "menu_options": {
-          "settings": "Integration settings and modes",
+          "settings": "Settings and modes",
+          "api_urls": "API URLs",
           "devices": "Import Yandex Smart Home devices",
           "recovery": "Diagnostics and recovery",
           "reauth": "Reauthenticate (Reauth)"
@@ -121,13 +122,19 @@
         }
       },
       "settings": {
-        "title": "Integration settings and modes",
-        "description": "Manage offline modes and resilience policy. A custom API base URL changes the trusted endpoint for its role, but never forwards OAuth, Passport track IDs, or expanded cookie scopes to an untrusted origin. YAML ssl: false still disables TLS certificate verification, including for diagnostic MiTM proxies; cookies, tokens, and commands are then exposed to the proxy.",
+        "title": "Settings and modes",
+        "description": "Manage offline modes, cached devices, scenarios, and diagnostic sensors for this account. Service addresses are configured separately under API URLs.",
         "data": {
           "force_offline_local": "Force offline mode (local control only)",
           "use_cached_devices": "Use cached devices only",
           "enable_scenarios": "Enable scenario integration",
-          "enable_diagnostic_sensors": "Enable connectivity and status diagnostic sensors",
+          "enable_diagnostic_sensors": "Enable connectivity and status diagnostic sensors"
+        }
+      },
+      "api_urls": {
+        "title": "API URLs",
+        "description": "Configure service addresses and fallback lists for this account. A custom API base URL changes the endpoint for its role, but never forwards OAuth, Passport track IDs, or expanded cookie scopes to an untrusted origin. YAML ssl: false still disables TLS certificate verification, including for diagnostic MiTM proxies; cookies, tokens, and commands are then exposed to the proxy.",
+        "data": {
           "quasar_base_url": "Quasar API base URL",
           "account_base_url": "Account base URL",
           "passport_base_url": "Passport base URL",
