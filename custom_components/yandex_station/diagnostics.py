@@ -1,6 +1,7 @@
 """Safe account and device diagnostics: structured metadata, never raw responses."""
 
 from datetime import datetime, timezone
+import time
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -99,13 +100,21 @@ def _timestamp(value):
 
 def _runtime_health(runtime, snapshot):
     """Allowlisted operational metadata shared with the passive health screen."""
-    credentials = runtime.session.credential_metadata()
+    session = runtime.session
+    jar = getattr(getattr(session, "_session", None), "cookie_jar", None)
+    obtained = getattr(session, "_csrf_obtained_at", None)
+    csrf_present = getattr(session, "csrf_token", None) is not None
     tokens = {
-        key: value if type(value := credentials.get(key)) is bool else None
-        for key in ("cookies_present", "x_token_present", "music_token_present", "csrf_present")
+        "cookies_present": bool(jar and any(jar)),
+        "x_token_present": bool(getattr(session, "x_token", None)),
+        "music_token_present": bool(getattr(session, "music_token", None)),
+        "csrf_present": csrf_present,
+        "csrf_age_seconds": (
+            max(0, int(time.monotonic() - obtained))
+            if csrf_present and isinstance(obtained, (int, float))
+            else None
+        ),
     }
-    age = credentials.get("csrf_age_seconds")
-    tokens["csrf_age_seconds"] = age if type(age) is int and age >= 0 else None
     local_tokens = {
         "cached_candidates": 0, "cached_rejected": 0,
         "missing": 0, "candidate": 0, "accepted": 0, "rejected": 0,

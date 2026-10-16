@@ -292,29 +292,38 @@ class YandexInventorySourceSensor(YandexAccountReadinessSensor):
         }
 
 
-class YandexAliceStateSensor(SensorEntity):
-    """Diagnostic sensor reporting speaker Alice voice state."""
+class YandexSpeakerDiagnosticSensor(SensorEntity):
+    """Base class for non-polling speaker diagnostic sensors."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_should_poll = False
-    _attr_translation_key = "alice_state"
-    _attr_entity_registry_enabled_default = False
     _attr_has_entity_name = True
-    _attr_icon = "mdi:microphone"
+    _unique_id_suffix: str
 
     def __init__(self, quasar: YandexQuasar, entry, device: dict):
         self.quasar = quasar
         self.device = device
         did = device.get("quasar_info", {}).get("device_id") or device.get("id")
         self._did = did
-        self._attr_unique_id = f"{entry.entry_id}_{did}_alice_state"
+        self._attr_unique_id = f"{entry.entry_id}_{did}_{self._unique_id_suffix}"
         self.entity_id = f"sensor.yandex_station_{slugify(self._attr_unique_id)}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, did)},
             name=device["name"],
         )
+
+
+class YandexAliceStateSensor(YandexSpeakerDiagnosticSensor):
+    """Diagnostic sensor reporting speaker Alice voice state."""
+
+    _attr_translation_key = "alice_state"
+    _attr_entity_registry_enabled_default = False
+    _attr_icon = "mdi:microphone"
+    _unique_id_suffix = "alice_state"
+
+    def __init__(self, quasar: YandexQuasar, entry, device: dict):
+        super().__init__(quasar, entry, device)
         self._state = None
-        # Subscribe only after HA has added the entity.
 
     async def async_added_to_hass(self):
         entity = self.device.get("entity")
@@ -337,27 +346,12 @@ class YandexAliceStateSensor(SensorEntity):
         return self._state.lower() if isinstance(self._state, str) else None
 
 
-class YandexTransportSensor(SensorEntity):
+class YandexTransportSensor(YandexSpeakerDiagnosticSensor):
     """Diagnostic sensor reporting current control transport for a speaker (local / cloud / unavailable)."""
 
-    _attr_should_poll = False
     _attr_translation_key = "transport"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_has_entity_name = True
     _attr_icon = "mdi:transit-connection-variant"
-
-    def __init__(self, quasar: YandexQuasar, entry, device: dict):
-        self.quasar = quasar
-        self.device = device
-        did = device.get("quasar_info", {}).get("device_id") or device.get("id")
-        self._did = did
-        self._attr_unique_id = f"{entry.entry_id}_{did}_transport"
-        self.entity_id = f"sensor.yandex_station_{slugify(self._attr_unique_id)}"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, did)},
-            name=device["name"],
-        )
-
+    _unique_id_suffix = "transport"
     async def async_added_to_hass(self):
         self.async_on_remove(
             self.quasar.subscribe_update(f"{self._did}_glagol", lambda _: self._on_update())
