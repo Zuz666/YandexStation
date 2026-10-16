@@ -4,7 +4,6 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo, Entity
 
 from .const import DOMAIN
-from .lifecycle import guard_quasar_entity
 from .yandex_quasar import YandexQuasar
 
 _LOGGER = logging.getLogger(__name__)
@@ -81,7 +80,6 @@ class YandexEntity(Entity):
             _LOGGER.error("Device init failed", exc_info=e)
 
         self.async_on_remove(self.quasar.subscribe_update(device["id"], self.on_update))
-        guard_quasar_entity(quasar, self)
 
     def on_update(self, device: dict):
         if getattr(self.quasar, "fresh_device_ids", None) is not None:

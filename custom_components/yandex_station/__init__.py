@@ -141,7 +141,6 @@ async def async_setup(hass: HomeAssistant, hass_config: dict):
     config: dict = hass_config.get(DOMAIN) or {}
     lifecycle = get_lifecycle(hass)
     hass.data[DOMAIN][DATA_CONFIG] = config
-    await lifecycle.async_capture_baseline(hass)
     hass.data[DOMAIN].setdefault(DATA_SPEAKERS, {})
     context = lifecycle.context
     try:

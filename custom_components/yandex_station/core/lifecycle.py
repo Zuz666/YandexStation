@@ -28,13 +28,16 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 _ROOT = "custom_components.yandex_station"
-_PINNED_CORES = frozenset({
-    ("2023.2.0", (3, 10, 7)),
-    ("2026.6.1", (3, 14, 5)),
-    ("2026.9.4", (3, 14, 6)),
-    ("2026.10.1", (3, 14, 6)),
-})
-
+_RELOAD_ORDER = (
+    "core.const", "core.policy", "core.protobuf", "core.quasar_info", "core.image",
+    "core.cache", "core.utils", "core.stream", "core.yandex_music",
+    "core.yandex_session", "core.yandex_glagol", "core.yandex_quasar",
+    "core.entity", "hass.shopping_list", "hass.todo_list", "core.yandex_station",
+    "hass.hass_utils", "binary_sensor", "button", "calendar", "camera", "climate",
+    "conversation", "cover", "diagnostics", "fan", "humidifier", "light", "lock",
+    "media_player", "notify", "number", "remote", "select", "sensor", "switch",
+    "system_health", "text", "vacuum", "water_heater", "config_flow", "",
+)
 
 
 @dataclass
@@ -115,7 +118,6 @@ class LifecycleManager:
         self.setup_reasons: dict[str, str] = {}
         self.ownership_lock = asyncio.Lock()
         self.speaker_owners: dict[str, str] = {}
-        self.ownership_conflicts: dict[str, set[str]] = {}
         self.service_targets: dict[str, Any] = {}
         self._service_handlers: dict[str, Any] = {}
         self.active_consumers = 0
@@ -132,7 +134,6 @@ class LifecycleManager:
         self._internal_capability = None
         self._internal_entry_id = None
         self._stopping = False
-        self._source_baseline: dict | None = None
         self._reload_task: asyncio.Task | None = None
         self.last_reload_result: dict[str, Any] | None = None
         self.generation = 0
@@ -282,35 +283,6 @@ class LifecycleManager:
             if not self.active_consumers:
                 self._consumers_drained.set()
 
-    def guard_entity(self, entity, entry_id: str) -> None:
-        """Fence old entity methods and account for async HA entrypoints."""
-        generation = self.generation
-        protected = set()
-        for cls in type(entity).__mro__:
-            if not cls.__module__.startswith(_ROOT):
-                continue
-            for name, method in cls.__dict__.items():
-                if (
-                    not (name.startswith("async_") or name.startswith("handle_async_"))
-                    or name in protected
-                    or name in {
-                        "async_added_to_hass", "async_will_remove_from_hass",
-                        "async_remove", "async_stop_local_mode",
-                    }
-                    or not inspect.iscoroutinefunction(method)
-                ):
-                    continue
-                protected.add(name)
-                original = getattr(entity, name)
-
-                async def guarded(*args, _original=original, **kwargs):
-                    if generation != self.generation:
-                        raise HomeAssistantError("stale_entity_generation")
-                    async with self.consumer(entry_id):
-                        return await _original(*args, **kwargs)
-
-                setattr(entity, name, guarded)
-
     def bind_service(self, name: str, target):
         """Registered handler stays stable; only the reloadable target changes."""
         self.service_targets[name] = target
@@ -381,17 +353,12 @@ class LifecycleManager:
             self.context.implementation = None
 
     @staticmethod
-    def _scan_sources() -> dict:
-        planner = importlib.import_module(_ROOT + ".core.reload_plan")
-        return planner.scan(Path(__file__).resolve().parents[1])
-
-    async def async_capture_baseline(self, hass: HomeAssistant) -> None:
-        """Capture the running version's contracts at ordinary Core startup."""
-        if self._source_baseline is None:
-            self._source_baseline = await hass.async_add_executor_job(
-                self._scan_sources
-            )
-
+    def _compile_sources() -> None:
+        root = Path(__file__).resolve().parents[1]
+        for path in sorted(root.rglob("*.py")):
+            if path.name == "lifecycle.py" and path.parent.name == "core":
+                continue
+            compile(path.read_text(encoding="utf-8"), str(path), "exec")
     def account_reload_service_handler(self):
         async def handle(call):
             entry_id = call.data["entry_id"]
@@ -469,10 +436,6 @@ class LifecycleManager:
         """Runtime qualification shared by admission and post-consumer stages."""
         if self.context is None or self.context.implementation is None:
             return self._refuse("runtime_not_initialized", status="restart_required")
-        if (HA_VERSION, sys.version_info[:3]) not in _PINNED_CORES:
-            return self._refuse("unsupported_runtime")
-        if self._source_baseline is None:
-            return self._refuse("baseline_missing", status="restart_required")
         return None
 
     async def async_hot_reload(
@@ -543,16 +506,12 @@ class LifecycleManager:
                 return self._refuse("flow_in_progress")
 
             try:
-                current = await self.hass.async_add_executor_job(self._scan_sources)
-                planner = importlib.import_module(_ROOT + ".core.reload_plan")
-                reason = planner.compare(self._source_baseline, current)
+                await self.hass.async_add_executor_job(self._compile_sources)
             except (OSError, SyntaxError, ValueError) as error:
                 _LOGGER.warning("Reload preflight rejected: %s", type(error).__name__)
                 return self._refuse(
                     "source_preflight_failed", status="restart_required"
                 )
-            if reason:
-                return self._refuse(reason, status="restart_required")
             if not self._membership_valid(expected_states, domain_entry_ids) or self.entry_ids:
                 return self._refuse("membership_changed")
             timings["preflight_ms"] = round((loop.time() - started) * 1000)
@@ -610,25 +569,13 @@ class LifecycleManager:
                 return await self._async_rollback(
                     unloaded, "membership_changed", timings
                 )
-            planner = importlib.import_module(_ROOT + ".core.reload_plan")
-            try:
-                unchanged = await self.hass.async_add_executor_job(
-                    planner.unchanged, current
-                )
-            except OSError:
-                unchanged = False
-            if not unchanged:
-                return await self._async_rollback(
-                    unloaded, "source_changed_during_reload", timings
-                )
 
             old_implementation = self.context.implementation
             swap_started = loop.time()
             imported = []
             try:
                 await self.hass.async_add_executor_job(
-                    self._reload_sources, current, imported,
-                    self.conversation_available,
+                    self._reload_sources, imported, self.conversation_available
                 )
             except Exception as error:
                 _LOGGER.error("Reload import failed: %s", type(error).__name__)
@@ -641,14 +588,6 @@ class LifecycleManager:
                     timings_ms=timings,
                 )
             timings["import_ms"] = round((loop.time() - swap_started) * 1000)
-            # Import is the generation commit point: sys.modules now run these
-            # digest-verified sources even if the rebind or a later entry setup
-            # fails, and rollback itself rebinds through sys.modules[_ROOT], so
-            # the binding guard must compare against this generation instead of
-            # the one captured at startup. A failed import keeps the previous
-            # baseline: `imported` is a partial swap no scan describes, and the
-            # runtime is restart_required either way.
-            self._source_baseline = current
 
             previous = old_implementation
             self.context.implementation = None
@@ -720,27 +659,16 @@ class LifecycleManager:
             )
 
     @staticmethod
-    def _reload_sources(
-        inventory: dict, imported: list[str], conversation_available: bool
-    ) -> None:
-        planner = importlib.import_module(_ROOT + ".core.reload_plan")
-        for name in inventory["order"]:
-            if name == __name__:
+    def _reload_sources(imported: list[str], conversation_available: bool) -> None:
+        for suffix in _RELOAD_ORDER:
+            if suffix == "conversation" and not conversation_available:
                 continue
-            if name == _ROOT + ".conversation" and not conversation_available:
-                continue
-            record = inventory["modules"][name]
-            from hashlib import sha256
-            if sha256(Path(record["path"]).read_bytes()).hexdigest() != record["digest"]:
-                raise RuntimeError("source_changed_during_import")
+            name = f"{_ROOT}.{suffix}" if suffix else _ROOT
             if name in sys.modules:
                 importlib.reload(sys.modules[name])
             else:
                 importlib.import_module(name)
             imported.append(name)
-        if not planner.unchanged(inventory):
-            raise RuntimeError("source_changed_during_import")
-
     async def _async_rollback(
         self, unloaded: list[str], reason: str, timings: dict,
         unsafe: bool = False,
@@ -789,10 +717,3 @@ def get_lifecycle(hass: HomeAssistant) -> LifecycleManager:
         data["lifecycle"] = LifecycleManager(StreamContext(hass=hass))
     return data["lifecycle"]
 
-
-def guard_quasar_entity(quasar, entity) -> None:
-    """Connect a newly constructed entity to its owning stable Core manager."""
-    cache = getattr(quasar, "cache_manager", None)
-    cache_hass = getattr(cache, "hass", None)
-    if isinstance(cache_hass, HomeAssistant):
-        get_lifecycle(cache_hass).guard_entity(entity, cache.entry_id)

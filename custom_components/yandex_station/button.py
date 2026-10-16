@@ -63,7 +63,6 @@ class YandexAccountButton(ButtonEntity):
             None if command == "check_cloud" else ButtonDeviceClass.RESTART
         )
         self._attr_icon = "mdi:cloud-check" if command == "check_cloud" else "mdi:reload"
-        self._lifecycle.guard_entity(self, entry.entry_id)
 
     @property
     def available(self) -> bool:
@@ -72,18 +71,18 @@ class YandexAccountButton(ButtonEntity):
         return not self.quasar.stopping and self._lifecycle.entry_enabled(self.entry)
 
     async def async_press(self) -> None:
-        if self.command == "check_cloud":
-            result = await self.quasar.async_check_cloud()
-            if result["status"] != "ok":
-                raise HomeAssistantError("check_cloud: " + result["reason"])
-            return
-        data = {"entry_id": self.entry.entry_id} if self.command == "reload_account" else {}
-        # Keep the original user context: an entity-control permission is not
-        # permission to reload integration code or another account.
-        await self.hass.services.async_call(
-            DOMAIN, self.command, data, blocking=True, context=self._context
-        )
-
+        async with self._lifecycle.consumer(self.entry.entry_id):
+            if self.command == "check_cloud":
+                result = await self.quasar.async_check_cloud()
+                if result["status"] != "ok":
+                    raise HomeAssistantError("check_cloud: " + result["reason"])
+                return
+            data = {"entry_id": self.entry.entry_id} if self.command == "reload_account" else {}
+            # Keep the original user context: an entity-control permission is not
+            # permission to reload integration code or another account.
+            await self.hass.services.async_call(
+                DOMAIN, self.command, data, blocking=True, context=self._context
+            )
 
 # noinspection PyAbstractClass
 class YandexCustomButton(ButtonEntity, YandexCustomEntity):

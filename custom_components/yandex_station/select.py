@@ -6,7 +6,6 @@ from homeassistant.util import slugify
 
 from .core.const import DOMAIN
 from .core.entity import YandexCustomEntity, extract_instance
-from .core.lifecycle import guard_quasar_entity
 from .core.yandex_quasar import YandexQuasar
 from .hass import hass_utils
 
@@ -95,7 +94,6 @@ class YandexEqualizer(SelectEntity):
         self._attr_unique_id = device["quasar_info"]["device_id"] + f"_equalizer"
 
         self.entity_id = f"select.yandex_station_{slugify(self._attr_unique_id)}"
-        guard_quasar_entity(quasar, self)
 
     async def async_update(self):
         if not self.quasar.policy.effective_cloud_allowed:
