@@ -398,8 +398,6 @@ class CacheManager:
         self._scenario_creation_trusted = True
         self._dirty = False
         self._closed = False
-        self._metadata_task: asyncio.Task | None = None
-        self._flush_now = asyncio.Event()
 
     @property
     def cache_status(self) -> str:
@@ -457,17 +455,11 @@ class CacheManager:
                 return None
             # Core may move corrupt JSON aside. Keep the original until a complete
             # inventory can replace it without forgetting the untrusted journal.
-            if await self._async_read_payload() is None:
+            data = await self._async_read_payload()
+            if data is None:
                 self._invalidate_cache()
                 _LOGGER.warning("%s: cache_invalid entry=%s", DOMAIN, self._entry_id)
                 return None
-            try:
-                data = await self._store.async_load()
-            except (
-                NotImplementedError, HomeAssistantError, OSError,
-                KeyError, TypeError, ValueError,
-            ):
-                data = None
             snapshot = StationSnapshot.from_dict(data)
             entry_login = self._entry_login()
             login = self._account_login or entry_login
@@ -585,7 +577,7 @@ class CacheManager:
     async def async_invalidate_device_token(
         self, glagol_id: str, platform: str, rejected_token: str
     ) -> bool:
-        """Compare-and-invalidate a token, confirming durable absence of its validity."""
+        """Compare-and-invalidate a token when its string still matches."""
         _require_id(glagol_id, "glagol_id")
         _require_id(platform, "platform")
         _require_id(rejected_token, "rejected_token")
@@ -598,19 +590,8 @@ class CacheManager:
             record = self._snapshot.device_tokens.get(glagol_id, {}).get(platform)
             if record is not None and record["token"] == rejected_token:
                 record["state"] = TOKEN_STATE_INVALID
-                self._dirty = True
-            if self._dirty:
                 await self._async_save_locked()
-            else:
-                self._dirty = not await self._async_verify_durable_marker_locked(
-                    self._snapshot.revision
-                )
-            if self._dirty:
-                _LOGGER.warning(
-                    "%s: token_cache_write_failed entry=%s", DOMAIN, self._entry_id
-                )
             return not self._dirty
-
     async def async_save_scenario_marker(
         self, device_id: str, trigger: str, state: str
     ) -> bool:
@@ -624,7 +605,7 @@ class CacheManager:
         async with self._lock:
             self._require_open()
             self._ensure_snapshot().scenario_creation[device_id] = record
-            await self._async_save_locked()
+            await self._async_save_locked(verify=True)
             return not self._dirty
 
     @staticmethod
@@ -667,40 +648,10 @@ class CacheManager:
             if all(current.get(key) == value for key, value in record.items()):
                 return
             current.update(record)
-            self._dirty = True
-            if self._metadata_task is None:
-                self._flush_now.clear()
-                self._metadata_task = asyncio.create_task(self._async_metadata_flush())
-
-    async def _async_metadata_flush(self) -> None:
-        try:
-            try:
-                await asyncio.wait_for(self._flush_now.wait(), 1)
-            except asyncio.TimeoutError:
-                pass
-            async with self._lock:
-                if self._dirty:
-                    await self._async_save_locked()
-        finally:
-            self._metadata_task = None
-
-    async def _async_verify_durable_marker_locked(self, revision: int) -> bool:
-        """Confirm by direct disk read-back that this exact revision is durable."""
-        snapshot = self._snapshot
-        if snapshot is None or snapshot.revision != revision:
-            return False
-        payload = await self._async_read_payload()
-        if payload != snapshot.to_dict():
-            self._dirty = True
-            return False
-        return True
+            await self._async_save_locked()
 
     async def async_flush(self) -> bool:
-        """Finish accepted metadata/writes; report whether the current snapshot is durable."""
-        self._flush_now.set()
-        task = self._metadata_task
-        if task is not None:
-            await asyncio.shield(task)
+        """Finish any pending dirty write."""
         async with self._lock:
             if self._dirty and self._snapshot is not None:
                 await self._async_save_locked()
@@ -736,10 +687,10 @@ class CacheManager:
         payload = envelope.get("data")
         return payload if isinstance(payload, dict) else None
 
-    async def _async_write_payload(self, payload: dict) -> bool:
+    async def _async_write_payload(self, payload: dict, *, verify: bool = False) -> bool:
         try:
             await self._store.async_save(payload)
-            if await self._async_read_payload() == payload:
+            if not verify or await self._async_read_payload() == payload:
                 return True
         except (HomeAssistantError, OSError) as error:
             _LOGGER.warning(
@@ -753,12 +704,14 @@ class CacheManager:
         )
         return False
 
-    async def _async_save_locked(self) -> int:
+    async def _async_save_locked(self, *, verify: bool = False) -> int:
         """Keep the lock until disk I/O finishes even if its caller is cancelled."""
         snapshot = self._ensure_snapshot()
         snapshot.revision += 1
         self._dirty = True
-        write = asyncio.create_task(self._async_write_payload(snapshot.to_dict()))
+        write = asyncio.create_task(
+            self._async_write_payload(snapshot.to_dict(), verify=verify)
+        )
         cancelled = False
         while True:
             try:

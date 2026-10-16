@@ -171,11 +171,18 @@ async def async_resolve_speaker_owners(hass, entry, quasar) -> set[str]:
     async with lifecycle.ownership_lock:
         for device in quasar.speakers + quasar.modules:
             did = device["quasar_info"]["device_id"]
-            media_id = (
-                registry.async_get_entity_id("media_player", DOMAIN, did)
+            media = (
+                next(
+                    (
+                        item for item in registry.entities.values()
+                        if item.platform == DOMAIN
+                        and item.domain == "media_player"
+                        and item.unique_id == did
+                    ),
+                    None,
+                )
                 if registry is not None else None
             )
-            media = registry.async_get(media_id) if registry is not None and media_id else None
             owner = (
                 media.config_entry_id
                 if media is not None and media.config_entry_id
@@ -192,7 +199,7 @@ async def async_resolve_speaker_owners(hass, entry, quasar) -> set[str]:
                     dev_id = media.device_id
                     for item in list(registry.entities.values()):
                         if item.platform == DOMAIN and (
-                            item.entity_id == media_id
+                            item.entity_id == media.entity_id
                             or (dev_id and item.device_id == dev_id)
                         ):
                             registry.async_update_entity(

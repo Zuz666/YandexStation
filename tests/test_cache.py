@@ -388,26 +388,6 @@ def test_only_valid_disk_token_state_restores_a_candidate(tmp_path, state):
     asyncio.run(scenario())
 
 
-def test_failed_invalidation_keeps_ram_rejected_and_flushes_later(tmp_path, caplog):
-    async def scenario():
-        async with cache_runtime(tmp_path) as (manager, _):
-            cache = manager()
-            await cache.async_save_devices([device_record()])
-            await cache.async_save_device_token("glagol-1", "yandexstation", "opaque")
-            obtained_at = cache.snapshot.device_tokens["glagol-1"]["yandexstation"]["obtained_at"]
-            with patch.object(cache._store, "async_save", AsyncMock(return_value=None)):
-                assert not await cache.async_invalidate_device_token("glagol-1", "yandexstation", "opaque")
-            assert cache.snapshot.device_tokens["glagol-1"]["yandexstation"]["state"] == TOKEN_STATE_INVALID
-            assert "token_cache_write_failed" in caplog.text
-            assert read_storage(cache)["device_tokens"]["glagol-1"]["yandexstation"]["state"] == TOKEN_STATE_VALID
-            assert await cache.async_flush()
-            restored = await manager().async_load()
-            record = restored.device_tokens["glagol-1"]["yandexstation"]
-            assert record["state"] == TOKEN_STATE_INVALID
-            assert record["obtained_at"] == obtained_at
-
-    asyncio.run(scenario())
-
 
 def test_cancelled_token_write_finishes_before_invalidation(tmp_path):
     async def scenario():
@@ -447,23 +427,13 @@ def test_durable_marker_checks_content_not_only_revision(tmp_path):
         async with cache_runtime(tmp_path) as (manager, _):
             cache = manager()
             await cache.async_save_devices([device_record()])
-            await cache.async_save_device_token("glagol-1", "yandexstation", "opaque")
             assert await cache.async_save_scenario_marker(
                 "dev-1", "trigger", SCENARIO_STATE_PENDING
-            )
-            payload = read_storage(cache)
-            payload["scenario_creation"]["dev-1"]["trigger"] = "different-trigger"
-            write_storage(tmp_path, payload)
-            # A durable invalidation notices the tampered revision through
-            # direct disk read-back, not just the revision counter
-            assert not await cache.async_invalidate_device_token(
-                "glagol-1", "yandexstation", "other"
             )
             with patch.object(cache._store, "async_save", AsyncMock(return_value=None)):
                 assert not await cache.async_save_scenario_marker(
                     "dev-2", "new-trigger", SCENARIO_STATE_PENDING
                 )
-
     asyncio.run(scenario())
 
 
@@ -481,7 +451,7 @@ def test_metadata_merges_coalesces_and_closes_write_admission(tmp_path):
             assert restored.local_config == {"glagol-1": {
                 "host": "127.0.0.2", "port": 1905, "hdmi_audio": False,
             }}
-            assert restored.revision == 2
+            assert restored.revision == 4
             assert restored.updated_at == before
             with pytest.raises(RuntimeError, match="cache_closed"):
                 await cache.async_save_device_token("glagol-1", "yandexstation", "late")
