@@ -175,48 +175,36 @@ def _url_parts(url: Any):
 
 
 def _effective_port(parts) -> int | None:
-    """Explicit port or the scheme default; None for unknown schemes."""
-    if parts.port is not None:
-        return parts.port
-    return _SCHEME_DEFAULT_PORTS.get((parts.scheme or "").lower())
+    return parts.port if parts.port is not None else _SCHEME_DEFAULT_PORTS.get((parts.scheme or "").lower())
 
 
 def _origin_of(url: str) -> tuple[str, str, int] | None:
-    """Exact origin (scheme, hostname, effective port) or None."""
     parts = _url_parts(url)
-    if parts is None:
+    port = _effective_port(parts) if parts is not None else None
+    if parts is None or not parts.hostname or port is None:
         return None
-    scheme = (parts.scheme or "").lower()
-    host = parts.hostname or ""
-    port = _effective_port(parts)
-    if not host or port is None:
-        return None
-    return (scheme, host, port)
+    return ((parts.scheme or "").lower(), parts.hostname, port)
 
 
 def _format_netloc(host: str, port: int | None) -> str:
-    """Serialize netloc with RFC 3986 brackets for IPv6 literals."""
     host_text = f"[{host}]" if ":" in host else host
     return f"{host_text}:{port}" if port is not None else host_text
 
 
-def _variant_origins(url: str, *, scheme: str | None = None) -> set:
-    """The URL's origin plus its documented yandex.ru/.com counterpart."""
-    origin = _origin_of(url)
-    if origin is None:
-        return set()
-    use_scheme = scheme or origin[0]
-    return {(use_scheme, host, origin[2]) for host in _domain_variants(origin[1])}
-
-
 def _domain_variants(host: str) -> set[str]:
-    """The host plus its documented yandex.ru/yandex.com counterpart."""
     for base, alt in (("yandex.ru", "yandex.com"), ("yandex.com", "yandex.ru")):
         if host == base:
             return {host, alt}
         if host.endswith("." + base):
             return {host, f"{host[: -(len(base) + 1)]}.{alt}"}
     return {host}
+
+
+def _variant_origins(url: str, *, scheme: str | None = None) -> set:
+    origin = _origin_of(url)
+    if origin is None:
+        return set()
+    return {(scheme or origin[0], host, origin[2]) for host in _domain_variants(origin[1])}
 
 
 def _is_lan_host(host: str) -> bool:
@@ -235,28 +223,20 @@ def _is_lan_host(host: str) -> bool:
 
 
 def _check_https_endpoint(
-    url: str,
-    *,
-    allowed_queries: tuple[str, ...] = (),
-    require_path: bool = False,
+    url: str, *, allowed_queries: tuple[str, ...] = (), require_path: bool = False
 ) -> None:
-    """Config-time endpoint validation with a safe error reason."""
     parts = _url_parts(url)
-    if parts is None:
+    if (
+        parts is None
+        or (parts.scheme or "").lower() != "https"
+        or parts.username is not None
+        or parts.password is not None
+        or parts.fragment
+        or (parts.query and parts.query not in allowed_queries)
+        or not parts.hostname
+        or (require_path and parts.path in ("", "/"))
+    ):
         raise ValueError("invalid_endpoint")
-    if (parts.scheme or "").lower() != "https":
-        raise ValueError("invalid_endpoint")
-    if parts.username is not None or parts.password is not None:
-        raise ValueError("invalid_endpoint")
-    if parts.fragment:
-        raise ValueError("invalid_endpoint")
-    if parts.query and parts.query not in allowed_queries:
-        raise ValueError("invalid_endpoint")
-    if not parts.hostname:
-        raise ValueError("invalid_endpoint")
-    if require_path and parts.path in ("", "/"):
-        raise ValueError("invalid_endpoint")
-
 
 def _normalize_cookie_endpoints(endpoints: Any) -> list[dict[str, str]]:
     if endpoints is None:
@@ -296,20 +276,15 @@ def _normalize_csrf_endpoints(endpoints: Any) -> list[str]:
 
 
 def _swap_base_prefix(url: str, default_base: str, custom_base: str) -> str:
-    """Origin+path-boundary replacement of a default base with a configured one.
-
-    Hostname and port must match the default base exactly, so lookalike
-    suffix hosts and odd ports are never rewritten.
-    """
-    parts = _url_parts(url)
-    base_parts = _url_parts(default_base)
-    if parts is None or base_parts is None:
-        return url
-    if (parts.scheme or "").lower() != (base_parts.scheme or "").lower():
-        return url
-    if parts.hostname != base_parts.hostname:
-        return url
-    if _effective_port(parts) != _effective_port(base_parts):
+    """Origin+path-boundary replacement of a default base with a configured one."""
+    parts, base_parts, custom_parts = (
+        _url_parts(url), _url_parts(default_base), _url_parts(custom_base)
+    )
+    if (
+        parts is None or base_parts is None or custom_parts is None
+        or not custom_parts.hostname
+        or _origin_of(url) != _origin_of(default_base)
+    ):
         return url
     base_path = base_parts.path.rstrip("/")
     path = parts.path or "/"
@@ -322,52 +297,31 @@ def _swap_base_prefix(url: str, default_base: str, custom_base: str) -> str:
             return url
     else:
         rest = path
-    custom_parts = _url_parts(custom_base)
-    if custom_parts is None or not custom_parts.hostname:
-        return url
     custom_path = custom_parts.path.rstrip("/")
-    if custom_path and (path == custom_path or path.startswith(custom_path + "/")):
-        # Skip only when the URL is already on the configured origin
-        # (scheme, hostname, effective port); a same-path prefix on the
-        # default host must still be rewritten to the configured base.
-        if (
-            (parts.scheme or "").lower(),
-            parts.hostname,
-            _effective_port(parts),
-        ) == (
-            (custom_parts.scheme or "").lower(),
-            custom_parts.hostname,
-            _effective_port(custom_parts),
-        ):
-            return url
+    if (
+        custom_path
+        and (path == custom_path or path.startswith(custom_path + "/"))
+        and _origin_of(url) == _origin_of(custom_base)
+    ):
+        return url
     new_path = custom_path + rest if custom_path else rest
     netloc = _format_netloc(custom_parts.hostname, custom_parts.port)
     return urlunsplit(
         (parts.scheme.lower(), netloc, new_path, parts.query, parts.fragment)
     )
 
-
 def _apply_domain_suffix(url: str, domain: str) -> str:
-    """Rewrite exact yandex.ru/yandex.com host suffixes to the domain option."""
     parts = _url_parts(url)
-    if parts is None:
-        return url
-    host = parts.hostname
+    host = parts.hostname if parts is not None else None
     if not host:
         return url
-    new_host = None
     for base in ("yandex.ru", "yandex.com"):
         if host == base:
-            new_host = domain
-            break
+            return urlunsplit((parts.scheme, _format_netloc(domain, parts.port), parts.path, parts.query, parts.fragment))
         if host.endswith("." + base):
             new_host = host[: -(len(base) + 1)] + "." + domain
-            break
-    if new_host is None:
-        return url
-    netloc = _format_netloc(new_host, parts.port)
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-
+            return urlunsplit((parts.scheme, _format_netloc(new_host, parts.port), parts.path, parts.query, parts.fragment))
+    return url
 
 def retry_after_seconds(value: Any) -> float | None:
     """Parse Retry-After seconds or HTTP-date into a relative lower bound."""
