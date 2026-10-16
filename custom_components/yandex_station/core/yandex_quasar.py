@@ -1275,10 +1275,8 @@ class YandexQuasar(Dispatcher):
                 and self._inventory_sync_task is not None
                 and not self._inventory_sync_task.done()
             ):
-                try:
-                    await asyncio.shield(self._inventory_sync_task)
-                except Exception:
-                    pass
+                if not await asyncio.shield(self._inventory_sync_task):
+                    return
             updates_url, self._updates_url = self._updates_url, None
             if not updates_url:
                 r = await self.session.get(

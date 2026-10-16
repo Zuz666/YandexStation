@@ -695,4 +695,27 @@ def test_startup_deduplicates_inventory_get_across_init_recovery_and_connect():
         assert session2.get.await_count == 1
         await quasar2.async_stop()
 
+        # 3. Cached startup with 429 + Retry-After: shared sync fails once -> connect() enters backoff without a 2nd GET
+        from custom_components.yandex_station.core.yandex_session import CloudRequestError
+
+        quasar3, session3, _ = snapshot_backed_quasar(
+            [device_catalog()],
+            policy=EntryPolicy(cloud_updates=True, enable_scenarios=False),
+            readiness=Readiness(),
+        )
+        session3.closed = False
+        session3.async_stop = AsyncMock()
+        session3.retry_after = {"quasar": "120"}
+        session3.get = AsyncMock(side_effect=CloudRequestError("quasar", 429))
+        session3.ws_connect = AsyncMock()
+        quasar3.start()
+        for _ in range(20):
+            if quasar3.cloud_connection["state"] == "backoff":
+                break
+            await asyncio.sleep(0.01)
+        assert quasar3.cloud_connection["state"] == "backoff"
+        assert session3.get.await_count == 1
+        assert session3.ws_connect.await_count == 0
+        await quasar3.async_stop()
+
     asyncio.run(scenario())
