@@ -115,29 +115,12 @@ DEFAULT_COOKIE_STORAGE_ENDPOINTS = [
     {"url": "https://yandex.ru/iot?storage=1", "validator": "uid_in_storage"},
 ]
 
-#: Legacy string endpoints are migrated only for these two exact forms.
-_LEGACY_COOKIE_ENDPOINT_VALIDATORS = {
-    "https://quasar.yandex.ru/get_account_config": "status_ok",
-    "https://yandex.ru/iot?storage=1": "uid_in_storage",
-}
-
 DEFAULT_CSRF_ENDPOINTS = [
     "https://yandex.ru/iot",
 ]
 
-#: Music/CDN hosts that may receive OAuth credentials.
-_MUSIC_CREDENTIAL_HOSTS = frozenset(
-    {"api.music.yandex.net", "oauth.mobile.yandex.net"}
-)
-
-_CLOUD_WS_PUSH_HOST = "push.yandex.ru"
-
-#: The legacy ``domain`` option accepts only the two documented mirrors.
 _DOCUMENTED_DOMAINS = frozenset({"yandex.ru", "yandex.com"})
-
-#: Default ports used for exact scheme+host+port origin equality.
-_SCHEME_DEFAULT_PORTS = {"https": 443, "wss": 443, "ws": 80, "http": 80}
-
+_YANDEX_CREDENTIAL_DOMAINS = ("yandex.ru", "yandex.com", "yandex.net")
 #: Deterministic LAN ranges (no hostname trust); stream media shares them.
 LAN_V4_NETWORKS = (
     ipaddress.ip_network("127.0.0.0/8"),
@@ -174,38 +157,15 @@ def _url_parts(url: Any):
     return parts
 
 
-def _effective_port(parts) -> int | None:
-    return parts.port if parts.port is not None else _SCHEME_DEFAULT_PORTS.get((parts.scheme or "").lower())
-
-
-def _origin_of(url: str) -> tuple[str, str, int] | None:
-    parts = _url_parts(url)
-    port = _effective_port(parts) if parts is not None else None
-    if parts is None or not parts.hostname or port is None:
-        return None
-    return ((parts.scheme or "").lower(), parts.hostname, port)
-
-
 def _format_netloc(host: str, port: int | None) -> str:
     host_text = f"[{host}]" if ":" in host else host
     return f"{host_text}:{port}" if port is not None else host_text
 
 
-def _domain_variants(host: str) -> set[str]:
-    for base, alt in (("yandex.ru", "yandex.com"), ("yandex.com", "yandex.ru")):
-        if host == base:
-            return {host, alt}
-        if host.endswith("." + base):
-            return {host, f"{host[: -(len(base) + 1)]}.{alt}"}
-    return {host}
-
-
-def _variant_origins(url: str, *, scheme: str | None = None) -> set:
-    origin = _origin_of(url)
-    if origin is None:
-        return set()
-    return {(scheme or origin[0], host, origin[2]) for host in _domain_variants(origin[1])}
-
+def _is_yandex_host(host: str) -> bool:
+    return host in _YANDEX_CREDENTIAL_DOMAINS or any(
+        host.endswith("." + domain) for domain in _YANDEX_CREDENTIAL_DOMAINS
+    )
 
 def _is_lan_host(host: str) -> bool:
     """Literal loopback/RFC1918/ULA/link-local addresses only.
@@ -222,9 +182,7 @@ def _is_lan_host(host: str) -> bool:
     return any(addr in network for network in networks)
 
 
-def _check_https_endpoint(
-    url: str, *, allowed_queries: tuple[str, ...] = (), require_path: bool = False
-) -> None:
+def _check_https_endpoint(url: str) -> None:
     parts = _url_parts(url)
     if (
         parts is None
@@ -232,27 +190,18 @@ def _check_https_endpoint(
         or parts.username is not None
         or parts.password is not None
         or parts.fragment
-        or (parts.query and parts.query not in allowed_queries)
         or not parts.hostname
-        or (require_path and parts.path in ("", "/"))
     ):
         raise ValueError("invalid_endpoint")
+
 
 def _normalize_cookie_endpoints(endpoints: Any) -> list[dict[str, str]]:
     if endpoints is None:
         return [dict(endpoint) for endpoint in DEFAULT_COOKIE_STORAGE_ENDPOINTS]
-    if isinstance(endpoints, str):
-        endpoints = [endpoints]
     if not isinstance(endpoints, list):
         raise ValueError("invalid_endpoint")
     normalized: list[dict[str, str]] = []
     for endpoint in endpoints:
-        if isinstance(endpoint, str):
-            validator = _LEGACY_COOKIE_ENDPOINT_VALIDATORS.get(endpoint)
-            if validator is None:
-                raise ValueError("invalid_endpoint")
-            normalized.append({"url": endpoint, "validator": validator})
-            continue
         if not isinstance(endpoint, dict) or set(endpoint) != {"url", "validator"}:
             raise ValueError("invalid_endpoint")
         url = endpoint["url"]
@@ -275,6 +224,15 @@ def _normalize_csrf_endpoints(endpoints: Any) -> list[str]:
     return list(endpoints)
 
 
+def _same_origin(a, b) -> bool:
+    return (
+        a is not None and b is not None
+        and (a.scheme or "").lower() == (b.scheme or "").lower()
+        and a.hostname == b.hostname
+        and (a.port or 443) == (b.port or 443)
+    )
+
+
 def _swap_base_prefix(url: str, default_base: str, custom_base: str) -> str:
     """Origin+path-boundary replacement of a default base with a configured one."""
     parts, base_parts, custom_parts = (
@@ -283,7 +241,7 @@ def _swap_base_prefix(url: str, default_base: str, custom_base: str) -> str:
     if (
         parts is None or base_parts is None or custom_parts is None
         or not custom_parts.hostname
-        or _origin_of(url) != _origin_of(default_base)
+        or not _same_origin(parts, base_parts)
     ):
         return url
     base_path = base_parts.path.rstrip("/")
@@ -301,7 +259,7 @@ def _swap_base_prefix(url: str, default_base: str, custom_base: str) -> str:
     if (
         custom_path
         and (path == custom_path or path.startswith(custom_path + "/"))
-        and _origin_of(url) == _origin_of(custom_base)
+        and _same_origin(parts, custom_parts)
     ):
         return url
     new_path = custom_path + rest if custom_path else rest
@@ -472,35 +430,23 @@ class SessionConfig:
         )
 
     def validate(self) -> None:
-        """Validate configuration with safe ValueError reasons."""
         if self.domain is not None and self.domain not in _DOCUMENTED_DOMAINS:
             raise ValueError("invalid_endpoint")
         for attr, _default in ROLE_BASE_FIELDS.values():
             _check_https_endpoint(getattr(self, attr))
-        if not self.cookie_storage_endpoints:
+        if not self.cookie_storage_endpoints or not self.csrf_endpoints:
             raise ValueError("invalid_endpoint")
         for endpoint in self.cookie_storage_endpoints:
-            _check_https_endpoint(
-                endpoint["url"], allowed_queries=("storage=1",), require_path=True
-            )
-        if not self.csrf_endpoints:
-            raise ValueError("invalid_endpoint")
+            _check_https_endpoint(endpoint["url"])
         for endpoint in self.csrf_endpoints:
-            _check_https_endpoint(endpoint, require_path=True)
+            _check_https_endpoint(endpoint)
 
     def resolve_url(self, url: str, role: str) -> str:
-        """Resolve default origins through domain defaults, then explicit overrides.
-
-        Full explicit probe lists take precedence over base settings. Repeated
-        resolution preserves prefixes. Destination trust is checked separately.
-        """
         if role not in SESSION_ROLES:
             raise ValueError("invalid_endpoint")
-        if not url:
+        if not url or role in self._explicit_probe_roles or role in ("music", "local_ws"):
             return url
-
-        if role in self._explicit_probe_roles or role in ("music", "local_ws"):
-            return url
+        parts = _url_parts(url)
         bases = (
             (ROLE_BASE_FIELDS[role],) if role in ROLE_BASE_FIELDS
             else ROLE_BASE_FIELDS.values() if role in ("cookie_probe", "csrf")
@@ -508,7 +454,7 @@ class SessionConfig:
         )
         for attr, default in bases:
             for source in (default, _apply_domain_suffix(default, "yandex.com")):
-                if _origin_of(url) == _origin_of(source):
+                if _same_origin(parts, _url_parts(source)):
                     return _swap_base_prefix(url, source, getattr(self, attr))
         if self.domain and role in ("cookie_probe", "csrf", "cloud_ws"):
             return _apply_domain_suffix(url, self.domain)
@@ -517,97 +463,28 @@ class SessionConfig:
     def validate_destination(
         self, url: str, role: str, *, credential: bool = False
     ) -> None:
-        """Validate a resolved runtime URL for role before transport.
-
-        Origins compare scheme, hostname and effective port exactly.
-        Raises ValueError with reason 'invalid_endpoint' for malformed or
-        role-foreign URLs and 'untrusted_credential_destination' when a
-        credential-bearing request would leave the role's built-in default
-        origins (documented yandex.ru/.com counterparts at the default
-        port); external overrides, other ports and local websockets never
-        receive credentials. The explicit ssl=False option remains supported.
-        """
         if role not in SESSION_ROLES:
             raise ValueError("invalid_endpoint")
         parts = _url_parts(url)
-        if parts is None:
-            raise ValueError("invalid_endpoint")
-        scheme = (parts.scheme or "").lower()
-        host = parts.hostname or ""
+        scheme = (parts.scheme or "").lower() if parts is not None else ""
+        host = parts.hostname if parts is not None else None
         if (
-            parts.username is not None
-            or parts.password is not None
+            parts is None or not host
+            or parts.username is not None or parts.password is not None
             or parts.fragment
-            or not host
         ):
             raise ValueError("invalid_endpoint")
-
         if role == "local_ws":
-            # Glagol local sockets are TLS websockets on LAN literals;
-            # hostnames (including localhost) are never trusted and cloud
-            # credentials never ride a local socket.
-            if scheme != "wss":
-                raise ValueError("invalid_endpoint")
-            if not _is_lan_host(host):
+            if scheme != "wss" or not _is_lan_host(host):
                 raise ValueError("invalid_endpoint")
             if credential:
                 raise ValueError("untrusted_credential_destination")
             return
-
-        origin = _origin_of(url)
-        if origin is None:
+        expected_scheme = "wss" if role == "cloud_ws" else "https"
+        if scheme != expected_scheme:
             raise ValueError("invalid_endpoint")
-
-        if role == "cloud_ws":
-            if scheme != "wss":
-                raise ValueError("invalid_endpoint")
-            trusted = _variant_origins(f"wss://{_CLOUD_WS_PUSH_HOST}")
-            trusted |= _variant_origins(DEFAULT_QUASAR_BASE_URL, scheme="wss")
-            if not credential:
-                configured = _origin_of(self.quasar_base_url)
-                if configured:
-                    trusted.add(("wss", configured[1], configured[2]))
-        elif role == "music":
-            # anonymous Music/CDN downloads may go anywhere over https;
-            # OAuth credentials only to the built-in music hosts
-            if scheme != "https":
-                raise ValueError("invalid_endpoint")
-            if credential and origin not in {
-                ("https", host, 443) for host in _MUSIC_CREDENTIAL_HOSTS
-            }:
-                raise ValueError("untrusted_credential_destination")
-            return
-        else:
-            if scheme != "https":
-                raise ValueError("invalid_endpoint")
-            if role in ROLE_BASE_FIELDS:
-                attr, default = ROLE_BASE_FIELDS[role]
-                trusted = _variant_origins(default)
-                if not credential:
-                    # credential requests never follow external overrides
-                    trusted |= _variant_origins(getattr(self, attr))
-            else:
-                # cookie_probe / csrf: defaults always, configured only
-                # for credential-free probes
-                if role == "cookie_probe":
-                    urls = list(_LEGACY_COOKIE_ENDPOINT_VALIDATORS)
-                    if not credential:
-                        urls += [e["url"] for e in self.cookie_storage_endpoints]
-                else:
-                    urls = ["https://yandex.ru/iot", "https://yandex.ru/quasar"]
-                    if not credential:
-                        urls += self.csrf_endpoints
-                trusted = set()
-                for endpoint_url in urls:
-                    trusted |= _variant_origins(endpoint_url)
-
-        if origin not in trusted:
-            raise ValueError(
-                "untrusted_credential_destination"
-                if credential
-                else "invalid_endpoint"
-            )
-
+        if credential and not _is_yandex_host(host):
+            raise ValueError("untrusted_credential_destination")
 
 class RecoveryBackoff:
     """Shared recovery backoff for cloud/scenario/token workers.

@@ -13,7 +13,6 @@ import logging
 import secrets
 import sys
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -116,7 +115,7 @@ class LifecycleManager:
         self.speaker_owners: dict[str, str] = {}
         self.service_targets: dict[str, Any] = {}
         self._service_handlers: dict[str, Any] = {}
-        self.active_consumers = 0
+        self._consumer_tasks: set[asyncio.Task] = set()
         self._consumers_drained = asyncio.Event()
         self._consumers_drained.set()
         self.discovery_listener = None
@@ -125,15 +124,17 @@ class LifecycleManager:
         self._discovery_tasks: set[asyncio.Task] = set()
         self._reload_requests: dict[str, tuple[asyncio.Task | None, Any]] = {}
         self._reload_tasks: set[asyncio.Task] = set()
-        self._entry_capability = ContextVar("yandex_station_entry_capability", default=None)
-        self._consumer_depth = ContextVar("yandex_station_consumer_depth", default=None)
-        self._internal_capability = None
-        self._internal_entry_id = None
+        self._button_requester: asyncio.Task | None = None
+        self._internal_entry_id: str | None = None
         self._stopping = False
         self._reload_task: asyncio.Task | None = None
         self.last_reload_result: dict[str, Any] | None = None
         self.generation = 0
         self.conversation_available = False
+
+    @property
+    def active_consumers(self) -> int:
+        return len(self._consumer_tasks)
 
     @property
     def admission_open(self) -> bool:
@@ -153,11 +154,7 @@ class LifecycleManager:
 
     @asynccontextmanager
     async def entry_operation(self, entry_id: str, operation: str):
-        internal = (
-            self._internal_capability is not None
-            and self._entry_capability.get() is self._internal_capability
-            and self._internal_entry_id == entry_id
-        )
+        internal = self._internal_entry_id == entry_id
         if entry_id in self.entry_ids or (not self.admission_open and not internal):
             yield False
             return
@@ -168,24 +165,17 @@ class LifecycleManager:
             yield True
         finally:
             self.entry_ids.discard(entry_id)
+
     async def _async_core_entry_operation(self, operation: str, entry_id: str):
-        """Only this manager can issue a capability for the closed hot-reload gate."""
-        capability = object()
-        self._internal_capability = capability
         self._internal_entry_id = entry_id
-        token = self._entry_capability.set(capability)
         try:
             return await getattr(self.hass.config_entries, operation)(entry_id)
         finally:
-            self._entry_capability.reset(token)
-            self._internal_capability = None
             self._internal_entry_id = None
 
     def _consumer_requester(self):
-        consumer = self._consumer_depth.get()
-        if consumer is not None and not consumer[0].done():
-            return consumer[0]
-        return None
+        task = self._button_requester or asyncio.current_task()
+        return task if task in self._consumer_tasks and not task.done() else None
 
     def request_entry_reload(self, entry_id: str) -> bool:
         """Reserve once; dispatch only after the requesting task has returned."""
@@ -231,28 +221,25 @@ class LifecycleManager:
 
     @asynccontextmanager
     async def consumer(self, entry_id: str | None = None):
-        owner = asyncio.current_task()
-        inherited = self._consumer_depth.get()
-        depth = inherited[1] if inherited is not None and inherited[0] is owner else 0
-        internal = (
-            entry_id is not None
-            and self._internal_capability is not None
-            and self._entry_capability.get() is self._internal_capability
-            and self._internal_entry_id == entry_id
-        )
-        if not self.admission_open and not depth and not internal:
+        task = asyncio.current_task()
+        nested = task in self._consumer_tasks
+        internal = entry_id is not None and self._internal_entry_id == entry_id
+        if not self.admission_open and not nested and not internal:
             raise HomeAssistantError("reload_in_progress")
-        self.active_consumers += 1
-        self._consumers_drained.clear()
-        token = self._consumer_depth.set((owner, depth + 1))
+        if not nested and task is not None:
+            self._consumer_tasks.add(task)
+            self._consumers_drained.clear()
+            if entry_id is not None:
+                self._button_requester = task
         try:
             yield
         finally:
-            self._consumer_depth.reset(token)
-            self.active_consumers -= 1
-            if not self.active_consumers:
-                self._consumers_drained.set()
-
+            if not nested and task is not None:
+                if self._button_requester is task:
+                    self._button_requester = None
+                self._consumer_tasks.discard(task)
+                if not self._consumer_tasks:
+                    self._consumers_drained.set()
     def bind_service(self, name: str, target):
         """Registered handler stays stable; only the reloadable target changes."""
         self.service_targets[name] = target
@@ -383,30 +370,10 @@ class LifecycleManager:
             )
         )
 
-    def _membership_valid(self, expected_states, domain_entry_ids) -> bool:
-        config_entries = self.hass.config_entries
-        if (
-            {entry.entry_id for entry in config_entries.async_entries(DOMAIN)}
-            != domain_entry_ids
-            or self._flows_active(config_entries, domain_entry_ids)
-        ):
-            return False
-        for entry_id, (state, enabled) in expected_states.items():
-            current = config_entries.async_get_entry(entry_id)
-            if self.entry_enabled(current) != enabled or self._state(current) != state:
-                return False
-        return True
-
     def _refuse(self, reason: str, *, status: str = "failed", **details):
         result = {"status": status, "reason": reason, **details}
         self.last_reload_result = result
         return result
-
-    def _sync_reload_refusal(self) -> dict[str, Any] | None:
-        """Runtime qualification shared by admission and post-consumer stages."""
-        if self.context is None or self.context.implementation is None:
-            return self._refuse("runtime_not_initialized", status="restart_required")
-        return None
 
     async def async_hot_reload(
         self, hass: HomeAssistant, enable_code_reload: bool = False,
@@ -419,13 +386,11 @@ class LifecycleManager:
             return self._refuse("reload_already_in_progress")
         if self._stopping or self.entry_ids or self._reload_requests:
             return self._refuse("entry_operation_in_progress")
-        if after is not None:
-            refusal = self._sync_reload_refusal()
-            if refusal is not None:
-                return refusal
-            entries = {entry.entry_id for entry in hass.config_entries.async_entries(DOMAIN)}
-            if self._flows_active(hass.config_entries, entries):
-                return self._refuse("flow_in_progress")
+        if self.context is None or self.context.implementation is None:
+            return self._refuse("runtime_not_initialized", status="restart_required")
+        entries = {entry.entry_id for entry in hass.config_entries.async_entries(DOMAIN)}
+        if self._flows_active(hass.config_entries, entries):
+            return self._refuse("flow_in_progress")
         self.hass = hass
         task = hass.async_create_task(
             self._async_reload_after_consumer(after) if after is not None
@@ -443,8 +408,6 @@ class LifecycleManager:
         return await asyncio.shield(task)
 
     async def _async_reload_after_consumer(self, requester):
-        # Observe completion, not the result: cancelling the initiating button
-        # must not cancel an already authorized, lifecycle-owned operation.
         await asyncio.wait({requester})
         if self._stopping:
             return self._refuse("entry_operation_in_progress")
@@ -455,9 +418,8 @@ class LifecycleManager:
             loop = asyncio.get_running_loop()
             started = loop.time()
             timings = {}
-            refusal = self._sync_reload_refusal()
-            if refusal is not None:
-                return refusal
+            if self.context is None or self.context.implementation is None:
+                return self._refuse("runtime_not_initialized", status="restart_required")
             if self.entry_ids or self._reload_requests:
                 return self._refuse("entry_operation_in_progress")
             config_entries = self.hass.config_entries
@@ -468,10 +430,6 @@ class LifecycleManager:
                 and self._state(entry) in {"loaded", "setup_retry", "setup_error"}
             ]
             domain_entry_ids = {entry.entry_id for entry in all_entries}
-            expected_states = {
-                entry.entry_id: (self._state(entry), self.entry_enabled(entry))
-                for entry in all_entries
-            }
             if self._flows_active(config_entries, domain_entry_ids):
                 return self._refuse("flow_in_progress")
 
@@ -482,8 +440,6 @@ class LifecycleManager:
                 return self._refuse(
                     "source_preflight_failed", status="restart_required"
                 )
-            if not self._membership_valid(expected_states, domain_entry_ids) or self.entry_ids:
-                return self._refuse("membership_changed")
             timings["preflight_ms"] = round((loop.time() - started) * 1000)
 
             self.context.admission_open = False
@@ -496,49 +452,37 @@ class LifecycleManager:
                 self.context.admission_open = not self._stopping
                 return self._refuse("drain_timeout")
             timings["drain_ms"] = round((loop.time() - drain_started) * 1000)
-            if not self._membership_valid(expected_states, domain_entry_ids) or self.entry_ids:
-                self.context.admission_open = not self._stopping
-                return self._refuse("membership_changed")
 
-            try:
-                await self.async_stop_discovery()
-            except Exception as error:
-                _LOGGER.warning("Reload discovery stop failed: %s", type(error).__name__)
-                return await self._async_rollback(
-                    [], "discovery_stop_failed", timings
-                )
+            await self.async_stop_discovery()
             unloaded = []
             unload_started = loop.time()
             for entry in entries:
-                if not self._membership_valid(expected_states, domain_entry_ids):
-                    return await self._async_rollback(
-                        unloaded, "membership_changed", timings
-                    )
                 try:
                     ok = await self._async_core_entry_operation(
                         "async_unload", entry.entry_id
                     )
                 except Exception as error:
-                    _LOGGER.warning(
-                        "Reload unload failed: %s", type(error).__name__
-                    )
+                    _LOGGER.warning("Reload unload failed: %s", type(error).__name__)
                     ok = False
-                if not ok:
-                    return await self._async_rollback(
-                        unloaded, "unload_failed", timings, unsafe=True
+                if not ok or self._state(entry) != "not_loaded":
+                    rollback = {}
+                    for eid in unloaded:
+                        try:
+                            rollback[eid] = bool(
+                                await self._async_core_entry_operation("async_setup", eid)
+                            )
+                        except Exception:
+                            rollback[eid] = False
+                    old_impl, self.context.implementation = self.context.implementation, None
+                    if old_impl is not None:
+                        await old_impl.async_close()
+                    self.context.admission_open = False
+                    return self._refuse(
+                        "unload_failed", status="restart_required",
+                        rollback=rollback, http_status=503, timings_ms=timings,
                     )
                 unloaded.append(entry.entry_id)
-                if self._state(entry) != "not_loaded":
-                    return await self._async_rollback(
-                        unloaded, "unload_failed", timings, unsafe=True
-                    )
-                expected_states[entry.entry_id] = ("not_loaded", True)
             timings["unload_ms"] = round((loop.time() - unload_started) * 1000)
-
-            if not self._membership_valid(expected_states, domain_entry_ids):
-                return await self._async_rollback(
-                    unloaded, "membership_changed", timings
-                )
 
             old_implementation = self.context.implementation
             swap_started = loop.time()
@@ -564,10 +508,9 @@ class LifecycleManager:
             try:
                 if previous is not None:
                     await previous.async_close()
-                implementation = sys.modules[_ROOT + ".core.stream"].StreamImplementation(
-                    self.context
+                self.context.implementation = (
+                    sys.modules[_ROOT + ".core.stream"].StreamImplementation(self.context)
                 )
-                self.context.implementation = implementation
                 await sys.modules[_ROOT].async_rebind_runtime(self.hass)
             except Exception as error:
                 _LOGGER.error("Reload rebind failed: %s", type(error).__name__)
@@ -586,23 +529,17 @@ class LifecycleManager:
             setup_results = {}
             self.generation += 1
             for entry in entries:
-                if not self._membership_valid(expected_states, domain_entry_ids):
-                    setup_results[entry.entry_id] = "membership_changed"
-                    continue
                 try:
                     ok = await self._async_core_entry_operation(
                         "async_setup", entry.entry_id
                     )
                 except Exception as error:
-                    _LOGGER.warning(
-                        "Reload setup failed: %s", type(error).__name__
-                    )
+                    _LOGGER.warning("Reload setup failed: %s", type(error).__name__)
                     ok = False
                 setup_results[entry.entry_id] = (
                     "loaded" if ok and self._state(entry) == "loaded"
                     else self._state(entry)
                 )
-                expected_states[entry.entry_id] = (self._state(entry), True)
             timings["total_ms"] = round((loop.time() - started) * 1000)
             self.context.admission_open = not self._stopping
             status = (
@@ -626,46 +563,6 @@ class LifecycleManager:
             else:
                 importlib.import_module(name)
             imported.append(name)
-    async def _async_rollback(
-        self, unloaded: list[str], reason: str, timings: dict,
-        unsafe: bool = False,
-    ) -> dict[str, Any]:
-        """Restore old Core entries; never reopen a partially failed account."""
-        results = {}
-        for entry_id in unloaded:
-            try:
-                results[entry_id] = bool(
-                    await self._async_core_entry_operation("async_setup", entry_id)
-                )
-            except Exception as error:
-                results[entry_id] = False
-                _LOGGER.warning("Rollback setup failed: %s", type(error).__name__)
-        unsafe = unsafe or not all(results.values()) or any(
-            self._state(entry) == "failed_unload"
-            for entry in self.hass.config_entries.async_entries(DOMAIN)
-        )
-        discovery_restored = False
-        if not unsafe:
-            try:
-                await sys.modules[_ROOT].async_rebind_runtime(self.hass)
-                discovery_restored = True
-            except Exception as error:
-                _LOGGER.warning("Rollback browser failed: %s", type(error).__name__)
-        if unsafe or not discovery_restored:
-            implementation, self.context.implementation = self.context.implementation, None
-            if implementation is not None:
-                await implementation.async_close()
-            self.context.admission_open = False
-            return self._refuse(
-                reason, status="restart_required", rollback=results,
-                discovery_restored=discovery_restored, http_status=503,
-                timings_ms=timings,
-            )
-        self.context.admission_open = not self._stopping
-        return self._refuse(
-            reason, rollback=results, discovery_restored=True, timings_ms=timings,
-        )
-
 
 def get_lifecycle(hass: HomeAssistant) -> LifecycleManager:
     """One domain owner, including Options opened after a failed entry setup."""

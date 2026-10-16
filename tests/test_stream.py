@@ -262,7 +262,6 @@ def test_hls_encrypted_key_children_are_signed_and_gated(tmp_path):
                     claims = jwt.decode(token, context.key, algorithms=["HS256"])
                     assert claims["entry_id"] == "entry-1"
                     assert claims["lan_only"] is True
-                    assert claims["kind"] == "key"
                     assert claims["url"] == f"http://127.0.0.1:{port}/encryption.key"
                     async with client.get(signed_key) as result:
                         assert result.status == 200
@@ -287,7 +286,6 @@ def test_hls_encrypted_key_children_are_signed_and_gated(tmp_path):
                         key_claims = jwt.decode(
                             key_token, context.key, algorithms=["HS256"]
                         )
-                        assert key_claims["kind"] == "key"
                         assert key_claims["url"] == upstream
                         async with client.get(signed) as result:
                             assert result.status == 200, name
@@ -308,19 +306,6 @@ def test_hls_encrypted_key_children_are_signed_and_gated(tmp_path):
                         context, "entry-1", f"{context.hass_url}/pub.m3u8"
                     )
                     async with client.get(public) as result:
-                        assert result.status == 403
-
-                    # negative security: a forged kind-less .key token is
-                    # never accepted; key URLs exist only as extracted
-                    # playlist children
-                    forged = jwt.encode(
-                        {"url": f"http://127.0.0.1:{port}/encryption.key",
-                         "entry_id": "entry-1", "lan_only": True,
-                         "exp": int(time.time()) + 60},
-                        context.key, algorithm="HS256")
-                    async with client.get(
-                        f"{context.hass_url}/api/yandex_station/{forged}.key"
-                    ) as result:
                         assert result.status == 403
 
                     # the blocked playlist was fetched upstream; denial

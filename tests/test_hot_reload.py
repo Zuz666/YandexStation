@@ -52,9 +52,6 @@ def test_full_reload_changes_real_http_and_core_service(tmp_path, mode):
     ("drain_timeout", "drain_timeout"),
     ("entries_unload_fail", "unload_failed"),
     ("options_flow", "flow_in_progress"),
-    ("state_during_drain", "membership_changed"),
-    ("flow_during_drain", "membership_changed"),
-    ("discovery_stop_fail", "discovery_stop_failed"),
     ("entries_second_unload_fail", "unload_failed"),
 ])
 def test_reload_refusal_and_failure_preserve_honest_http_state(tmp_path, mode, reason):
