@@ -339,7 +339,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry):
         await cache.async_remove()
         lifecycle.runtimes.pop(entry.entry_id, None)
         hass.data[DOMAIN].pop(entry.unique_id, None)
-        # Keep the ownership reservation: removal is not an automatic claim by a peer.
+        for did, owner in list(lifecycle.speaker_owners.items()):
+            if owner == entry.entry_id:
+                lifecycle.speaker_owners.pop(did, None)
 
 
 async def _init_local_discovery(hass: HomeAssistant):
