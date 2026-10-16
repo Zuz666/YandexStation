@@ -325,6 +325,9 @@ class YandexQuasar(Dispatcher):
         self._scenario_worker_task: asyncio.Task | None = None
         self._history_tasks: set[asyncio.Task] = set()
         self.fresh_device_ids: set[str] = set()
+        self._initial_cloud_synced = False
+        self._updates_url: str | None = None
+        self._inventory_sync_task: asyncio.Task | None = None
         self.cloud_connection = {
             "state": "disconnected" if self.policy.effective_cloud_updates else "disabled",
             "connected_at": None,
@@ -409,6 +412,8 @@ class YandexQuasar(Dispatcher):
 
     def _restore_from_snapshot(self, snapshot: StationSnapshot):
         self.fresh_device_ids.clear()
+        self._initial_cloud_synced = False
+        self._updates_url = None
         self.devices = [dict(d) for d in snapshot.devices]
         self.readiness.devices_state = DevicesState.READY
         self.readiness.inventory_source = "cache"
@@ -495,6 +500,10 @@ class YandexQuasar(Dispatcher):
         except ValueError:
             raise RuntimeError("inventory_unavailable") from None
         devices = normalize_inventory(devices)
+        updates_url = resp.get("updates_url")
+        self._updates_url = (
+            updates_url if isinstance(updates_url, str) and updates_url else None
+        )
 
         old_records = self.devices
         if self.cache_manager is not None and self.cache_manager.snapshot is not None:
@@ -537,6 +546,7 @@ class YandexQuasar(Dispatcher):
         # Initial bootstrap: no consumers exist yet, apply catalog directly
         self.devices = devices
         self.fresh_device_ids = {d["id"] for d in devices}
+        self._initial_cloud_synced = True
         self.dispatch_update("readiness", {})
         return True
 
@@ -1260,20 +1270,32 @@ class YandexQuasar(Dispatcher):
         self.cloud_connection.update(state="connecting", retry_at=None)
         ws = None
         try:
-            r = await self.session.get(
-                "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
-            )
-            resp = await r.json()
-            assert resp["status"] == "ok", resp
+            if (
+                self._updates_url is None
+                and self._inventory_sync_task is not None
+                and not self._inventory_sync_task.done()
+            ):
+                try:
+                    await asyncio.shield(self._inventory_sync_task)
+                except Exception:
+                    pass
+            updates_url, self._updates_url = self._updates_url, None
+            if not updates_url:
+                r = await self.session.get(
+                    "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
+                )
+                resp = await r.json()
+                assert resp["status"] == "ok", resp
 
-            for house in resp["households"]:
-                if "sharing_info" in house:
-                    continue
-                for device in house["all"]:
-                    self.dispatch_update(device["id"], device)
+                for house in resp["households"]:
+                    if "sharing_info" in house:
+                        continue
+                    for device in house["all"]:
+                        self.dispatch_update(device["id"], device)
+                updates_url = resp["updates_url"]
 
             ws = await self.session.ws_connect(
-                resp["updates_url"], role="cloud_ws", heartbeat=60
+                updates_url, role="cloud_ws", heartbeat=60
             )
             self.cloud_connection.update(
                 state="connected", connected_at=datetime.now(timezone.utc).isoformat(),
@@ -1418,17 +1440,30 @@ class YandexQuasar(Dispatcher):
     async def _async_recover_after_publication(self):
         """Recover inventory and tokens independently; never replay user commands."""
         backoff = RecoveryBackoff()
-        inventory_pending = not self.policy.effective_use_cached_devices
+        if self._initial_cloud_synced:
+            self._initial_cloud_synced = False
+            for device in self.devices:
+                self.dispatch_update(device["id"], device)
+            inventory_pending = False
+        else:
+            inventory_pending = not self.policy.effective_use_cached_devices
         first_pass = True
         self._ensure_scenario_worker()
         while not self.stopping and self.policy.effective_cloud_allowed:
             if inventory_pending:
+                task = asyncio.create_task(self._sync_cloud_devices())
+                self._inventory_sync_task = task
                 try:
-                    if not await self._sync_cloud_devices():
+                    if not await task:
                         return  # Membership changed: ordinary entry reload owns publication.
                     inventory_pending = False
                 except Exception as error:
                     _LOGGER.debug("Inventory recovery: %s", safe_error_summary(error))
+                finally:
+                    if not task.done():
+                        task.cancel()
+                    if self._inventory_sync_task is task:
+                        self._inventory_sync_task = None
 
             tokens_pending = False
             for speaker in self.owned_speakers + self.owned_modules:

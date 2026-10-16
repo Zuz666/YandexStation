@@ -1016,7 +1016,7 @@ class YandexSession(BasicSession):
 
     @staticmethod
     async def _is_boundary_csrf_403(response: ClientResponse) -> bool:
-        """Match the exact text/plain 'Forbidden\\n' CSRF filter response before release."""
+        """Match the exact 10-byte text/plain 'Forbidden\\n' CSRF filter response."""
         mime = (
             (response.headers.get("Content-Type") or "")
             .partition(";")[0]
@@ -1025,10 +1025,21 @@ class YandexSession(BasicSession):
         )
         if mime != "text/plain":
             return False
-        try:
-            if int(response.headers.get("Content-Length") or 10) > 64:
+        length = response.headers.get("Content-Length")
+        if length is not None:
+            try:
+                if int(length) != 10:
+                    return False
+            except ValueError:
                 return False
-            return (await response.text()) == "Forbidden\n"
+        try:
+            buf = bytearray()
+            while len(buf) < 11:
+                chunk = await response.content.read(11 - len(buf))
+                if not chunk:
+                    break
+                buf.extend(chunk)
+            return bytes(buf) == b"Forbidden\n"
         except Exception:
             return False
 

@@ -112,7 +112,6 @@ SESSION_ROLES = frozenset(ROLE_BASE_FIELDS) | {
 COOKIE_STORAGE_VALIDATORS = ("status_ok", "uid_in_storage")
 
 DEFAULT_COOKIE_STORAGE_ENDPOINTS = [
-    {"url": "https://quasar.yandex.ru/get_account_config", "validator": "status_ok"},
     {"url": "https://yandex.ru/iot?storage=1", "validator": "uid_in_storage"},
 ]
 
@@ -124,7 +123,6 @@ _LEGACY_COOKIE_ENDPOINT_VALIDATORS = {
 
 DEFAULT_CSRF_ENDPOINTS = [
     "https://yandex.ru/iot",
-    "https://yandex.ru/quasar",
 ]
 
 #: Music/CDN hosts that may receive OAuth credentials.
@@ -638,11 +636,11 @@ class SessionConfig:
                 # cookie_probe / csrf: defaults always, configured only
                 # for credential-free probes
                 if role == "cookie_probe":
-                    urls = [e["url"] for e in DEFAULT_COOKIE_STORAGE_ENDPOINTS]
+                    urls = list(_LEGACY_COOKIE_ENDPOINT_VALIDATORS)
                     if not credential:
                         urls += [e["url"] for e in self.cookie_storage_endpoints]
                 else:
-                    urls = list(DEFAULT_CSRF_ENDPOINTS)
+                    urls = ["https://yandex.ru/iot", "https://yandex.ru/quasar"]
                     if not credential:
                         urls += self.csrf_endpoints
                 trusted = set()
