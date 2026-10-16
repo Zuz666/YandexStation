@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 from pathlib import Path
-import inspect
 import logging
 import secrets
 import sys
@@ -19,7 +18,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from aiohttp import web
-from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -113,8 +111,6 @@ class LifecycleManager:
         self.hass = context.hass if context else None
         self.entry_ids: set[str] = set()
         self.runtimes: dict[str, Any] = {}
-        self.bootstrap_events: dict[str, asyncio.Event] = {}
-        self.bootstrap_deadlines: dict[str, float] = {}
         self.setup_reasons: dict[str, str] = {}
         self.ownership_lock = asyncio.Lock()
         self.speaker_owners: dict[str, str] = {}
@@ -167,37 +163,11 @@ class LifecycleManager:
             return
         self.entry_ids.add(entry_id)
         if operation == "setup":
-            self.bootstrap_events[entry_id] = asyncio.Event()
-            self.bootstrap_deadlines[entry_id] = asyncio.get_running_loop().time() + 15
             self.setup_reasons.pop(entry_id, None)
         try:
             yield True
         finally:
-            self.finish_bootstrap(entry_id)
             self.entry_ids.discard(entry_id)
-
-    def finish_bootstrap(self, entry_id: str) -> None:
-        if event := self.bootstrap_events.get(entry_id):
-            event.set()
-
-    async def wait_initial_bootstraps(self, entry_id: str) -> None:
-        """Wait only for already-running initial catalogs, never start another probe."""
-        loop = asyncio.get_running_loop()
-        pending = [
-            (other_id, event, self.bootstrap_deadlines[other_id])
-            for other_id, event in self.bootstrap_events.items()
-            if other_id != entry_id and not event.is_set()
-            and self.entry_enabled(self.hass.config_entries.async_get_entry(other_id))
-        ]
-        for other_id, event, deadline in pending:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                continue
-            try:
-                await asyncio.wait_for(event.wait(), remaining)
-            except asyncio.TimeoutError:
-                self.setup_reasons.setdefault(other_id, "inventory_unavailable")
-
     async def _async_core_entry_operation(self, operation: str, entry_id: str):
         """Only this manager can issue a capability for the closed hot-reload gate."""
         capability = object()
@@ -634,19 +604,6 @@ class LifecycleManager:
                 )
                 expected_states[entry.entry_id] = (self._state(entry), True)
             timings["total_ms"] = round((loop.time() - started) * 1000)
-            local_ready = any(
-                device.get("entity") is not None
-                and getattr(device["entity"], "local_state", None) is not None
-                for runtime in self.runtimes.values()
-                for device in (runtime.owned_speakers + runtime.owned_modules)
-            )
-            cloud_ready = any(
-                str(runtime.readiness.devices_state) == "ready"
-                and str(runtime.readiness.inventory_source) == "cloud"
-                for runtime in self.runtimes.values()
-            )
-            timings["local_ready_ms"] = timings["total_ms"] if local_ready else None
-            timings["cloud_ready_ms"] = timings["total_ms"] if cloud_ready else None
             self.context.admission_open = not self._stopping
             status = (
                 "success" if all(state == "loaded" for state in setup_results.values())

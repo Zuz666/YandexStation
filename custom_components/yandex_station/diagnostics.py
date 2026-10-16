@@ -33,11 +33,8 @@ _RELOAD_STATUSES = frozenset({"accepted", "success", "partial", "failed", "resta
 _RELOAD_REASONS = frozenset({
     "reload_requested", "completed", "entry_setup_failed", "hot_reload_disabled",
     "reload_already_in_progress", "entry_operation_in_progress",
-    "runtime_not_initialized", "unsupported_runtime", "baseline_missing",
-    "flow_in_progress", "source_preflight_failed", "module_set_changed",
-    "stable_contract_changed", "registration_or_storage_schema_changed",
-    "top_level_binding_removed", "membership_changed", "drain_timeout",
-    "unload_failed", "source_changed_during_reload", "import_failed",
+    "runtime_not_initialized", "flow_in_progress", "source_preflight_failed",
+    "membership_changed", "drain_timeout", "unload_failed", "import_failed",
     "rebind_failed", "discovery_stop_failed",
 })
 _ENTRY_RELOAD_STATES = frozenset({
@@ -45,7 +42,7 @@ _ENTRY_RELOAD_STATES = frozenset({
 })
 _TIMING_PHASES = frozenset({
     "preflight_ms", "drain_ms", "unload_ms", "import_ms", "rebind_ms",
-    "code_swap_ms", "local_ready_ms", "cloud_ready_ms", "total_ms",
+    "code_swap_ms", "total_ms",
 })
 
 

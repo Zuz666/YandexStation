@@ -33,7 +33,7 @@ devices.types.media_device.tv.yandex.magritte
 - `YandexGlagol` owns the local connection and acceptance of the supplied token, not a second cloud token-fetch path. Start, restart, token adoption and stop serialize reader replacement; terminal stop invalidates pending replacements. Quasar stops entity-owned HDMI tasks and local readers before closing their session and cache.
 - `YandexQuasar.cloud_control_ready()` supplies the shared cloud-route predicate; callers retain ownership, stopping and operation-specific admission checks.
 - Account diagnostic sensors share readiness subscriptions, while keeping their individual state projections and registry identities.
-- `LifecycleManager` keeps reload qualification at both admission and execution. Changes to the stable lifecycle module or removed module bindings require an ordinary Core restart. After a fully verified import, subsequent reloads compare against that imported generation, even if entry setup or rebinding fails; a failed import never advances the baseline.
+- `LifecycleManager` owns the stable `StreamContext`, service dispatchers, discovery lifecycle and dev `reload_code` execution.
 
 ## Glagol token recovery logs
 

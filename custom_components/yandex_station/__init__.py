@@ -263,9 +263,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                     if yandex.readiness.auth_state == AuthState.REAUTH_REQUIRED:
                         raise ConfigEntryAuthFailed("credential_rejected") from error
                     raise ConfigEntryNotReady(safe_error_summary(error)) from error
-            finally:
-                lifecycle.finish_bootstrap(entry.entry_id)
-            # Platform initialization must not delay cached publication with cloud IO.
             yandex.cloud_ready = False
             if yandex.readiness.auth_state == AuthState.REAUTH_REQUIRED:
                 entry.async_start_reauth(hass)
