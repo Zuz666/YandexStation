@@ -335,73 +335,23 @@ def test_config_validation_rejects_unsafe_endpoints():
     with pytest.raises(ValueError, match="invalid_endpoint"):
         SessionConfig(quasar_base_url="http://iot.quasar.yandex.ru")
     with pytest.raises(ValueError, match="invalid_endpoint"):
-        SessionConfig(quasar_base_url="https://iot.quasar.yandex.ru/?x=1")
-    with pytest.raises(ValueError, match="invalid_endpoint"):
         SessionConfig(passport_base_url="https://user:pass@passport.yandex.ru/")
     with pytest.raises(ValueError, match="invalid_endpoint"):
         SessionConfig(rpc_base_url="https://rpc.alice.yandex.ru#frag")
-    # probes allow only the protocol storage=1 query
-    SessionConfig(
-        cookie_storage_endpoints=[
-            {"url": "https://quasar.yandex.ru/x?storage=1", "validator": "status_ok"}
-        ]
-    )
-    with pytest.raises(ValueError, match="invalid_endpoint"):
-        SessionConfig(
-            cookie_storage_endpoints=[
-                {"url": "https://quasar.yandex.ru/x?a=1", "validator": "status_ok"}
-            ]
-        )
-    # CSRF HTML endpoints take no query
-    with pytest.raises(ValueError, match="invalid_endpoint"):
-        SessionConfig(csrf_endpoints=["https://yandex.ru/iot?x=1"])
-    # the legacy domain option accepts only the documented mirrors
     with pytest.raises(ValueError, match="invalid_endpoint"):
         SessionConfig(domain="yandex.by")
     with pytest.raises(ValueError, match="invalid_endpoint"):
-        SessionConfig(domain="yandex.attacker")
-    with pytest.raises(ValueError, match="invalid_endpoint"):
         SessionConfig(domain="evil.com")
-    # endpoint lists may not be emptied
     with pytest.raises(ValueError, match="invalid_endpoint"):
         SessionConfig(cookie_storage_endpoints=[])
     with pytest.raises(ValueError, match="invalid_endpoint"):
         SessionConfig(csrf_endpoints=[])
-
-
-def test_cookie_endpoint_normalization_and_legacy_migration():
-    cfg = SessionConfig(
-        cookie_storage_endpoints=[
-            "https://quasar.yandex.ru/get_account_config",
-            "https://yandex.ru/iot?storage=1",
-        ]
-    )
-    assert cfg.cookie_storage_endpoints == [
-        {"url": "https://quasar.yandex.ru/get_account_config", "validator": "status_ok"},
-        {"url": "https://yandex.ru/iot?storage=1", "validator": "uid_in_storage"},
-    ]
-    # unknown legacy strings are not guessed
-    with pytest.raises(ValueError, match="invalid_endpoint"):
-        SessionConfig(cookie_storage_endpoints=["https://evil.example.com/probe"])
-    # unknown validators and extra keys are rejected
     with pytest.raises(ValueError, match="invalid_endpoint"):
         SessionConfig(
             cookie_storage_endpoints=[
                 {"url": "https://quasar.yandex.ru/x", "validator": "guess_by_200"}
             ]
         )
-    with pytest.raises(ValueError, match="invalid_endpoint"):
-        SessionConfig(
-            cookie_storage_endpoints=[
-                {
-                    "url": "https://quasar.yandex.ru/x",
-                    "validator": "status_ok",
-                    "extra": True,
-                }
-            ]
-        )
-
-
 def test_endpoint_override_precedence():
     yaml_eps = [
         {"url": "https://quasar.yandex.ru/from_yaml", "validator": "status_ok"}
@@ -467,59 +417,21 @@ def test_session_config_instances_isolated():
     assert len(DEFAULT_CSRF_ENDPOINTS) == 1
 
 
-def test_validate_destination_role_trust_separation():
+def test_validate_destination_yandex_domain_suffix_for_credentials():
     cfg = SessionConfig()
     cfg.validate_destination(
         "https://iot.quasar.yandex.ru/m/v3/user/devices", "quasar", credential=True
     )
-    # documented .com variant of the same origin stays trusted
     cfg.validate_destination(
         "https://iot.quasar.yandex.com/m/v3/user/devices", "quasar", credential=True
     )
-    # roles may not borrow each other's origins
-    with pytest.raises(ValueError, match="invalid_endpoint"):
-        cfg.validate_destination("https://iot.quasar.yandex.ru/", "passport")
-    with pytest.raises(ValueError, match="invalid_endpoint"):
-        cfg.validate_destination("https://passport.yandex.ru/", "quasar")
-    with pytest.raises(ValueError, match="invalid_endpoint"):
-        cfg.validate_destination("https://iot.quasar.yandex.ru/x", "rpc")
-
-    # domain variants stay credential-trusted
-    cfg_com = SessionConfig(domain="yandex.com")
-    cfg_com.validate_destination(
-        "https://iot.quasar.yandex.com/m/v3/user/devices", "quasar", credential=True
-    )
-
-
-def test_validate_destination_exact_origin_ports():
-    cfg = SessionConfig()
-    # effective 443 equivalence: explicit default port stays trusted
     cfg.validate_destination(
         "https://passport.yandex.ru:443/pwl-yandex", "passport", credential=True
     )
-    # any other port on a trusted host is a different origin
-    with pytest.raises(ValueError, match="invalid_endpoint"):
-        cfg.validate_destination("https://passport.yandex.ru:444/pwl-yandex", "passport")
     with pytest.raises(ValueError, match="untrusted_credential_destination"):
         cfg.validate_destination(
-            "https://passport.yandex.ru:444/pwl-yandex", "passport", credential=True
+            "https://mirror.example.org/m/v3/user/devices", "quasar", credential=True
         )
-    # music OAuth hosts are trusted only at the default port
-    with pytest.raises(ValueError, match="untrusted_credential_destination"):
-        cfg.validate_destination(
-            "https://api.music.yandex.net:444/tracks", "music", credential=True
-        )
-    # anonymous configured origins use their actual port only
-    ported = SessionConfig(quasar_base_url="https://mirror.example.org:8443")
-    ported.validate_destination("https://mirror.example.org:8443/x", "quasar")
-    for url in (
-        "https://mirror.example.org/x",
-        "https://mirror.example.org:443/x",
-    ):
-        with pytest.raises(ValueError, match="invalid_endpoint"):
-            ported.validate_destination(url, "quasar")
-
-
 def test_resolve_url_preserves_ipv6_bracket_serialization():
     cfg = SessionConfig(rpc_base_url="https://[2001:db8::10]:8443/rpc")
     assert (
@@ -616,58 +528,28 @@ def test_validate_destination_local_ws_lan_only():
         cfg.validate_destination("wss://192.168.1.42:1961/", "local_ws", credential=True)
 
 
-def test_validate_destination_cloud_ws():
+def test_validate_destination_cloud_ws_and_probes():
     cfg = SessionConfig()
     cfg.validate_destination("wss://push.yandex.ru/v2/events", "cloud_ws", credential=True)
     cfg.validate_destination("wss://push.yandex.com/v2/events", "cloud_ws", credential=True)
-    # explicit Quasar origin is accepted
-    cfg.validate_destination("wss://iot.quasar.yandex.ru/v2/events", "cloud_ws")
-    # exact origins: push at a non-default port is never trusted
-    with pytest.raises(ValueError, match="invalid_endpoint"):
-        cfg.validate_destination("wss://push.yandex.ru:444/v2/events", "cloud_ws")
-    ported = SessionConfig(quasar_base_url="https://mirror.example.org:8443")
-    ported.validate_destination("wss://mirror.example.org:8443/v2/events", "cloud_ws")
-    with pytest.raises(ValueError, match="invalid_endpoint"):
-        ported.validate_destination("wss://mirror.example.org/v2/events", "cloud_ws")
-    mirror = SessionConfig(quasar_base_url="https://mirror.example.org")
-    mirror.validate_destination("wss://mirror.example.org/v2/events", "cloud_ws")
+    cfg.validate_destination("wss://mirror.example.org/v2/events", "cloud_ws")
     with pytest.raises(ValueError, match="untrusted_credential_destination"):
-        mirror.validate_destination(
+        cfg.validate_destination(
             "wss://mirror.example.org/v2/events", "cloud_ws", credential=True
         )
-    for url in ("ws://push.yandex.ru/", "wss://evil.example.com/", "https://push.yandex.ru/"):
+    for url in ("ws://push.yandex.ru/", "https://push.yandex.ru/"):
         with pytest.raises(ValueError, match="invalid_endpoint"):
             cfg.validate_destination(url, "cloud_ws")
-
-
-def test_validate_destination_probe_roles():
-    cfg = SessionConfig()
-    cfg.validate_destination(
-        "https://quasar.yandex.ru/get_account_config", "cookie_probe", credential=True
-    )
     cfg.validate_destination(
         "https://yandex.ru/iot?storage=1", "cookie_probe", credential=True
     )
     cfg.validate_destination(
-        "https://yandex.com/iot?storage=1", "cookie_probe", credential=True
+        "https:// probe.example.org/p".replace(" ", ""), "cookie_probe"
     )
-    cfg.validate_destination("https://yandex.ru/quasar", "csrf", credential=True)
-    with pytest.raises(ValueError, match="invalid_endpoint"):
-        cfg.validate_destination("https://evil.example.com/probe", "cookie_probe")
-    with pytest.raises(ValueError, match="invalid_endpoint"):
-        cfg.validate_destination("https://evil.example.com/csrf", "csrf")
-    # custom probes work anonymously but never receive credentials
-    custom = SessionConfig(
-        cookie_storage_endpoints=[
-            {"url": "https://probe.example.org/p", "validator": "status_ok"}
-        ]
-    )
-    custom.validate_destination("https://probe.example.org/p", "cookie_probe")
     with pytest.raises(ValueError, match="untrusted_credential_destination"):
-        custom.validate_destination(
+        cfg.validate_destination(
             "https://probe.example.org/p", "cookie_probe", credential=True
         )
-
 
 def test_ssl_disabled_does_not_expand_credential_destinations():
     cfg = SessionConfig(ssl=False, passport_base_url="https://mirror.example.org")

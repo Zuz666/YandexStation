@@ -78,8 +78,6 @@ class YandexAccountButton(ButtonEntity):
                     raise HomeAssistantError("check_cloud: " + result["reason"])
                 return
             data = {"entry_id": self.entry.entry_id} if self.command == "reload_account" else {}
-            # Keep the original user context: an entity-control permission is not
-            # permission to reload integration code or another account.
             await self.hass.services.async_call(
                 DOMAIN, self.command, data, blocking=True, context=self._context
             )

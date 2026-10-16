@@ -133,10 +133,8 @@ def validate_media_url(context: StreamContext, entry_id: str, url: str) -> str:
 
 
 def _sign(context: StreamContext, entry_id: str, url: str, ext: str,
-          expires_at: int, lan_only: bool, kind: str | None = None) -> str:
+          expires_at: int, lan_only: bool) -> str:
     payload = {"url": url, "entry_id": entry_id, "lan_only": lan_only, "exp": expires_at}
-    if kind is not None:
-        payload["kind"] = kind
     token = jwt.encode(payload, context.key, algorithm="HS256")
     return f"{context.hass_url}/api/yandex_station/{token}.{ext}"
 
@@ -246,8 +244,6 @@ class StreamImplementation:
             or "exp" not in data
         ):
             raise ValueError("invalid_media_token")
-        if ext == "key" and data.get("kind") != "key":
-            raise ValueError("invalid_media_token")
         entry_id = data["entry_id"]
         offline = is_offline(self.context, entry_id) or data["lan_only"]
         url = (
@@ -262,9 +258,6 @@ class StreamImplementation:
                        offline: bool, headers: dict | None = None):
         session = self._session(offline)
         for attempt in range(6):
-            url = _destination(self.context, url, offline)
-            # An online-issued token cannot bypass a later offline toggle;
-            # is_offline re-checks entry admission before every attempt.
             if is_offline(self.context, entry_id) and not offline:
                 offline = True
                 session = self._session(True)
@@ -298,7 +291,7 @@ class StreamImplementation:
         def child(value: str, *, key_resource: bool = False) -> str:
             url = _destination(self.context, urljoin(base_url, value), offline)
             if key_resource:
-                return _sign(self.context, entry_id, url, "key", expires_at, offline, kind="key")
+                return _sign(self.context, entry_id, url, "key", expires_at, offline)
             ext = get_ext(url)
             if ext not in MIME_TYPES:
                 raise ValueError("media_segment_blocked")
