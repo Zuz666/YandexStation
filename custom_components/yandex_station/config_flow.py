@@ -277,7 +277,7 @@ class OptionsFlowHandler(OptionsFlow):
         """Show main options menu."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["settings", "devices", "recovery", "reauth"],
+            menu_options=["settings", "api_urls", "devices", "recovery", "reauth"],
         )
 
     async def async_step_recovery(self, user_input: dict = None):
@@ -453,12 +453,36 @@ class OptionsFlowHandler(OptionsFlow):
         )
 
     async def async_step_settings(self, user_input: dict = None):
-        """Configure integration parameters and endpoints."""
+        """Configure integration modes without editing API URLs."""
         if user_input is not None:
-            return await self._async_save_options(user_input)
+            return await self._async_save_options(user_input, self.async_step_settings)
 
         yaml_config = self.hass.data.get(DOMAIN, {}).get(DATA_CONFIG, {})
         policy = EntryPolicy.from_configs(yaml_config, self.config_entry.options)
+        return self.async_show_form(
+            step_id="settings",
+            data_schema=vol.Schema({
+                vol.Optional(
+                    "force_offline_local", default=policy.force_offline_local,
+                ): cv.boolean,
+                vol.Optional(
+                    "use_cached_devices", default=policy.use_cached_devices,
+                ): cv.boolean,
+                vol.Optional(
+                    "enable_scenarios", default=policy.enable_scenarios,
+                ): cv.boolean,
+                vol.Optional(
+                    "enable_diagnostic_sensors", default=policy.enable_diagnostic_sensors,
+                ): cv.boolean,
+            }),
+        )
+
+    async def async_step_api_urls(self, user_input: dict = None):
+        """Configure API URLs without editing integration modes."""
+        if user_input is not None:
+            return await self._async_save_options(user_input, self.async_step_api_urls)
+
+        yaml_config = self.hass.data.get(DOMAIN, {}).get(DATA_CONFIG, {})
         try:
             session_config = SessionConfig.from_configs(
                 yaml_config, self.config_entry.options
@@ -498,24 +522,7 @@ class OptionsFlowHandler(OptionsFlow):
             ),
         )
 
-        schema_dict = {
-            vol.Optional(
-                "force_offline_local",
-                default=policy.force_offline_local,
-            ): cv.boolean,
-            vol.Optional(
-                "use_cached_devices",
-                default=policy.use_cached_devices,
-            ): cv.boolean,
-            vol.Optional(
-                "enable_scenarios",
-                default=policy.enable_scenarios,
-            ): cv.boolean,
-            vol.Optional(
-                "enable_diagnostic_sensors",
-                default=policy.enable_diagnostic_sensors,
-            ): cv.boolean,
-        }
+        schema_dict = {}
         for field, _default in ROLE_BASE_FIELDS.values():
             schema_dict[vol.Optional(
                 field, default=self.config_entry.options.get(field, "")
@@ -527,7 +534,7 @@ class OptionsFlowHandler(OptionsFlow):
             )] = cv.string
         data = vol.Schema(schema_dict)
         return self.async_show_form(
-            step_id="settings",
+            step_id="api_urls",
             data_schema=data,
             description_placeholders=placeholders,
         )
@@ -535,7 +542,7 @@ class OptionsFlowHandler(OptionsFlow):
     async def async_step_devices(self, user_input: dict = None):
         """Configure device inclusion."""
         if user_input is not None:
-            return await self._async_save_options(user_input)
+            return await self._async_save_options(user_input, self.async_step_devices)
 
         devices = {}
         entry_login = self.config_entry.unique_id
@@ -587,11 +594,11 @@ class OptionsFlowHandler(OptionsFlow):
                 vol.Required("confirm_reauth", default=False): cv.boolean,
             }),
         )
-    async def _async_save_options(self, user_input: dict):
+    async def _async_save_options(self, user_input: dict, show_form):
         """Synchronously commit options to entry and schedule reload (RFC v2 §6.2)."""
         lifecycle = get_lifecycle(self.hass)
         if not lifecycle.entry_admitted(self.config_entry.entry_id):
-            result = await self.async_step_settings()
+            result = await show_form()
             result["errors"] = {"base": "reload_in_progress"}
             return result
         new_options = dict(self.config_entry.options)
@@ -623,7 +630,7 @@ class OptionsFlowHandler(OptionsFlow):
             SessionConfig.from_configs(yaml_config, new_options)
             EntryPolicy.from_configs(yaml_config, new_options)
         except (ValueError, TypeError):
-            result = await self.async_step_settings()
+            result = await show_form()
             result["errors"] = {"base": "invalid_endpoint"}
             return result
 

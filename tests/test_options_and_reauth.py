@@ -44,7 +44,7 @@ async def options_step(hass, step):
     )
 
 
-def test_settings_round_trip_and_invalid_endpoint_leave_other_options(tmp_path):
+def test_separate_forms_merge_changes_and_invalid_urls_leave_options_untouched(tmp_path):
     async def scenario():
         initial = {"include": ["offline-1"], "force_offline_local": False,
                    "csrf_endpoints": ["https://yandex.ru/iot"]}
@@ -57,13 +57,7 @@ def test_settings_round_trip_and_invalid_endpoint_leave_other_options(tmp_path):
 
             with patch.object(hass.config_entries, "async_reload", side_effect=reload_entry):
                 settings = await options_step(hass, "settings")
-                schema = settings["data_schema"]
-                assert {"quasar_base_url", "account_base_url", "passport_base_url",
-                        "mobileproxy_base_url", "glagol_base_url", "rpc_base_url",
-                        "cookie_storage_endpoints", "csrf_endpoints",
-                        "enable_diagnostic_sensors"} <= {
-                            key.schema for key in schema.schema
-                        }
+                urls = await options_step(hass, "api_urls")
                 for value in (
                     "[]", "{bad", json.dumps([{"url": "https://example.invalid/probe",
                                                "validator": "not-a-validator"}]),
@@ -71,19 +65,32 @@ def test_settings_round_trip_and_invalid_endpoint_leave_other_options(tmp_path):
                                  "validator": "status_ok"}]),
                 ):
                     invalid = await hass.config_entries.options.async_configure(
-                        settings["flow_id"], {"cookie_storage_endpoints": value}
+                        urls["flow_id"], {"cookie_storage_endpoints": value}
                     )
                     assert invalid["errors"] == {"base": "invalid_endpoint"}
+                    assert invalid["step_id"] == "api_urls"
                     assert dict(entry.options) == initial
+                result = await asyncio.create_task(hass.config_entries.options.async_configure(
+                    settings["flow_id"], {
+                        "force_offline_local": True, "enable_scenarios": False,
+                    }
+                ))
+                assert result["type"] == "create_entry"
+                policy_options = {
+                    **initial, "force_offline_local": True, "enable_scenarios": False,
+                }
+                assert dict(entry.options) == policy_options
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                assert seen == [(entry.entry_id, policy_options)]
 
                 cookies = json.dumps([{
                     "url": "https://quasar.yandex.ru/get_account_config",
                     "validator": "status_ok",
                 }])
                 submit = asyncio.create_task(hass.config_entries.options.async_configure(
-                    settings["flow_id"], {
+                    urls["flow_id"], {
                         "csrf_endpoints": "", "cookie_storage_endpoints": cookies,
-                        "force_offline_local": True, "enable_scenarios": False,
                     }
                 ))
                 result = await submit
@@ -95,7 +102,10 @@ def test_settings_round_trip_and_invalid_endpoint_leave_other_options(tmp_path):
                 assert entry.options["cookie_storage_endpoints"][0]["validator"] == "status_ok"
                 await asyncio.sleep(0)
                 await asyncio.sleep(0)
-                assert seen == [(entry.entry_id, dict(entry.options))]
+                assert seen == [
+                    (entry.entry_id, policy_options),
+                    (entry.entry_id, dict(entry.options)),
+                ]
 
     asyncio.run(scenario())
 
@@ -134,13 +144,18 @@ def test_unchanged_options_closed_gate_and_disabled_retry(tmp_path):
             assert dict(entry.options) == {}
 
         async with core_flow(tmp_path / "closed") as (hass, entry, lifecycle):
-            settings = await options_step(hass, "settings")
-            lifecycle.context.admission_open = False
-            result = await hass.config_entries.options.async_configure(
-                settings["flow_id"], {"force_offline_local": True}
-            )
-            assert result["errors"] == {"base": "reload_in_progress"}
-            assert dict(entry.options) == {}
+            for step, change in (
+                ("settings", {"force_offline_local": True}),
+                ("api_urls", {"quasar_base_url": "https://iot.quasar.yandex.ru/proxy"}),
+            ):
+                form = await options_step(hass, step)
+                lifecycle.context.admission_open = False
+                result = await hass.config_entries.options.async_configure(
+                    form["flow_id"], change
+                )
+                assert result["errors"] == {"base": "reload_in_progress"}
+                assert result["step_id"] == step
+                assert dict(entry.options) == {}
 
     asyncio.run(scenario())
 
@@ -379,7 +394,7 @@ def test_reauth_timeout_and_account_mismatch_keep_credentials(tmp_path):
     asyncio.run(scenario())
 
 
-def test_broken_saved_endpoints_can_be_repaired_from_settings(tmp_path):
+def test_broken_saved_endpoints_can_be_repaired_from_api_urls(tmp_path):
     async def scenario():
         async with core_flow(tmp_path, options={
             "cookie_storage_endpoints": [],
@@ -387,9 +402,7 @@ def test_broken_saved_endpoints_can_be_repaired_from_settings(tmp_path):
         }) as (hass, entry, lifecycle):
             with patch.object(hass.config_entries, "async_reload", new_callable=AsyncMock,
                               return_value=True):
-                settings = await options_step(hass, "settings")
-                assert settings["type"] == "form"
-                assert "некорректная" in settings["description_placeholders"]["current_cookie"]
+                settings = await options_step(hass, "api_urls")
                 restored = await asyncio.create_task(hass.config_entries.options.async_configure(
                     settings["flow_id"], {
                         "cookie_storage_endpoints": json.dumps([{
