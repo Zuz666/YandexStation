@@ -673,7 +673,7 @@ def test_expired_candidate_cleared_before_refresh():
     asyncio.run(scenario())
 
 
-def test_captured_put_403_invalidates_candidate_without_replay():
+def test_captured_put_403_refreshes_csrf_and_retries_once():
     async def scenario():
         client = make_client()
         cfg = SessionConfig(csrf_endpoints=["https://yandex.ru/iot"])
@@ -681,45 +681,47 @@ def test_captured_put_403_invalidates_candidate_without_replay():
 
         await prime_csrf(session, client, "candidate_1")
         generation = session._csrf_generation
-        client.put = AsyncMock(return_value=captured_forbidden())
-
-        with pytest.raises(CloudRequestError) as exc:
-            await session.put(SCENARIO_PUT_URL, role="quasar", json={"scenario": {}})
-        assert exc.value.role == "quasar"
-        assert exc.value.status == 403
-        assert str(exc.value) == "quasar: HTTP 403"
-
-        # ambiguous failure: exactly one dispatch, no replay
-        assert client.put.call_count == 1
-        # only the unproven candidate pair is dropped
-        assert session.csrf_token is None
-        assert session.readiness.csrf_state == CsrfState.UNAVAILABLE
-        assert session.readiness.auth_state is AuthState.UNKNOWN
-        assert session._csrf_retry_at > time.monotonic()
-
-        # no fetch storm inside the response handler
-        assert client.get.call_count == 0
-
-        # during cooldown commands finish unavailable before dispatch
-        with pytest.raises(RuntimeError, match="csrf_unavailable"):
-            await session.put(SCENARIO_PUT_URL, role="quasar", json={"scenario": {}})
-        assert client.put.call_count == 1
-        assert client.get.call_count == 0
-
-        # after the backoff slot a separate operation gets a new candidate
-        session._csrf_retry_at = 0.0
-        client.get = AsyncMock(return_value=csrf_page("candidate_2"))
         ok = make_response(200, json_body={"status": "ok"}, has_json=True)
-        client.put = AsyncMock(return_value=ok)
+        client.get = AsyncMock(return_value=csrf_page("candidate_2"))
+        client.put = AsyncMock(side_effect=[captured_forbidden(), ok])
 
+        # Case 1: rotated token on /iot -> 1 refresh + 1 transparent retry -> 200 OK
         r = await session.put(SCENARIO_PUT_URL, role="quasar", json={"scenario": {}})
         assert r.status == 200
+        assert client.get.call_count == 1
+        assert client.put.call_count == 2
         assert session.csrf_token == "candidate_2"
         assert session._csrf_generation == generation + 1
-        sent = client.put.call_args.kwargs["headers"]
-        assert sent["x-csrf-token"] == "candidate_2"
-        # success of the current generation resets the rejection chain
+        assert session.readiness.csrf_state == CsrfState.CANDIDATE
+        assert session.readiness.auth_state is AuthState.UNKNOWN
         assert session._csrf_retry_at == 0.0
+        assert client.put.call_args.kwargs["headers"]["x-csrf-token"] == "candidate_2"
+
+        # Case 2: /iot returns the SAME token string -> no replay, cooldown armed
+        client.get = AsyncMock(return_value=csrf_page("candidate_2"))
+        client.put = AsyncMock(return_value=captured_forbidden())
+        session._last_request_ts = 0.0
+        with pytest.raises(CloudRequestError) as exc:
+            await session.put(SCENARIO_PUT_URL, role="quasar", json={"scenario": {}})
+        assert exc.value.status == 403
+        assert client.get.call_count == 1
+        assert client.put.call_count == 1
+        assert session.csrf_token is None
+        assert session._csrf_retry_at > time.monotonic()
+
+        # Case 3: new token on /iot, but the single retry also gets 403 -> no 3rd try, cooldown armed
+        session._csrf_retry_at = 0.0
+        await prime_csrf(session, client, "candidate_3")
+        client.get = AsyncMock(return_value=csrf_page("candidate_4"))
+        client.put = AsyncMock(side_effect=[captured_forbidden(), captured_forbidden()])
+        session._last_request_ts = 0.0
+        with pytest.raises(CloudRequestError) as exc2:
+            await session.put(SCENARIO_PUT_URL, role="quasar", json={"scenario": {}})
+        assert exc2.value.status == 403
+        assert client.get.call_count == 1
+        assert client.put.call_count == 2
+        assert session.csrf_token is None
+        assert session._csrf_retry_at > time.monotonic()
 
     asyncio.run(scenario())
 
@@ -756,7 +758,8 @@ def test_late_403_of_old_generation_keeps_same_string_candidate():
             await asyncio.sleep(0)
         assert not fut_b.done()
 
-        # first response: 403 invalidates the generation-1 pair
+        # first response: 403 invalidates generation-1; failed refresh leaves token None
+        client.get = AsyncMock(return_value=make_response(500))
         fut_a.set_result(captured_forbidden())
         with pytest.raises(CloudRequestError):
             await task_a
@@ -786,7 +789,7 @@ def test_late_success_cannot_cancel_invalidated_candidate_cooldown(retry_after):
         cfg = SessionConfig(csrf_endpoints=["https://yandex.ru/iot"])
         session = YandexSession(client, config=cfg)
         await prime_csrf(session, client, "candidate_T")
-        client.get = AsyncMock(return_value=csrf_page("candidate_new"))
+        client.get = AsyncMock(return_value=make_response(500))
         replies = {index: asyncio.get_running_loop().create_future() for index in (1, 2)}
         dispatched = set()
         both_dispatched = asyncio.Event()
@@ -826,7 +829,7 @@ def test_late_success_cannot_cancel_invalidated_candidate_cooldown(retry_after):
                 assert retry_at - time.monotonic() > 350
             with pytest.raises(RuntimeError, match="csrf_unavailable"):
                 await session.put(SCENARIO_PUT_URL, role="quasar", json={})
-            client.get.assert_not_awaited()
+            assert client.get.await_count == (1 if retry_after is None else 0)
             assert client.put.call_count == 2
         finally:
             for task in tasks:
