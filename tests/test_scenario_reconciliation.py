@@ -32,9 +32,13 @@ class ScenarioCommandPeer:
         self.configured = None
         self.executed = []
         self.put_failure = False
+        self.put_status = None
+        self.put_calls = []
         self.lose_action_response = False
         self.action_started = asyncio.Event()
         self.release_action = None
+        self.retry_after = {}
+        self.catalog = None
 
     async def ensure_csrf(self):
         return "synthetic-csrf"
@@ -45,10 +49,18 @@ class ScenarioCommandPeer:
     async def put(self, url, *, role, json):
         if self.put_failure:
             raise CloudRequestError(role, 403)
+        if self.put_status is not None:
+            self.put_calls.append(self.put_status)
+            raise CloudRequestError(role, self.put_status)
         value = json["steps"][0]["parameters"]["items"][0]["value"]
         self.configured = value["capabilities"][0]["state"]["value"]
         await asyncio.sleep(0)
         return self
+
+    async def get(self, url, *, role):
+        if self.catalog is None:
+            raise CloudRequestError(role, 404)
+        return self.catalog
 
     async def post(self, url, *, role):
         self.executed.append(self.configured)
@@ -372,5 +384,43 @@ def test_untrusted_journal_aborts_creation():
         # Untrusted journal forbids automatic creation
         quasar.add_scenario.assert_not_called()
         assert quasar.devices[0]["scenario_id"] is None
+
+    asyncio.run(scenario())
+
+
+def test_command_404_rearms_worker_and_rebinds_without_command_replay():
+    """Finding 9: a 404 clears the binding and must re-arm reconciliation."""
+    async def scenario():
+        payload = scenario_speaker_tts("ХА dev1", encode("dev1"), "dev1", "пустышка")
+        candidate = {
+            "id": "scen1",
+            "triggers": payload["triggers"],
+            "steps": payload["steps"],
+        }
+        peer = ScenarioCommandPeer()
+        catalog = AsyncMock()
+        catalog.json = AsyncMock(return_value={
+            "status": "ok", "scenarios": [candidate],
+        })
+        peer.catalog = catalog
+        quasar, device = command_runtime(peer)
+        # Successful startup already reconciled; the worker has finished
+        device["scenario_id"] = "scen1"
+
+        peer.put_status = 404
+        outcome = await quasar.send(device, "привет")
+
+        assert outcome is SendOutcome.UNAVAILABLE
+        assert "scenario_id" not in device
+        assert quasar.readiness.scenarios_state is ScenariosState.UNAVAILABLE
+
+        worker = quasar._scenario_worker_task
+        assert worker is not None
+        await asyncio.wait_for(asyncio.shield(worker), 5)
+
+        # Reconciliation re-bound the speaker via GET; the command never replayed
+        assert device["scenario_id"] == "scen1"
+        assert peer.executed == []
+        assert peer.put_calls == [404]
 
     asyncio.run(scenario())

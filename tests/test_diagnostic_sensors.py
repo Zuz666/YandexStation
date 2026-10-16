@@ -204,7 +204,11 @@ def test_quasar_sync_scenarios_failure_degrades_readiness():
             "name": "Станция Спальня",
             "type": "devices.types.smart_speaker.yandex.station",
             "quasar_info": {"device_id": "sp_1", "platform": "yandexstation"},
-            "capabilities": [{"type": "devices.capabilities.quasar.server_action"}],
+            "capabilities": [{
+                "type": "devices.capabilities.quasar.server_action",
+                "parameters": {"instance": "text_action"},
+                "state": {"instance": "text_action", "value": "ничего не делай"},
+            }],
         }
         mock_resp_devices = AsyncMock()
         mock_resp_devices.json.return_value = {

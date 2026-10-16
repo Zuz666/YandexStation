@@ -48,6 +48,8 @@ class YandexGlagol:
         self._connect_task: Optional[asyncio.Task] = None
         self._stopped = False
         self._cancelled = False
+        self._lifecycle_lock = asyncio.Lock()
+        self._stop_event = asyncio.Event()
         try:
             self.loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -67,34 +69,34 @@ class YandexGlagol:
         return self.device["name"]
 
     async def start_or_restart(self):
-        if self._stopped:
-            return
-        endpoint = f"wss://{self.device['host']}:{self.device['port']}"
-        if not self.url:
-            self.url = endpoint
-            self._connect_task = asyncio.create_task(self._connect(0))
-        elif endpoint != self.url:
-            self.debug("Updating local speaker endpoint")
-            self.url = endpoint
-            # Force the current reader to reconnect to the new host or port.
-            if self.ws and not self.ws.closed:
-                await self.ws.close()
+        async with self._lifecycle_lock:
+            if self._stopped:
+                return
+            endpoint = f"wss://{self.device['host']}:{self.device['port']}"
+            if not self.url:
+                self.url = endpoint
+                self._connect_task = asyncio.create_task(self._connect(0))
+            elif endpoint != self.url:
+                self.debug("Updating local speaker endpoint")
+                self.url = endpoint
+                if self.ws and not self.ws.closed:
+                    await self.ws.close()
 
-    async def stop(self):
-        """Disable reconnects, cancel and await active tasks, and close the socket."""
-        self.debug("Stopping local connection")
-        self._stopped = True
-        self._token_rejected_at = None
-        self.url = None
-        if self._connect_task is not None:
-            self._connect_task.cancel()
+    async def _cancel_connect_task(self):
+        """Cancel and await the pending connect/reconnect task, if any."""
+        task = self._connect_task
+        if task is not None and not task.done():
+            task.cancel()
             try:
-                await self._connect_task
+                await task
             except asyncio.CancelledError:
                 pass
             except Exception as e:
                 self.debug(f"Connection stop error: {type(e).__name__}")
-            self._connect_task = None
+        self._connect_task = None
+
+    async def _close_connection(self):
+        await self._cancel_connect_task()
         if self.ws is not None and not self.ws.closed:
             await self.ws.close()
         self.ws = None
@@ -104,6 +106,49 @@ class YandexGlagol:
         self.waiters.clear()
         if self.update_handler:
             self.update_handler(None)
+
+    async def stop(self):
+        """Terminal stop invalidates replacements before waiting for their lock."""
+        self.debug("Stopping local connection")
+        self._stopped = True
+        self._stop_event.set()
+        self._token_rejected_at = None
+        self.url = None
+        async with self._lifecycle_lock:
+            await self._close_connection()
+
+    async def restart(self, delay: float = 0.0):
+        """Replace the reader without reviving a client stopped by unload."""
+        async with self._lifecycle_lock:
+            if self._stopped or not self.url:
+                return
+            self.debug("Restarting local connection")
+            await self._close_connection()
+            if delay:
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), delay)
+                except asyncio.TimeoutError:
+                    pass
+            if not self._stopped and self.url:
+                self._connect_task = asyncio.create_task(self._connect(0))
+
+    async def adopt_token(self, token: str) -> bool:
+        """Use a fetched candidate without replacing an accepted live token."""
+        async with self._lifecycle_lock:
+            if self._stopped or not token or token == self.device_token:
+                return False
+            if (
+                self.token_state is TokenState.ACCEPTED
+                and self.ws is not None and not self.ws.closed
+            ):
+                return False
+            self.device_token = token
+            self.token_state = TokenState.CANDIDATE
+            if self.url and (self.ws is None or self.ws.closed):
+                await self._cancel_connect_task()
+                if not self._stopped and self.url:
+                    self._connect_task = asyncio.create_task(self._connect(0))
+            return True
 
     async def _handle_token_rejection(self, rejected_token: str) -> int:
         """Handle peer CLOSE (4000, 'Invalid token') for this connection.

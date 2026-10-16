@@ -9,6 +9,7 @@ from homeassistant.helpers import device_registry
 
 from custom_components.yandex_station.core.policy import EntryPolicy
 from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
+from custom_components.yandex_station.binary_sensor import YandexStationLocalConnection
 from custom_components.yandex_station.core.yandex_station import YandexStation
 from .test_cache import device_record
 from .test_ownership import ownership_runtime
@@ -102,3 +103,64 @@ def test_registry_metadata_failure_preserves_playback_and_safe_context(tmp_path,
             assert "signed URL and payload" not in caplog.text
 
     asyncio.run(scenario())
+
+
+async def verify_firmware_only_diagnostics(tmp_path):
+    async with ownership_runtime(tmp_path) as (hass, entries, _, _):
+        entry = entries["a"]
+        registry = device_registry.async_get(hass)
+        registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={("yandex_station", "firmware-speaker")},
+            name="Synthetic speaker", sw_version="old-version",
+        )
+        quasar = YandexQuasar(MagicMock(), policy=EntryPolicy(force_offline_local=True))
+        station = YandexStation(
+            quasar, device_record("cloud-speaker", "firmware-speaker")
+        )
+        station.hass = hass
+        station.platform = SimpleNamespace(config_entry=entry)
+        station.async_write_ha_state = MagicMock()
+
+        frames, firmware = [], []
+        quasar.subscribe_update("firmware-speaker_glagol", frames.append)
+        quasar.subscribe_update(
+            "firmware-speaker_glagol_firmware", firmware.append
+        )
+
+        sensor = YandexStationLocalConnection(quasar, entry, station.device)
+        sensor.hass = hass
+        sensor.async_write_ha_state = MagicMock()
+        await sensor.async_added_to_hass()
+
+        state = {"aliceState": "IDLE", "volume": 0.3}
+        station.async_set_state({"state": deepcopy(state), "softwareVersion": "v1"})
+        assert len(frames) == 1 and "state" in frames[0]
+        assert firmware == []
+        assert sensor.is_on is True
+        assert sensor.extra_state_attributes["software_version"] == "v1"
+        heartbeat = sensor.extra_state_attributes["last_heartbeat"]
+
+        # identical state with identical firmware stays deduplicated
+        station.async_set_state({"state": deepcopy(state), "softwareVersion": "v1"})
+        assert len(frames) == 1
+        assert firmware == []
+
+        # a firmware-only change still reaches glagol subscribers, without
+        # re-delivering the identical state frame
+        station.async_set_state({"state": deepcopy(state), "softwareVersion": "v2"})
+        assert len(frames) == 1
+        assert firmware == [{"softwareVersion": "v2"}]
+
+        # repeated identical firmware does not spam diagnostics
+        station.async_set_state({"state": deepcopy(state), "softwareVersion": "v2"})
+        assert len(frames) == 1
+        assert firmware == [{"softwareVersion": "v2"}]
+
+        assert sensor.is_on is True
+        assert sensor.extra_state_attributes["software_version"] == "v2"
+        assert sensor.extra_state_attributes["last_heartbeat"] == heartbeat
+
+
+def test_firmware_only_dispatch_reaches_diagnostics_without_state_change(tmp_path):
+    asyncio.run(verify_firmware_only_diagnostics(tmp_path))

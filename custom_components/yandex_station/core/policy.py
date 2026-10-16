@@ -463,25 +463,31 @@ class SessionConfig:
     proxy: str | None = None
     ssl: bool | None = None
 
-    quasar_base_url: str = DEFAULT_QUASAR_BASE_URL
-    account_base_url: str = DEFAULT_ACCOUNT_BASE_URL
-    passport_base_url: str = DEFAULT_PASSPORT_BASE_URL
-    mobileproxy_base_url: str = DEFAULT_MOBILEPROXY_BASE_URL
-    glagol_base_url: str = DEFAULT_GLAGOL_BASE_URL
-    rpc_base_url: str = DEFAULT_RPC_BASE_URL
+    quasar_base_url: str | None = None
+    account_base_url: str | None = None
+    passport_base_url: str | None = None
+    mobileproxy_base_url: str | None = None
+    glagol_base_url: str | None = None
+    rpc_base_url: str | None = None
 
-    cookie_storage_endpoints: list[dict[str, str]] = field(
-        default_factory=lambda: [
-            dict(endpoint) for endpoint in DEFAULT_COOKIE_STORAGE_ENDPOINTS
-        ]
-    )
-    csrf_endpoints: list[str] = field(
-        default_factory=lambda: list(DEFAULT_CSRF_ENDPOINTS)
-    )
+    cookie_storage_endpoints: list[dict[str, str]] | None = None
+    csrf_endpoints: list[str] | None = None
+    _explicit_probe_roles: frozenset[str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.domain is not None:
             self.domain = str(self.domain).strip().lower() or None
+        # Resolve domain defaults once; explicit values (even equal defaults) win.
+        for attr, default in ROLE_BASE_FIELDS.values():
+            if getattr(self, attr) is None:
+                setattr(self, attr, _apply_domain_suffix(default, self.domain)
+                        if self.domain else default)
+        self._explicit_probe_roles = frozenset(
+            role for role, endpoints in (
+                ("cookie_probe", self.cookie_storage_endpoints),
+                ("csrf", self.csrf_endpoints),
+            ) if endpoints is not None
+        )
         self.cookie_storage_endpoints = _normalize_cookie_endpoints(
             self.cookie_storage_endpoints
         )
@@ -498,8 +504,8 @@ class SessionConfig:
         entry_options = entry_options or {}
 
         bases = {
-            attr: _config_value(entry_options, yaml_config, attr, default)
-            for attr, default in ROLE_BASE_FIELDS.values()
+            attr: _config_value(entry_options, yaml_config, attr)
+            for attr, _default in ROLE_BASE_FIELDS.values()
         }
 
         return cls(
@@ -531,30 +537,29 @@ class SessionConfig:
             _check_https_endpoint(endpoint, require_path=True)
 
     def resolve_url(self, url: str, role: str) -> str:
-        """Join url onto the configured base for role, preserving prefixes.
+        """Resolve default origins through domain defaults, then explicit overrides.
 
-        Roles with a base get their own default origin swapped for the
-        configured one on an exact origin and path-boundary match; probe
-        roles may reference any of the six default origins. Music/CDN and
-        local websocket URLs are never rewritten. The configured ``domain``
-        rewrites exact yandex.ru/yandex.com host suffixes for every cloud
-        role. Trust is NOT decided here; call validate_destination before
-        transport.
+        Full explicit probe lists take precedence over base settings. Repeated
+        resolution preserves prefixes. Destination trust is checked separately.
         """
         if role not in SESSION_ROLES:
             raise ValueError("invalid_endpoint")
         if not url:
             return url
 
-        if role in ROLE_BASE_FIELDS:
-            attr, default = ROLE_BASE_FIELDS[role]
-            url = _swap_base_prefix(url, default, getattr(self, attr))
-        elif role in ("cookie_probe", "csrf"):
-            for attr, default in ROLE_BASE_FIELDS.values():
-                url = _swap_base_prefix(url, default, getattr(self, attr))
-
-        if self.domain and role not in ("music", "local_ws"):
-            url = _apply_domain_suffix(url, self.domain)
+        if role in self._explicit_probe_roles or role in ("music", "local_ws"):
+            return url
+        bases = (
+            (ROLE_BASE_FIELDS[role],) if role in ROLE_BASE_FIELDS
+            else ROLE_BASE_FIELDS.values() if role in ("cookie_probe", "csrf")
+            else ()
+        )
+        for attr, default in bases:
+            for source in (default, _apply_domain_suffix(default, "yandex.com")):
+                if _origin_of(url) == _origin_of(source):
+                    return _swap_base_prefix(url, source, getattr(self, attr))
+        if self.domain and role in ("cookie_probe", "csrf", "cloud_ws"):
+            return _apply_domain_suffix(url, self.domain)
         return url
 
     def validate_destination(

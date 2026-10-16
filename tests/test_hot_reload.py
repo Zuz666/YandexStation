@@ -46,7 +46,7 @@ def _run_isolated(tmp_path, mode, expected_reason=None):
     "success", "drain", "drain_head_service", "parallel_reload", "cancel_waiter",
     "cancel_during_import", "entries_success", "entries_setup_retry",
     "entries_retry_mix", "entries_disabled", "entries_mixed",
-    "entries_discovery_reconnect",
+    "entries_discovery_reconnect", "baseline_advance", "entries_baseline_partial",
 ])
 def test_full_reload_changes_real_http_and_core_service(tmp_path, mode):
     _run_isolated(tmp_path, mode)
@@ -377,8 +377,14 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
                         "entries_rollback",
                         "entries_setup_retry", "entries_retry_mix", "entries_disabled",
                         "entries_mixed", "entries_discovery_reconnect",
-                        "state_during_drain", "flow_during_drain"}:
+                        "state_during_drain", "flow_during_drain",
+                        "baseline_advance", "entries_baseline_partial"}:
                 _change_behavior(root, "v2")
+                if mode in {"baseline_advance", "entries_baseline_partial"}:
+                    # Finding 22: this generation adds a top-level binding the
+                    # original startup scan never saw.
+                    _append(root / "core" / "stream.py",
+                            'SYNTHETIC_BASELINE_PROBE = "v2"\n')
             elif mode == "syntax":
                 _append(root / "core" / "stream.py", "\ndef broken(:\n")
             elif mode == "binding":
@@ -432,7 +438,7 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
                     _append(root / "core" / "stream.py", "\n# edited during Core unload\n")
                     return True
                 hass.config_entries.async_unload_platforms.side_effect = unload_and_change
-            if mode == "entries_setup_retry":
+            if mode in {"entries_setup_retry", "entries_baseline_partial"}:
                 from custom_components.yandex_station.core.cache import CacheManager
                 async def unload_and_remove_cache(*args):
                     cache = CacheManager(
@@ -621,7 +627,16 @@ if not builtins.hot_reload_release.wait(10):
                             hass, language, "options", {DOMAIN}
                         )
                         assert resources[translation_key] == f"Updated {language}"
-                if mode in {"entries_setup_retry", "entries_retry_mix", "entries_mixed"}:
+                if mode == "entries_baseline_partial":
+                    # The imported generation is already running even though
+                    # entry setup failed, so it must own the reload baseline.
+                    assert result["status"] == "partial", result
+                    assert result["entries"][entry.entry_id] == "setup_retry", result
+                    assert entry.state is ConfigEntryState.SETUP_RETRY
+                    assert sys.modules[
+                        "custom_components.yandex_station.core.stream"
+                    ].SYNTHETIC_BASELINE_PROBE == "v2"
+                elif mode in {"entries_setup_retry", "entries_retry_mix", "entries_mixed"}:
                     assert result["status"] == "partial", result
                     retry_id = {
                         "entries_setup_retry": entry.entry_id,
@@ -807,6 +822,38 @@ if not builtins.hot_reload_release.wait(10):
                     assert second["status"] == "success", second
                     assert await _get_body(client, signed) == b"v3"
                     assert lifecycle.stream_dispatcher.context is context
+                if mode in {"baseline_advance", "entries_baseline_partial"}:
+                    # Finding 22 regression: the next generation removes the
+                    # binding the running generation owns. The guard must
+                    # refuse before any unload; importlib.reload would keep a
+                    # stale binding alive and mix generations instead.
+                    probe = root / "core" / "stream.py"
+                    source = probe.read_text()
+                    assert 'SYNTHETIC_BASELINE_PROBE = "v2"\n' in source
+                    probe.write_text(source.replace(
+                        'SYNTHETIC_BASELINE_PROBE = "v2"\n', ""
+                    ))
+                    running_generation = lifecycle.generation
+                    refusal = await _reload(hass, lifecycle, DOMAIN)
+                    assert refusal["reason"] == "top_level_binding_removed", refusal
+                    assert refusal["status"] == "restart_required", refusal
+                    assert lifecycle.generation == running_generation
+                    assert sys.modules[
+                        "custom_components.yandex_station.core.stream"
+                    ].SYNTHETIC_BASELINE_PROBE == "v2"
+                    assert context.admission_open
+                    if mode == "baseline_advance":
+                        assert await _get_body(client, signed) == b"v2"
+                        await hass.services.async_call(
+                            "tts", "yandex_station_say", {}, blocking=True
+                        )
+                        assert hass.states.get(
+                            "sensor.synthetic_reload_generation"
+                        ).state == "v2"
+                    else:
+                        assert entry.state is ConfigEntryState.SETUP_RETRY
+                        async with client.get(signed) as denied:
+                            assert denied.status == 403
             print("reload behavior verified", mode, result["status"])
     finally:
         hold.set()

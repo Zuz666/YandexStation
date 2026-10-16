@@ -87,6 +87,29 @@ def _clean_json(value):
     return _DROP
 
 
+def _valid_instance_record(record, *, is_property: bool = False) -> bool:
+    """Match what platforms subscript: type, parameters and state shapes."""
+    if not isinstance(record, dict):
+        return False
+    rtype = record.get("type")
+    if not isinstance(rtype, str) or not rtype:
+        return False
+    if "parameters" in record and not isinstance(record["parameters"], dict):
+        return False
+    parameters = record.get("parameters")
+    if (is_property or rtype not in (
+        "devices.capabilities.on_off", "devices.capabilities.lock",
+        "devices.capabilities.zigbee_node",
+    )) and not isinstance(parameters, dict):
+        return False
+    if is_property and (
+        not isinstance(parameters.get("instance"), str) or not parameters["instance"]
+    ):
+        return False
+    state = record.get("state")
+    return state is None or isinstance(state, dict)
+
+
 def _clean_device(device) -> dict | None:
     """Keep usable inventory metadata, never runtime objects or availability."""
     if not isinstance(device, dict):
@@ -109,6 +132,12 @@ def _clean_device(device) -> dict | None:
             not isinstance(info.get(key), str) or not info[key]
             for key in ("device_id", "platform")
         ):
+            return None
+    for record in device["capabilities"]:
+        if not _valid_instance_record(record):
+            return None
+    for record in device.get("properties", ()):
+        if not _valid_instance_record(record, is_property=True):
             return None
     cleaned = _clean_json(device)
     for key in _DEVICE_RUNTIME_KEYS:

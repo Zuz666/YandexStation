@@ -44,6 +44,12 @@ def get_ext(url: str) -> str:
     return urlsplit(url).path.rsplit(".", 1)[-1]
 
 
+def _response_content_type(ext: str) -> str:
+    """Downstream Content-Type for a signed resource extension."""
+    # playlist-extracted AES-128 key children stream as opaque bytes
+    return "application/octet-stream" if ext == "key" else MIME_TYPES[ext]
+
+
 _NUMERIC_HOST = re.compile(
     r"(?:0[xX][0-9a-fA-F]+|[0-9]+)"
     r"(?:\.(?:0[xX][0-9a-fA-F]+|[0-9]+))*\.?"
@@ -137,10 +143,15 @@ def validate_media_url(context: StreamContext, entry_id: str, url: str) -> str:
 
 
 def _sign(context: StreamContext, entry_id: str, url: str, ext: str,
-          expires_at: int, lan_only: bool) -> str:
-    token = jwt.encode({
+          expires_at: int, lan_only: bool, kind: str | None = None) -> str:
+    payload = {
         "url": url, "entry_id": entry_id, "lan_only": lan_only, "exp": expires_at,
-    }, context.key, algorithm="HS256")
+    }
+    if kind is not None:
+        # signed resource type, e.g. a playlist-extracted AES-128 key; it
+        # separates key children from generic media extensions
+        payload["kind"] = kind
+    token = jwt.encode(payload, context.key, algorithm="HS256")
     return f"{context.hass_url}/api/yandex_station/{token}.{ext}"
 
 
@@ -247,7 +258,7 @@ class StreamImplementation:
         return self._lan_session
 
     def _decode(self, token: str, ext: str):
-        if ext not in MIME_TYPES:
+        if ext not in MIME_TYPES and ext != "key":
             raise ValueError("media_extension_blocked")
         try:
             data = jwt.decode(token, self.context.key, algorithms=["HS256"])
@@ -260,6 +271,10 @@ class StreamImplementation:
             or type(data.get("lan_only")) is not bool
             or "exp" not in data
         ):
+            raise ValueError("invalid_media_token")
+        if ext == "key" and data.get("kind") != "key":
+            # key resources exist only as playlist-extracted EXT-X-KEY
+            # children; no user-minted generic .key URL is ever accepted
             raise ValueError("invalid_media_token")
         entry_id = data["entry_id"]
         # is_offline re-checks entry admission with current policy
@@ -309,8 +324,16 @@ class StreamImplementation:
 
     def _hls_body(self, body: str, base_url: str, entry_id: str,
                   offline: bool, expires_at: int) -> str:
-        def child(value: str) -> str:
+        def child(value: str, *, key_resource: bool = False) -> str:
             url = _destination(self.context, urljoin(base_url, value), offline)
+            if key_resource:
+                # EXT-X-KEY children are signed as key resources whatever
+                # their source extension (keys are commonly extensionless);
+                # every destination/offline gate still applies per child
+                return _sign(
+                    self.context, entry_id, url, "key", expires_at, offline,
+                    kind="key",
+                )
             ext = get_ext(url)
             if ext not in MIME_TYPES:
                 raise ValueError("media_segment_blocked")
@@ -321,6 +344,10 @@ class StreamImplementation:
             item = line.strip()
             if not item:
                 lines.append(line)
+            elif item.startswith("#EXT-X-KEY:"):
+                lines.append(_HLS_URI.sub(
+                    lambda match: f'URI="{child(match[1], key_resource=True)}"', line
+                ))
             elif item.startswith("#"):
                 lines.append(_HLS_URI.sub(lambda match: f'URI="{child(match[1])}"', line))
             else:
@@ -336,7 +363,7 @@ class StreamImplementation:
             )
             async with response:
                 headers = copy_headers(response.headers, RESPONSE_HEADERS)
-                headers[hdrs.CONTENT_TYPE] = MIME_TYPES[ext]
+                headers[hdrs.CONTENT_TYPE] = _response_content_type(ext)
                 return web.Response(status=response.status, headers=headers)
         except ValueError as error:
             _LOGGER.debug("Media HEAD blocked: %s", _safe_block_reason(error))
@@ -362,11 +389,11 @@ class StreamImplementation:
                         headers={
                             hdrs.ACCESS_CONTROL_ALLOW_HEADERS: "*",
                             hdrs.ACCESS_CONTROL_ALLOW_ORIGIN: "*",
-                            hdrs.CONTENT_TYPE: MIME_TYPES[ext],
+                            hdrs.CONTENT_TYPE: _response_content_type(ext),
                         },
                     )
                 headers = copy_headers(response.headers, RESPONSE_HEADERS)
-                headers[hdrs.CONTENT_TYPE] = MIME_TYPES[ext]
+                headers[hdrs.CONTENT_TYPE] = _response_content_type(ext)
                 if ext == "ts":
                     headers[hdrs.ACCESS_CONTROL_ALLOW_HEADERS] = "*"
                     headers[hdrs.ACCESS_CONTROL_ALLOW_ORIGIN] = "*"

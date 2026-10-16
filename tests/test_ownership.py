@@ -232,6 +232,115 @@ def test_claim_rejects_enabled_owner_and_foreign_account_record(tmp_path):
     asyncio.run(scenario())
 
 
+def test_claim_migrates_scoped_diagnostics_preserving_entity_id_and_metadata(tmp_path):
+    async def scenario():
+        async with ownership_runtime(tmp_path, disabled=('a',)) as (hass, entries, client, _):
+            device, media = register_speaker(hass, entries['a'])
+            registry = entity_registry.async_get(hass)
+            transport = registry.async_get_or_create(
+                'sensor', DOMAIN, 'entry-a_shared-local_transport',
+                config_entry=entries['a'], device_id=device.id,
+                suggested_object_id='preserved_transport',
+            )
+            alice = registry.async_get_or_create(
+                'sensor', DOMAIN, 'entry-a_shared-local_alice_state',
+                config_entry=entries['a'], device_id=device.id,
+                suggested_object_id='preserved_alice',
+            )
+            local = registry.async_get_or_create(
+                'binary_sensor', DOMAIN, 'shared-local_local_connection',
+                config_entry=entries['a'], device_id=device.id,
+                suggested_object_id='preserved_local',
+            )
+            area = area_registry.async_get(hass).async_create('Preserved area')
+            registry.async_update_entity(
+                transport.entity_id, name='User transport name', area_id=area.id,
+            )
+            for entry in entries.values():
+                await prepare_account(hass, entry)
+            b = await restore_account(hass, entries['b'], client)
+            assert await async_resolve_speaker_owners(hass, entries['b'], b) == set()
+            reloaded = asyncio.Event()
+            requests = []
+
+            async def reload_entry(entry_id):
+                requests.append(entry_id)
+                reloaded.set()
+                return True
+
+            with patch.object(hass.config_entries, 'async_reload', side_effect=reload_entry):
+                await asyncio.create_task(async_claim_speaker(hass, entries['b'], 'shared-local'))
+                await asyncio.wait_for(reloaded.wait(), 1)
+                await hass.async_block_till_done()
+            assert requests == ['entry-b']
+            assert registry.async_get_entity_id(
+                'sensor', DOMAIN, 'entry-b_shared-local_transport'
+            ) == transport.entity_id
+            assert registry.async_get_entity_id(
+                'sensor', DOMAIN, 'entry-b_shared-local_alice_state'
+            ) == alice.entity_id
+            assert registry.async_get_entity_id(
+                'binary_sensor', DOMAIN, 'entry-b_shared-local_local_connection'
+            ) == local.entity_id
+            for record, unique_id in (
+                (transport, 'entry-b_shared-local_transport'),
+                (alice, 'entry-b_shared-local_alice_state'),
+                (local, 'entry-b_shared-local_local_connection'),
+            ):
+                updated = registry.async_get(record.entity_id)
+                assert updated.unique_id == unique_id
+                assert updated.config_entry_id == 'entry-b'
+            updated = registry.async_get(transport.entity_id)
+            assert updated.name == 'User transport name' and updated.area_id == area.id
+            assert registry.async_get(media.entity_id).config_entry_id == 'entry-b'
+            assert await async_resolve_speaker_owners(hass, entries['b'], b) == {'shared-local'}
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("collision", ["foreign", "claiming_entry", "legacy_source"])
+def test_claim_refuses_diagnostic_collisions_without_partial_transfer(tmp_path, collision):
+    async def scenario():
+        async with ownership_runtime(tmp_path, disabled=('a',)) as (hass, entries, client, lifecycle):
+            device, media = register_speaker(hass, entries['a'])
+            registry = entity_registry.async_get(hass)
+            transport = registry.async_get_or_create(
+                'sensor', DOMAIN, 'entry-a_shared-local_transport',
+                config_entry=entries['a'], device_id=device.id,
+                suggested_object_id='preserved_transport',
+            )
+            owner = entries["b"] if collision == "claiming_entry" else entries["a"]
+            foreign = registry.async_get_or_create(
+                "sensor", DOMAIN,
+                "shared-local_transport" if collision == "legacy_source"
+                else "entry-b_shared-local_transport",
+                config_entry=owner, suggested_object_id="conflicting_transport",
+                device_id=device.id if collision == "legacy_source" else None,
+            )
+            for entry in entries.values():
+                await prepare_account(hass, entry)
+            b = await restore_account(hass, entries['b'], client)
+            assert await async_resolve_speaker_owners(hass, entries['b'], b) == set()
+            reloads = []
+
+            async def reload_entry(entry_id):
+                reloads.append(entry_id)
+                return True
+
+            with patch.object(hass.config_entries, 'async_reload', side_effect=reload_entry):
+                with pytest.raises(ValueError, match='ownership_conflict'):
+                    await async_claim_speaker(hass, entries['b'], 'shared-local')
+            await hass.async_block_till_done()
+            assert reloads == []
+            assert registry.async_get(media.entity_id).config_entry_id == 'entry-a'
+            assert registry.async_get(transport.entity_id).unique_id == 'entry-a_shared-local_transport'
+            assert registry.async_get(transport.entity_id).config_entry_id == 'entry-a'
+            assert registry.async_get(foreign.entity_id).config_entry_id == owner.entry_id
+            assert lifecycle.speaker_owners.get('shared-local') != 'entry-b'
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('order', [('a', 'b'), ('b', 'a')])
 def test_claim_selects_canonical_media_device_across_registration_orders(tmp_path, order):
     async def scenario():

@@ -343,3 +343,113 @@ def test_discovery_port_change_reconnects_to_new_loopback_peer():
             await runner.cleanup()
 
     asyncio.run(scenario())
+
+
+def test_overlapping_restarts_leave_one_reader_and_stop_closes_every_socket():
+    async def scenario():
+        closing, release = asyncio.Event(), asyncio.Event()
+        sockets, readers = [], []
+
+        class HeldClose(FakeWS):
+            async def close(self):
+                closing.set()
+                while not release.is_set():
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        continue
+                await super().close()
+
+        async def connect(*args, **kwargs):
+            ws = HeldClose([]) if not sockets else FakeWS([])
+            sockets.append(ws)
+            readers.append(asyncio.current_task())
+            return ws
+
+        glagol, session, _ = make_glagol(None)
+        session.ws_connect.side_effect = connect
+        try:
+            await glagol.start_or_restart()
+            await asyncio.sleep(0)
+            first = asyncio.create_task(glagol.restart())
+            await asyncio.wait_for(closing.wait(), 1)
+            second = asyncio.create_task(glagol.restart())
+            await asyncio.sleep(0)
+            release.set()
+            await asyncio.wait_for(asyncio.gather(first, second), 1)
+            await asyncio.sleep(0)
+            assert sum(not ws.closed for ws in sockets) == 1
+            await glagol.stop()
+            assert all(ws.closed for ws in sockets)
+            assert all(task.done() for task in readers)
+        finally:
+            release.set()
+            await glagol.stop()
+            for task in readers:
+                task.cancel()
+            await asyncio.gather(*readers, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_stop_invalidates_token_adoption_waiting_for_old_reader():
+    async def scenario():
+        cancelled, release = asyncio.Event(), asyncio.Event()
+
+        async def old_reader():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                while not release.is_set():
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        continue
+                raise
+
+        glagol, session, _ = make_glagol(FakeWS([]), token=None)
+        glagol.url = "wss://127.0.0.1:1905"
+        glagol._connect_task = asyncio.create_task(old_reader())
+        await asyncio.sleep(0)
+        adoption = asyncio.create_task(glagol.adopt_token("replacement"))
+        await asyncio.wait_for(cancelled.wait(), 1)
+        stop = asyncio.create_task(glagol.stop())
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(adoption, stop), 1)
+        await asyncio.sleep(0)
+        try:
+            session.ws_connect.assert_not_awaited()
+            assert glagol._connect_task is None
+        finally:
+            await glagol.stop()
+
+    asyncio.run(scenario())
+
+
+def test_terminal_stop_interrupts_long_restart_delay():
+    async def scenario():
+        closed = asyncio.Event()
+
+        class NotifyingWS(FakeWS):
+            async def close(self):
+                await super().close()
+                closed.set()
+
+        glagol, session, _ = make_glagol(NotifyingWS([]))
+        await glagol.start_or_restart()
+        await asyncio.sleep(0)
+        restart = asyncio.create_task(glagol.restart(delay=60))
+        await asyncio.wait_for(closed.wait(), 1)
+        try:
+            await asyncio.wait_for(glagol.stop(), 1)
+            await asyncio.wait_for(restart, 1)
+            assert session.ws_connect.await_count == 1
+            assert glagol._connect_task is None
+        finally:
+            restart.cancel()
+            await asyncio.gather(restart, return_exceptions=True)
+            await glagol.stop()
+
+    asyncio.run(scenario())

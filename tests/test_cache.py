@@ -139,6 +139,45 @@ def test_corrupt_devices_are_dropped_but_empty_module_capabilities_are_valid():
     assert restored.devices == [device_record(), module]
 
 
+@pytest.mark.parametrize("field, value", [
+    ("capabilities", [None]),
+    ("capabilities", ["devices.capabilities.on_off"]),
+    ("capabilities", [{"type": None}]),
+    ("capabilities", [{"parameters": {"instance": "on"}}]),
+    ("capabilities", [{"type": "devices.capabilities.mode", "parameters": "mode"}]),
+    ("capabilities", [{"type": "devices.capabilities.on_off", "state": "on"}]),
+    ("properties", [None]),
+    ("properties", [{"type": "devices.properties.float", "state": 5}]),
+    ("capabilities", [{"type": "devices.capabilities.mode"}]),
+    ("properties", [{"type": "devices.properties.float", "parameters": {}}]),
+    ("properties", [{"type": "devices.capabilities.on_off"}]),
+    ("properties", [{"type": "unknown", "parameters": {}}]),
+])
+def test_malformed_capability_records_drop_device_but_keep_healthy_neighbor(field, value):
+    payload = snapshot_payload()
+    malformed = device_record("broken", "broken-local")
+    malformed[field] = value
+    payload["devices"] = [device_record(), malformed]
+    restored = StationSnapshot.from_dict(payload)
+    assert restored.devices == [device_record()]
+
+
+def test_cloud_inventory_with_corrupt_capability_records_keeps_last_good_snapshot(tmp_path):
+    async def scenario():
+        async with cache_runtime(tmp_path) as (manager, _):
+            cache = manager()
+            await cache.async_save_devices([device_record()])
+            original = Path(cache.path).read_bytes()
+            malformed = device_record("broken", "broken-local")
+            malformed["capabilities"] = [None]
+            with pytest.raises(ValueError, match="inventory_unavailable"):
+                await cache.async_save_devices([device_record(), malformed])
+            assert Path(cache.path).read_bytes() == original
+            assert cache.snapshot.devices == [device_record()]
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("patch_data", [
     {"entry_id": 1}, {"revision": True}, {"revision": -1},
     {"devices": {}}, {"account_login": 1}, {"account_uid": 1},

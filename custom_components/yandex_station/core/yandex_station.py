@@ -182,11 +182,15 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
 
     glagol: YandexGlagol = None
 
+    # last softwareVersion delivered to glagol subscribers (frames signal)
+    _delivered_software_version: Optional[str] = None
+
     def __init__(self, quasar: YandexQuasar, device: dict):
         self.quasar = quasar
         self.device = device
         self.requests = {}
         self._hdmi_refresh_task = None
+        self._local_stopping = False
 
         self._attr_available = False
         self._attr_assumed_state = True
@@ -367,23 +371,29 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
     async def init_local_mode(self):
         did = self.device["quasar_info"]["device_id"]
         if (
-            self.quasar.stopping or did not in self.quasar.owned_glagol_ids
+            self._local_stopping or self.quasar.stopping
+            or did not in self.quasar.owned_glagol_ids
             or not (self.quasar.policy.local_updates or did in self.quasar.yaml_glagol_hosts)
         ):
             return
+        info = self.device["quasar_info"]
+        token = self.quasar.device_tokens.get(did, {}).get(info["platform"])
         if not self.glagol:
-            info = self.device["quasar_info"]
-            token = self.quasar.device_tokens.get(info["device_id"], {}).get(
-                info["platform"]
-            )
             self.glagol = YandexGlagol(
                 self.quasar.session, self.device, token=token, quasar=self.quasar
             )
             self.glagol.update_handler = self.async_set_state
+        elif token:
+            # adopt a token fetched after this client was created without one
+            await self.glagol.adopt_token(token)
         await self.glagol.start_or_restart()
+        if self._local_stopping or self.quasar.stopping:
+            return
 
         # Refresh HDMI audio setting in the background when cloud access is allowed
-        if self.quasar.policy.effective_cloud_allowed:
+        if self.quasar.policy.effective_cloud_allowed and (
+            self._hdmi_refresh_task is None or self._hdmi_refresh_task.done()
+        ):
             self._hdmi_refresh_task = asyncio.create_task(self.init_hdmi_audio())
 
     def _apply_hdmi_audio(self, enabled: bool):
@@ -391,16 +401,27 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         self.device["hdmi_audio"] = enabled
         # for HomeKit source list support
         self._attr_device_class = MediaPlayerDeviceClass.TV
-        self._attr_source = SOURCE_HDMI if enabled else SOURCE_STATION
-        self._attr_source_list = [SOURCE_STATION, SOURCE_HDMI]
+        external = [
+            s for s in (self._attr_source_list or [])
+            if s not in (SOURCE_STATION, SOURCE_HDMI)
+        ]
+        self._attr_source_list = [SOURCE_STATION, SOURCE_HDMI] + external
+        if self._attr_source not in external:
+            self._attr_source = SOURCE_HDMI if enabled else SOURCE_STATION
 
     async def init_hdmi_audio(self):
-        if self._attr_source_list:
+        if self.hdmi_audio is not None:
+            # HDMI state already loaded from cache or a previous refresh
             return
 
         if self.device_platform not in ("yandexstation", "yandexstation_2"):
             return
         if not self.quasar.policy.effective_cloud_allowed:
+            return
+        # Setup closes the session cloud gate until platforms are published;
+        # only an explicit False blocks, and a later init retries quietly.
+        if getattr(self.quasar.session, "cloud_ready", True) is False:
+            self.debug("HDMI refresh waits for cloud publication")
             return
 
         try:
@@ -703,6 +724,14 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
 
         # skip same state
         if self.local_state == state:
+            # firmware-only diagnostics advance without a state change;
+            # last_heartbeat keeps the time of the last delivered state change
+            if sw_version and sw_version != self._delivered_software_version:
+                self.quasar.dispatch_update(
+                    f"{self.unique_id}_glagol_firmware",
+                    {"softwareVersion": sw_version},
+                )
+                self._delivered_software_version = sw_version
             return
 
         self.local_state = state
@@ -720,6 +749,8 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         self._attr_should_poll = False
         self._attr_supported_features = LOCAL_FEATURES
         self.quasar.dispatch_update(f"{self.unique_id}_glagol", data)
+        if sw_version:
+            self._delivered_software_version = sw_version
         # optional attributes for local mode
         self._attr_media_artist = None
         self._attr_media_channel = None
@@ -831,9 +862,21 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             await self.init_local_mode()
 
     async def async_will_remove_from_hass(self):
+        await self.async_stop_local_mode()
+
+    async def async_stop_local_mode(self):
+        """Stop producers before Quasar closes their session and cache."""
+        self._local_stopping = True
         if self._hdmi_refresh_task is not None:
             self._hdmi_refresh_task.cancel()
-            self._hdmi_refresh_task = None
+            try:
+                await self._hdmi_refresh_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as error:
+                _LOGGER.debug("HDMI refresh stopped: %s", safe_error_summary(error))
+            finally:
+                self._hdmi_refresh_task = None
         if self.glagol:
             await self.glagol.stop()
 
@@ -1161,9 +1204,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                 return
 
             elif media_type == "restart":
-                await self.glagol.stop()
-                await asyncio.sleep(float(media_id))
-                await self.glagol.start_or_restart()
+                await self.glagol.restart(float(media_id))
                 return
 
             elif RE_MUSIC_ID.match(media_id):
