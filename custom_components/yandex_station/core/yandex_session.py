@@ -56,8 +56,8 @@ CREDENTIAL_HEADERS = frozenset(
 # Mutating quasar methods require a CSRF candidate before dispatch.
 CSRF_METHODS = frozenset({"post", "put", "patch", "delete"})
 
-# Refresh the opaque CSRF candidate before the primary client's 24h window.
-CSRF_FRESH_SECS = 24 * 3600 - 5 * 60
+# Refresh the CSRF candidate proactively well before the server's 24h window.
+CSRF_FRESH_SECS = 6 * 3600
 
 # Bound of the validated redirect chain for the cookie/OAuth exchange.
 MAX_AUTH_REDIRECTS = 5
@@ -906,26 +906,30 @@ class YandexSession(BasicSession):
         self.retry_after.pop("csrf", None)
 
     def _csrf_invalidate_current(
-        self, sent_token: str, sent_generation: int, retry_after: str | None = None
-    ) -> None:
-        """Cautiously drop the unproven candidate after a 403.
+        self,
+        sent_token: str,
+        sent_generation: int,
+        retry_after: str | None = None,
+        *,
+        cooldown: bool = False,
+    ) -> bool:
+        """Drop the current CSRF candidate after a 403.
 
         Only the still-current token+generation pair is invalidated; a late
-        response of an older generation (even with the same token string)
-        never resets a newer candidate. Auth state, cookies and x_token are
-        untouched, no refetch/replay/OAuth is triggered here - just one
-        backoff slot (honoring the response Retry-After hint, if any) for
-        the next separate operation.
+        response of an older generation never resets a newer candidate.
+        Cooldown is armed only when requested (e.g. after a retry or non-plain
+        403) or when the server supplied a Retry-After hint.
         """
         if self.csrf_token != sent_token or self._csrf_generation != sent_generation:
-            return
+            return False
         self.csrf_token = None
-        self._set_csrf_state(CsrfState.UNAVAILABLE)
-        self._csrf_retry_at = max(
-            self._csrf_retry_at,
-            time.monotonic() + self._csrf_backoff.next_delay(retry_after),
-        )
-
+        if cooldown or retry_after is not None:
+            self._set_csrf_state(CsrfState.UNAVAILABLE)
+            self._csrf_retry_at = max(
+                self._csrf_retry_at,
+                time.monotonic() + self._csrf_backoff.next_delay(retry_after),
+            )
+        return True
     def add_readiness_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
         """Register a sync listener fired on readiness state transitions.
 
@@ -1045,15 +1049,20 @@ class YandexSession(BasicSession):
             raise CloudRequestError(role, error.status) from None
 
     async def request(
-        self, method: str, url: str, *, role: str, **kwargs
+        self,
+        method: str,
+        url: str,
+        *,
+        role: str,
+        _csrf_retry: bool = False,
+        **kwargs,
     ) -> ClientResponse:
         """Public request function.
 
-        No automatic retries or replay: fallback endpoints are bypassed by
-        the session only inside the CSRF/cookie passes; group retries belong
-        to the Quasar workers. Mutating quasar requests require a CSRF
-        candidate before dispatch. Auth success is owned by the cookie
-        probes and validated inventory, never by a bare 2xx here.
+        Mutating quasar requests attach a CSRF candidate before dispatch.
+        On a boundary text/plain 403 without Retry-After, the stale candidate
+        is dropped without a 30s penalty, refreshed once via single-flight
+        ensure_csrf(), and retried at most once if a new token was issued.
         """
         method = method.lower()
 
@@ -1084,9 +1093,30 @@ class YandexSession(BasicSession):
         self._record_http_failure(role, r)
 
         if r.status == 403 and sent_token is not None:
-            self._csrf_invalidate_current(
-                sent_token, sent_generation, self.retry_after.get(role)
+            retry_after = self.retry_after.get(role)
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            boundary_403 = ctype.startswith("text/plain")
+            invalidated = self._csrf_invalidate_current(
+                sent_token,
+                sent_generation,
+                retry_after,
+                cooldown=_csrf_retry or not boundary_403,
             )
+            if (
+                not _csrf_retry
+                and invalidated
+                and retry_after is None
+                and boundary_403
+            ):
+                fresh_csrf = await self.ensure_csrf()
+                if fresh_csrf is not None and fresh_csrf != sent_token:
+                    return await self.request(
+                        method, url, role=role, _csrf_retry=True, **kwargs
+                    )
+                if fresh_csrf is not None:
+                    self._csrf_invalidate_current(
+                        fresh_csrf, self._csrf_generation, None, cooldown=True
+                    )
 
         raise CloudRequestError(role, r.status)
 
