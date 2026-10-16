@@ -1046,8 +1046,8 @@ yandex_station:
 | `mobileproxy_base_url` | GUI / YAML | `"https://mobileproxy.passport.yandex.net"` | Mobileproxy Passport: обмен и проверка credentials. |
 | `glagol_base_url` | GUI / YAML | `"https://quasar.yandex.net/glagol"` | Получение conversation token; префикс `/glagol` входит в base. |
 | `rpc_base_url` | GUI / YAML | `"https://rpc.alice.yandex.ru"` | RPC Алисы, включая будильники. |
-| `cookie_storage_endpoints` | GUI / YAML | Два probe из примера ниже | Список `{url, validator}`. В GUI — JSON-массив. Последний успешный probe проверяется первым, остальные — в заданном порядке. |
-| `csrf_endpoints` | GUI / YAML | `["https://yandex.ru/iot", "https://yandex.ru/quasar"]` | Последовательный fallback для ленивого получения CSRF-кандидата; в GUI — JSON-массив. |
+| `cookie_storage_endpoints` | GUI / YAML | `[{"url": "https://yandex.ru/iot?storage=1", "validator": "uid_in_storage"}]` | Список `{url, validator}`. В GUI — JSON-массив. Последний успешный probe проверяется первым, остальные — в заданном порядке. |
+| `csrf_endpoints` | GUI / YAML | `["https://yandex.ru/iot"]` | Список HTTPS-адресов для ленивого получения CSRF-кандидата; в GUI — JSON-массив. |
 
 ### Приоритет применения параметров и адресов (GUI vs YAML vs По умолчанию)
 
@@ -1095,13 +1095,10 @@ yandex_station:
 
   # Cookie probes: последний успешный первым, затем остальные по списку:
   cookie_storage_endpoints:
-    - url: "https://quasar.yandex.ru/get_account_config"
-      validator: status_ok
     - url: "https://yandex.ru/iot?storage=1"
       validator: uid_in_storage
   csrf_endpoints:
     - "https://yandex.ru/iot"
-    - "https://yandex.ru/quasar"
 ```
 
 #### Ошибки авторизации и отправки команд

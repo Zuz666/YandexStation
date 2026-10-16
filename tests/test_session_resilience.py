@@ -1,4 +1,5 @@
 import asyncio
+import io
 import time
 from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock
@@ -61,6 +62,8 @@ def make_response(status, *, text="", json_body=None, headers=None, has_json=Fal
         resp.json = AsyncMock(side_effect=ValueError("not json"))
     resp.headers = headers or {}
     resp.read = AsyncMock(return_value=b"")
+    stream = io.BytesIO(text.encode("utf-8"))
+    resp.content.read = AsyncMock(side_effect=lambda n=-1: stream.read(n))
     return resp
 
 
@@ -189,9 +192,13 @@ def test_absent_cookies_exchange_with_validated_redirect_and_post_probe():
                     response_url=URL("https://passport.yandex.ru"),
                 )
                 return finish_redirect()
-            if "get_account_config" in url:
+            if "storage=1" in url or "get_account_config" in url:
                 assert updates == []
-                return make_response(200, json_body={"status": "ok"}, has_json=True)
+                return make_response(
+                    200,
+                    json_body={"status": "ok", "storage": {"user": {"uid": "uid_1"}}},
+                    has_json=True,
+                )
             return make_response(502)
 
         client.get = AsyncMock(side_effect=route)
@@ -442,8 +449,12 @@ def test_empty_jar_exchanges_without_probe_requests():
         def route(url, **kwargs):
             if "/auth/session" in url:
                 return finish_redirect()
-            if "get_account_config" in url:
-                return make_response(200, json_body={"status": "ok"}, has_json=True)
+            if "storage=1" in url or "get_account_config" in url:
+                return make_response(
+                    200,
+                    json_body={"status": "ok", "storage": {"user": {"uid": "uid_1"}}},
+                    has_json=True,
+                )
             raise AssertionError("unexpected probe before exchange")
 
         client.get = AsyncMock(side_effect=route)
@@ -508,8 +519,12 @@ def test_passport_redirect_chain_validated():
         def route4(url, **kwargs):
             if "/auth/session" in url:
                 return finish_redirect(location="/auth/finish?uuid=1")
-            if "get_account_config" in url:
-                return make_response(200, json_body={"status": "ok"}, has_json=True)
+            if "storage=1" in url or "get_account_config" in url:
+                return make_response(
+                    200,
+                    json_body={"status": "ok", "storage": {"user": {"uid": "uid_1"}}},
+                    has_json=True,
+                )
             return make_response(502)
 
         client4.get = AsyncMock(side_effect=route4)
@@ -536,8 +551,12 @@ def test_prefixed_passport_base_finish_marker_recognized():
         def route(url, **kwargs):
             if "/auth/session" in url:
                 return finish_redirect(location="/auth/finish?uuid=1")
-            if "get_account_config" in url:
-                return make_response(200, json_body={"status": "ok"}, has_json=True)
+            if "storage=1" in url or "get_account_config" in url:
+                return make_response(
+                    200,
+                    json_body={"status": "ok", "storage": {"user": {"uid": "uid_1"}}},
+                    has_json=True,
+                )
             raise AssertionError(f"unexpected destination: {url}")
 
         client.get = AsyncMock(side_effect=route)
@@ -557,8 +576,12 @@ def test_prefixed_passport_base_finish_marker_recognized():
                 return finish_redirect(
                     location="https://passport.yandex.ru/auth/finish?uuid=2"
                 )
-            if "get_account_config" in url:
-                return make_response(200, json_body={"status": "ok"}, has_json=True)
+            if "storage=1" in url or "get_account_config" in url:
+                return make_response(
+                    200,
+                    json_body={"status": "ok", "storage": {"user": {"uid": "uid_1"}}},
+                    has_json=True,
+                )
             raise AssertionError(f"unexpected destination: {url}")
 
         client2.get = AsyncMock(side_effect=route2)
@@ -726,6 +749,8 @@ def test_captured_put_403_refreshes_csrf_and_retries_once():
         # Case 4: other plain-text 403 body or non-exact MIME -> neither refetch nor replay
         for headers, body in (
             ({"Content-Type": "text/plain; charset=utf-8"}, "Access denied\n"),
+            ({"Content-Type": "text/plain; charset=utf-8"}, "Forbidden\n" + "X" * 1024),
+            ({"Content-Type": "text/plain; charset=utf-8", "Content-Length": "11"}, "Forbidden\n"),
             ({"Content-Type": "text/plain-custom"}, "Forbidden\n"),
         ):
             session._csrf_retry_at = 0.0

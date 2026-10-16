@@ -461,10 +461,10 @@ def test_session_config_instances_isolated():
         {"url": "https://quasar.yandex.ru/extra", "validator": "status_ok"}
     )
     cfg1.csrf_endpoints.append("https://yandex.ru/extra")
-    assert len(cfg2.cookie_storage_endpoints) == 2
-    assert len(cfg2.csrf_endpoints) == 2
-    assert len(DEFAULT_COOKIE_STORAGE_ENDPOINTS) == 2
-    assert len(DEFAULT_CSRF_ENDPOINTS) == 2
+    assert len(cfg2.cookie_storage_endpoints) == 1
+    assert len(cfg2.csrf_endpoints) == 1
+    assert len(DEFAULT_COOKIE_STORAGE_ENDPOINTS) == 1
+    assert len(DEFAULT_CSRF_ENDPOINTS) == 1
 
 
 def test_validate_destination_role_trust_separation():

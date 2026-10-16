@@ -48,6 +48,7 @@ def snapshot_backed_quasar(devices, policy=None, readiness=None):
     )
     cache.entry_id = "entry-1"
     cache.async_save_devices = AsyncMock()
+    cache.async_close = AsyncMock()
     quasar = YandexQuasar(session, policy=policy, readiness=readiness, cache_manager=cache)
     quasar._restore_from_snapshot(cache.snapshot)
     return quasar, session, cache
@@ -639,5 +640,59 @@ def test_session_csrf_transitions_reach_readiness_sensor_end_to_end():
         assert len(writes) == 2
 
         await quasar.async_stop()
+
+    asyncio.run(scenario())
+
+
+def test_startup_deduplicates_inventory_get_across_init_recovery_and_connect():
+    async def scenario():
+        from .test_glagol_lifecycle import FakeWS
+
+        # 1. Cold startup (no snapshot): init() + start() (recovery + connect) -> 1 GET /devices
+        session = MagicMock()
+        session.closed = False
+        session.async_stop = AsyncMock()
+        resp = devices_response(device_catalog())
+        resp.json.return_value["updates_url"] = "wss://push.yandex.ru/v2/subscribe"
+        session.get = AsyncMock(return_value=resp)
+        session.ws_connect = AsyncMock(return_value=FakeWS([]))
+        quasar = YandexQuasar(
+            session,
+            policy=EntryPolicy(cloud_updates=True, enable_scenarios=False),
+            readiness=Readiness(),
+        )
+        await quasar.init()
+        assert session.get.await_count == 1
+        quasar.start()
+        await asyncio.wait_for(quasar._recovery_task, 2)
+        for _ in range(20):
+            if session.ws_connect.await_count >= 1:
+                break
+            await asyncio.sleep(0.01)
+        assert session.ws_connect.await_count == 1
+        assert session.get.await_count == 1
+        await quasar.async_stop()
+
+        # 2. Cached startup: init() (0 GET) + start() (recovery + connect share 1 GET)
+        quasar2, session2, _ = snapshot_backed_quasar(
+            [device_catalog()],
+            policy=EntryPolicy(cloud_updates=True, enable_scenarios=False),
+            readiness=Readiness(),
+        )
+        session2.closed = False
+        session2.async_stop = AsyncMock()
+        resp2 = devices_response(device_catalog())
+        resp2.json.return_value["updates_url"] = "wss://push.yandex.ru/v2/subscribe"
+        session2.get = AsyncMock(return_value=resp2)
+        session2.ws_connect = AsyncMock(return_value=FakeWS([]))
+        quasar2.start()
+        await asyncio.wait_for(quasar2._recovery_task, 2)
+        for _ in range(20):
+            if session2.ws_connect.await_count >= 1:
+                break
+            await asyncio.sleep(0.01)
+        assert session2.ws_connect.await_count == 1
+        assert session2.get.await_count == 1
+        await quasar2.async_stop()
 
     asyncio.run(scenario())
