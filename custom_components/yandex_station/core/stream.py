@@ -48,10 +48,7 @@ def get_ext(url: str) -> str | None:
 
 
 def _response_content_type(ext: str) -> str:
-    """Downstream Content-Type for a signed resource extension."""
-    # playlist-extracted AES-128 key children stream as opaque bytes
     return "application/octet-stream" if ext == "key" else MIME_TYPES[ext]
-
 
 _NUMERIC_HOST = re.compile(
     r"(?:0[xX][0-9a-fA-F]+|[0-9]+)"
@@ -95,11 +92,7 @@ def is_offline(context: StreamContext, entry_id: str) -> bool:
 
 
 def _destination(context: StreamContext, url: str, offline: bool) -> str:
-    """Pure URL admission: syntax plus offline LAN rules.
-
-    Entry/lifecycle admission is decided by ``is_offline`` (once per
-    synchronous phase and before every network attempt in ``_request``).
-    """
+    """Validate URL syntax and enforce LAN-only rules when offline."""
     if not isinstance(url, str) or not url or url.startswith("//"):
         raise ValueError("media_destination_blocked")
     if url.startswith("/"):
@@ -123,9 +116,6 @@ def _destination(context: StreamContext, url: str, offline: bool) -> str:
         try:
             ipaddress.ip_address(host)
         except ValueError:
-            # aiohttp 3.8 treats octal/hex/short IPv4 as literals and skips
-            # AbstractResolver entirely. Never let a noncanonical numeric host
-            # reach that connector path; DNS names still use LanOnlyResolver.
             if ":" in host or _NUMERIC_HOST.fullmatch(host):
                 raise ValueError("media_destination_blocked")
             try:
@@ -147,16 +137,11 @@ def validate_media_url(context: StreamContext, entry_id: str, url: str) -> str:
 
 def _sign(context: StreamContext, entry_id: str, url: str, ext: str,
           expires_at: int, lan_only: bool, kind: str | None = None) -> str:
-    payload = {
-        "url": url, "entry_id": entry_id, "lan_only": lan_only, "exp": expires_at,
-    }
+    payload = {"url": url, "entry_id": entry_id, "lan_only": lan_only, "exp": expires_at}
     if kind is not None:
-        # signed resource type, e.g. a playlist-extracted AES-128 key; it
-        # separates key children from generic media extensions
         payload["kind"] = kind
     token = jwt.encode(payload, context.key, algorithm="HS256")
     return f"{context.hass_url}/api/yandex_station/{token}.{ext}"
-
 
 def get_url(context: StreamContext, entry_id: str, url: str,
             ext: str | None = None, expires: int = 3600) -> str:
@@ -222,17 +207,6 @@ async def get_content_type(context: StreamContext, entry_id: str, url: str) -> s
         return None
 
 
-_BLOCK_REASONS = frozenset({
-    "entry_unavailable", "media_destination_blocked", "local_origin_unavailable",
-    "media_url_unavailable", "media_extension_blocked", "invalid_media_token",
-    "media_redirect_blocked", "media_segment_blocked",
-})
-
-
-def _safe_block_reason(error: ValueError) -> str:
-    reason = error.args[0] if error.args else None
-    return reason if isinstance(reason, str) and reason in _BLOCK_REASONS else "media_destination_blocked"
-
 _HLS_URI = re.compile(r'URI="([^"]+)"')
 _REDIRECTS = frozenset((301, 302, 303, 307, 308))
 
@@ -276,11 +250,8 @@ class StreamImplementation:
         ):
             raise ValueError("invalid_media_token")
         if ext == "key" and data.get("kind") != "key":
-            # key resources exist only as playlist-extracted EXT-X-KEY
-            # children; no user-minted generic .key URL is ever accepted
             raise ValueError("invalid_media_token")
         entry_id = data["entry_id"]
-        # is_offline re-checks entry admission with current policy
         offline = is_offline(self.context, entry_id) or data["lan_only"]
         url = (
             async_process_play_media_url(self.context.hass, data["url"])
@@ -330,13 +301,7 @@ class StreamImplementation:
         def child(value: str, *, key_resource: bool = False) -> str:
             url = _destination(self.context, urljoin(base_url, value), offline)
             if key_resource:
-                # EXT-X-KEY children are signed as key resources whatever
-                # their source extension (keys are commonly extensionless);
-                # every destination/offline gate still applies per child
-                return _sign(
-                    self.context, entry_id, url, "key", expires_at, offline,
-                    kind="key",
-                )
+                return _sign(self.context, entry_id, url, "key", expires_at, offline, kind="key")
             ext = get_ext(url)
             if ext not in MIME_TYPES:
                 raise ValueError("media_segment_blocked")
@@ -368,8 +333,7 @@ class StreamImplementation:
                 headers = copy_headers(response.headers, RESPONSE_HEADERS)
                 headers[hdrs.CONTENT_TYPE] = _response_content_type(ext)
                 return web.Response(status=response.status, headers=headers)
-        except ValueError as error:
-            _LOGGER.debug("Media HEAD blocked: %s", _safe_block_reason(error))
+        except ValueError:
             return web.Response(status=403)
         except (ClientError, OSError, asyncio.TimeoutError) as error:
             _LOGGER.debug("Media HEAD unavailable: %s", type(error).__name__)
@@ -409,8 +373,7 @@ class StreamImplementation:
                 except (ClientError, OSError, asyncio.TimeoutError) as error:
                     _LOGGER.debug("Media stream interrupted: %s", type(error).__name__)
                 return downstream
-        except ValueError as error:
-            _LOGGER.debug("Media GET blocked: %s", _safe_block_reason(error))
+        except ValueError:
             return web.Response(status=403)
         except (ClientError, OSError, asyncio.TimeoutError) as error:
             _LOGGER.debug("Media GET unavailable: %s", type(error).__name__)
