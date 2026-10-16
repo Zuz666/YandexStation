@@ -65,7 +65,6 @@
     "error": {
       "invalid_endpoint": "Invalid API URL or fallback endpoint list. Use HTTPS without username, password, fragment, or extra query parameters; specify a validator for cookie probes.",
       "reload_in_progress": "An entry operation or integration reload is in progress. Changes were not saved; try again after it finishes.",
-      "ownership_conflict": "The previous owner is still enabled, ownership is ambiguous, or this account lacks a valid local snapshot of the speaker. Disable the previous owner first.",
       "entry_disabled": "The integration entry is disabled. This action does not enable it automatically.",
       "scenario_retry_unavailable": "The device is no longer eligible for a manual retry.",
       "scenario_retry_failed": "Manual retry failed. The scenario marker was preserved.",
@@ -91,11 +90,10 @@
       },
       "recovery": {
         "title": "Diagnostics and recovery",
-        "description": "**Current entry status** *(checked locally, no cloud requests)*:\n\n{cache_icon} **Local device cache:** `{cache_reason}`\n{setup_icon} **Last setup status:** `{setup_reason}`\n{auth_icon} **Auth session:** `{auth_reason}`\n{cloud_icon} **Cloud connectivity:** `{cloud_reason}`\n{scenario_icon} **Speaker scenarios:** `{scenario_reason}`\n{ownership_icon} **Speaker ownership:** `{ownership_reason}`\n\n*🟢 — normal · 🟡 — offline/limited mode · 🔴 — needs attention*\n\nSelect an action below:",
+        "description": "**Current entry status** *(checked locally, no cloud requests)*:\n\n{cache_icon} **Local device cache:** `{cache_reason}`\n{setup_icon} **Last setup status:** `{setup_reason}`\n{auth_icon} **Auth session:** `{auth_reason}`\n{cloud_icon} **Cloud connectivity:** `{cloud_reason}`\n{scenario_icon} **Speaker scenarios:** `{scenario_reason}`\n\n*🟢 — normal · 🟡 — offline/limited mode · 🔴 — needs attention*\n\nSelect an action below:",
         "menu_options": {
           "retry_setup": "Restart integration entry",
-          "retry_scenario_creation": "Restore speaker cloud scenario",
-          "claim_speaker": "Claim speaker from a disabled account"
+          "retry_scenario_creation": "Restore speaker cloud scenario"
         }
       },
       "retry_setup": {
@@ -111,14 +109,6 @@
         "data": {
           "device_id": "Select speaker",
           "confirm_risk": "I understand the duplicate risk on cloud timeout and confirm the retry"
-        }
-      },
-      "claim_speaker": {
-        "title": "Claim speaker from another account",
-        "description": "Use this when moving a speaker between Yandex accounts on the same Home Assistant instance.\n\n• The previous owner account must be disabled or removed first.\n• All speaker entities keep their entity IDs, custom names, area, and history.\n• Foreign tokens and scenarios are never copied — this account uses its own cache.",
-        "data": {
-          "glagol_id": "Select speaker to claim",
-          "confirm_claim": "Confirm transferring speaker ownership to this account"
         }
       },
       "settings": {

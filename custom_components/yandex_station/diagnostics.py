@@ -24,7 +24,7 @@ _DEVICE_KINDS = frozenset({
 })
 _SETUP_REASONS = frozenset({
     "cache_missing", "cache_invalid", "cache_unavailable", "cache_write_failed",
-    "cache_account_mismatch", "inventory_unavailable", "ownership_conflict",
+    "cache_account_mismatch", "inventory_unavailable",
     "entry_reload_failed", "csrf_unavailable", "invalid_endpoint",
     "cloud_blocked_by_policy", "x_token_required", "ConfigEntryAuthFailed",
     "ConfigEntryNotReady",

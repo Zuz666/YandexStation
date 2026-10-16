@@ -307,18 +307,12 @@ class OptionsFlowHandler(OptionsFlow):
             if readiness else "unknown"
         )
         scenario_reason = str(readiness.scenarios_state) if readiness else "unknown"
-        ownership_reason = (
-            "ownership_conflict"
-            if lifecycle.ownership_conflicts.get(self.config_entry.entry_id)
-            else "none"
-        )
         placeholders = {
             "cache_reason": cache_reason,
             "setup_reason": reason,
             "auth_reason": auth_reason,
             "cloud_reason": cloud_reason,
             "scenario_reason": scenario_reason,
-            "ownership_reason": ownership_reason,
             "cache_icon": "🟢" if cache_reason == "cache_ready" else "🔴",
             "setup_icon": "🟢" if reason == "none" else "🔴",
             "auth_icon": (
@@ -336,11 +330,10 @@ class OptionsFlowHandler(OptionsFlow):
                 else "🔴" if scenario_reason == "unavailable"
                 else "🟡"
             ),
-            "ownership_icon": "🟢" if ownership_reason == "none" else "🔴",
         }
         return self.async_show_menu(
             step_id="recovery",
-            menu_options=["retry_setup", "retry_scenario_creation", "claim_speaker"],
+            menu_options=["retry_setup", "retry_scenario_creation"],
             description_placeholders=placeholders,
         )
 
@@ -418,36 +411,6 @@ class OptionsFlowHandler(OptionsFlow):
             data_schema=vol.Schema({
                 vol.Required("device_id"): vol.In(choices),
                 vol.Required("confirm_risk", default=False): cv.boolean,
-            }),
-            errors=errors,
-        )
-
-    async def async_step_claim_speaker(self, user_input: dict = None):
-        choices = await hass_utils.async_claimable_speakers(self.hass, self.config_entry)
-        if not choices:
-            return self.async_abort(reason="claim_unavailable")
-        errors = {}
-        if user_input is not None:
-            if not user_input.get("confirm_claim"):
-                return await self.async_step_recovery()
-            try:
-                await hass_utils.async_claim_speaker(
-                    self.hass, self.config_entry, user_input.get("glagol_id")
-                )
-            except (ValueError, RuntimeError, HomeAssistantError) as error:
-                reason = str(error)
-                errors["base"] = (
-                    reason if reason in {
-                        "ownership_conflict", "reload_in_progress", "entry_disabled"
-                    } else "ownership_conflict"
-                )
-            else:
-                return self.async_abort(reason="speaker_claimed")
-        return self.async_show_form(
-            step_id="claim_speaker",
-            data_schema=vol.Schema({
-                vol.Required("glagol_id"): vol.In(choices),
-                vol.Required("confirm_claim", default=False): cv.boolean,
             }),
             errors=errors,
         )
