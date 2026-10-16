@@ -202,9 +202,13 @@ async def async_resolve_speaker_owners(hass, entry, quasar) -> set[str]:
                             item.entity_id == media.entity_id
                             or (dev_id and item.device_id == dev_id)
                         ):
-                            registry.async_update_entity(
-                                item.entity_id, config_entry_id=entry.entry_id
-                            )
+                            updates = {"config_entry_id": entry.entry_id}
+                            for suffix in ("transport", "alice_state", "local_connection"):
+                                if item.unique_id in (f"{did}_{suffix}", f"{owner}_{did}_{suffix}"):
+                                    target_uid = f"{entry.entry_id}_{did}_{suffix}"
+                                    if not registry.async_get_entity_id(item.domain, DOMAIN, target_uid):
+                                        updates["new_unique_id"] = target_uid
+                            registry.async_update_entity(item.entity_id, **updates)
                     if dev_id and (dev := devices.async_get(dev_id)) is not None:
                         if hasattr(type(dev), "config_entry_id"):
                             devices.async_update_device(
