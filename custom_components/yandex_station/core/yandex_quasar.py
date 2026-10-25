@@ -1237,6 +1237,7 @@ class YandexQuasar(Dispatcher):
                     }
                 ]
             },
+            role="quasar",
         )
         resp = await r.json()
         assert resp["status"] == "ok", resp

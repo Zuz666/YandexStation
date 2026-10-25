@@ -9,6 +9,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.yandex_station.light import YandexLight
 from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
+from custom_components.yandex_station.core.yandex_session import YandexSession
 from . import false, null, true, update_ha_state
 
 
@@ -1251,7 +1252,7 @@ def test_ambi_color_music_state():
 def test_ambi_select_music_without_changing_settings():
     device = ambi_device()
     original = deepcopy(device)
-    session = AsyncMock()
+    session = AsyncMock(spec=YandexSession)
     session.post.return_value.json.return_value = {"status": "ok"}
     session.get.return_value.json.return_value = {"status": "ok", **device}
     entity = YandexLight(YandexQuasar(session), device)
@@ -1274,6 +1275,7 @@ def test_ambi_select_music_without_changing_settings():
                 }
             ]
         },
+        role="quasar",
     )
     assert device == original
     # A command does not replace the state returned by Quasar optimistically.
@@ -1288,7 +1290,7 @@ def test_music_effect_identity_and_partial_updates():
     animation["parameters"]["animations"]["color_music"]["variants"].append(
         {"id": "future_music", "options": []}
     )
-    session = AsyncMock()
+    session = AsyncMock(spec=YandexSession)
     session.post.return_value.json.return_value = {"status": "ok"}
     session.get.return_value.json.return_value = {"status": "ok", **device}
     quasar = YandexQuasar(session)
@@ -1326,7 +1328,11 @@ def test_music_effect_identity_and_partial_updates():
     assert entity.effect == "future_music"
     quasar.dispatch_update(
         device["id"],
-        {"state": "online", "capabilities": [device["capabilities"][1]]},
+        {
+            "id": device["id"],
+            "state": "online",
+            "capabilities": [device["capabilities"][1]],
+        },
     )
     assert entity.effect == "future_music"  # Brightness-only update.
 
@@ -1346,7 +1352,7 @@ def test_music_selection_preserves_variant_options_and_turns_on():
         }
     ]
     original = deepcopy(device)
-    session = AsyncMock()
+    session = AsyncMock(spec=YandexSession)
     session.post.return_value.json.return_value = {"status": "ok"}
     session.get.return_value.json.return_value = {"status": "ok", **device}
     entity = YandexLight(YandexQuasar(session), device)
@@ -1375,7 +1381,7 @@ def test_music_selection_preserves_variant_options_and_turns_on():
 def test_failed_music_operation_does_not_power_on():
     device = ambi_device()
     device["capabilities"][0]["state"]["value"] = False
-    session = AsyncMock()
+    session = AsyncMock(spec=YandexSession)
     session.post.return_value.json.return_value = {
         "status": "ok",
         "operations": [{"result": {"status": "ERROR"}}],
@@ -1395,7 +1401,7 @@ def test_failed_music_operation_does_not_power_on():
 @pytest.mark.parametrize("failure", ["rejected", "post_timeout", "refresh_timeout"])
 def test_music_command_failure_keeps_confirmed_state(failure):
     device = ambi_device()
-    session = AsyncMock()
+    session = AsyncMock(spec=YandexSession)
     session.post.return_value.json.return_value = {"status": "ok"}
     if failure == "rejected":
         session.post.return_value.json.return_value = {"status": "error"}
@@ -1420,7 +1426,7 @@ def test_music_capability_without_color_or_animation_state():
     del device["capabilities"][2]
     animation = device["capabilities"][2]
     animation["state"] = None
-    session = AsyncMock()
+    session = AsyncMock(spec=YandexSession)
     session.post.return_value.json.return_value = {"status": "ok"}
     session.get.return_value.json.return_value = {"status": "ok", **device}
     entity = YandexLight(YandexQuasar(session), device)
@@ -1462,3 +1468,68 @@ def test_music_to_regular_color_transition():
     assert entity.effect is None
     assert entity.color_temp_kelvin == 3000
     assert entity.color_mode == ColorMode.COLOR_TEMP
+
+
+@pytest.mark.parametrize(
+    "outcome", ["success", "timeout", "offline", "not_published"]
+)
+def test_music_selection_through_entry_session(outcome):
+    from custom_components.yandex_station.core.policy import EntryPolicy, SessionConfig
+    from .test_session_resilience import make_client, make_response, prime_csrf
+
+    async def scenario():
+        device = ambi_device()
+        client = make_client()
+        session = YandexSession(
+            client,
+            config=SessionConfig(
+                quasar_base_url="https://iot.quasar.yandex.com/base"
+            ),
+            policy=EntryPolicy(force_offline_local=outcome == "offline"),
+            cloud_ready=outcome != "not_published",
+        )
+        if outcome in ("success", "timeout"):
+            await prime_csrf(session, client, "synthetic_csrf")
+        client.post = AsyncMock(
+            return_value=make_response(
+                200, json_body={"status": "ok"}, has_json=True
+            )
+        )
+        client.get = AsyncMock(
+            return_value=make_response(
+                200, json_body={"status": "ok", **device}, has_json=True
+            )
+        )
+        if outcome == "timeout":
+            client.post.side_effect = TimeoutError("synthetic uncertain dispatch")
+        entity = YandexLight(YandexQuasar(session), device)
+
+        if outcome == "success":
+            await entity.async_turn_on(effect="Эквалайзер")
+            assert entity.effect == "Вечеринка"  # Only the confirmed GET state.
+        else:
+            reason = {
+                "timeout": "synthetic uncertain dispatch",
+                "offline": "cloud_blocked_by_policy",
+                "not_published": "cloud_not_published",
+            }[outcome]
+            with pytest.raises(HomeAssistantError, match=reason):
+                await entity.async_turn_on(effect="Эквалайзер")
+            assert entity.effect == "Вечеринка"
+
+        if outcome in ("offline", "not_published"):
+            client.post.assert_not_awaited()
+            client.get.assert_not_awaited()
+        else:
+            client.post.assert_awaited_once()  # No retry of an uncertain timeout.
+            call = client.post.await_args
+            assert call.args[0] == (
+                "https://iot.quasar.yandex.com/base/m/user/devices/"
+                "synthetic-ambi/operations"
+            )
+            assert call.kwargs["headers"]["x-csrf-token"] == "synthetic_csrf"
+            assert call.kwargs["allow_redirects"] is False
+            if outcome == "timeout":
+                client.get.assert_not_awaited()
+
+    asyncio.run(scenario())
