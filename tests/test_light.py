@@ -1203,7 +1203,7 @@ def test_station3_music_actions_preserve_options_and_reported_state():
     device = station3_device()
     device["capabilities"][3]["state"]["value"] = False
     original = deepcopy(device)
-    session = AsyncMock()
+    session = AsyncMock(spec=YandexSession)
     session.post.return_value.json.return_value = {"status": "ok"}
     reported = deepcopy(device)
     reported["capabilities"][3]["state"]["value"] = True
@@ -1217,6 +1217,7 @@ def test_station3_music_actions_preserve_options_and_reported_state():
 
     session.post.assert_awaited_once_with(
         "https://iot.quasar.yandex.ru/m/user/devices/xxx/actions",
+        role="quasar",
         json={
             "actions": [
                 {
@@ -1286,7 +1287,7 @@ def test_station3_music_actions_preserve_options_and_reported_state():
 def test_station3_music_without_saved_options_does_not_reset_them():
     device = station3_device()
     device["capabilities"][1]["state"]["value"] = None
-    session = AsyncMock()
+    session = AsyncMock(spec=YandexSession)
     session.post.return_value.json.return_value = {"status": "ok"}
     session.get.return_value.json.return_value = {"status": "ok", **device}
     entity = YandexLight(YandexQuasar(session), device)
@@ -1295,6 +1296,7 @@ def test_station3_music_without_saved_options_does_not_reset_them():
 
     session.post.assert_awaited_once_with(
         "https://iot.quasar.yandex.ru/m/user/devices/xxx/actions",
+        role="quasar",
         json={"actions": [{
             "type": "devices.capabilities.color_animation",
             "state": {
