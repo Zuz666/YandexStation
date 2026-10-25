@@ -1619,3 +1619,78 @@ def test_music_to_regular_color_transition():
     assert entity.effect is None
     assert entity.color_temp_kelvin == 3000
     assert entity.color_mode == ColorMode.COLOR_TEMP
+
+
+@pytest.mark.parametrize(
+    ("color", "effect", "hs_color", "color_temp", "color_mode"),
+    [
+        (
+            {"id": "blue", "name": "Синий", "value": {"h": 225, "s": 55, "v": 90}},
+            "Синий", (225, 55), None, ColorMode.HS,
+        ),
+        (
+            {"value": {"h": 210, "s": 70, "v": 100}},
+            None, (210, 70), None, ColorMode.HS,
+        ),
+        (
+            {"value": 3000},
+            None, None, 3000, ColorMode.COLOR_TEMP,
+        ),
+        (
+            {"id": "night", "name": "Ночь"},
+            "Ночь", None, None, ColorMode.UNKNOWN,
+        ),
+    ],
+)
+def test_music_none_uses_reported_legacy_color(
+    color, effect, hs_color, color_temp, color_mode
+):
+    device = ambi_device()
+    quasar = YandexQuasar(None)
+    entity = YandexLight(quasar, device)
+    assert entity.effect == "Вечеринка"
+    device["capabilities"][3]["state"]["value"]["current_animation_type"] = "none"
+    device["capabilities"][2]["state"]["value"] = color
+
+    quasar.dispatch_update(device["id"], device)
+
+    assert entity.effect == effect
+    assert entity.hs_color == hs_color
+    assert entity.color_temp_kelvin == color_temp
+    assert entity.color_mode == color_mode
+
+
+def test_music_none_without_color_clears_effect_but_keeps_saved_options():
+    device = ambi_device()
+    music = device["capabilities"][3]["state"]["value"]["animations"]["color_music"]
+    music["variants"] = [{
+        "id": "party", "options": [{"instance": "autoplay", "enabled": False}]
+    }]
+    session = AsyncMock()
+    session.post.return_value.json.return_value = {"status": "ok"}
+    session.get.return_value.json.return_value = {"status": "ok", **device}
+    quasar = YandexQuasar(session)
+    entity = YandexLight(quasar, device)
+
+    quasar.dispatch_update(device["id"], {
+        "state": "online", "capabilities": [device["capabilities"][1]],
+    })
+    assert entity.effect == "Вечеринка"
+
+    animation = deepcopy(device["capabilities"][3])
+    animation["state"]["value"]["current_animation_type"] = "none"
+    quasar.dispatch_update(device["id"], {
+        "state": "online", "capabilities": [animation],
+    })
+    assert entity.effect is None
+
+    asyncio.run(entity.async_turn_on(effect="Вечеринка"))
+
+    operation = session.post.await_args.kwargs["json"]["operations"][0]
+    assert operation["payload"] == {
+        "animation_type": "color_music",
+        "animation": {
+            "id": "party",
+            "options": [{"instance": "autoplay", "enabled": False}],
+        },
+    }

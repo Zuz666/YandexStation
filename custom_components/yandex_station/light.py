@@ -179,8 +179,13 @@ class YandexLight(LightEntity, YandexEntity):
                 # Color animations still require a supported color mode when on.
                 if ColorMode.HS in (self._attr_supported_color_modes or ()):
                     self._attr_color_mode = ColorMode.HS
+            elif animation_type == "none":
+                self._attr_effect = None
 
-        elif color := capabilities.get("color"):
+        # Mixed-capability devices report legacy color after stopping animation.
+        if (not animation or animation.get("current_animation_type") == "none") and (
+            color := capabilities.get("color")
+        ):
             value = color.get("value")
 
             if isinstance(value, dict) and "h" in value:
