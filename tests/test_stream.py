@@ -49,7 +49,7 @@ def test_stream_rechecks_policy_on_real_get_head_and_hls(tmp_path):
             if request.path == "/redirect.mp3":
                 raise web.HTTPFound("http://198.51.100.10/leak.mp3")
             if request.path == "/list.m3u8":
-                return web.Response(text="#EXTM3U\n/audio.mp3\n/nested.m3u8\n",
+                return web.Response(text="#EXTM3U\n/audio.mp3\n/segment.ts\n/nested.m3u8\n",
                                     content_type="application/vnd.apple.mpegurl")
             if request.path == "/external.m3u8":
                 return web.Response(text="#EXTM3U\nhttp://198.51.100.10/leak.ts\n")

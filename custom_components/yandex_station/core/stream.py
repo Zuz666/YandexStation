@@ -41,7 +41,7 @@ MIME_TYPES = {
 
 def get_ext(url: str) -> str | None:
     path = urlsplit(url).path
-    if m := re.search(r"\.([a-z0-9]{3,4})$", path):
+    if m := re.search(r"\.([a-z0-9]{2,4})$", path):
         return m[1]
     return None
 
