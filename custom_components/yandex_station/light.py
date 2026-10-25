@@ -42,6 +42,10 @@ class YandexLight(LightEntity, YandexEntity):
     def internal_init(self, capabilities: dict, properties: dict):
         modes = set()
         self.effects = []
+        # The official IoT client excludes Station 3 from animation operations.
+        self.animation_uses_actions = (
+            self.device["type"] == "devices.types.smart_speaker.yandex.station.orion"
+        )
 
         # backlight for Yandex Station 3 and maybe some others
         for instance in ("on", "backlight"):
@@ -69,9 +73,25 @@ class YandexLight(LightEntity, YandexEntity):
                 modes.add(ColorMode.COLOR_TEMP)
 
         if animation := capabilities.get("color_animation"):
-            music = (animation.get("animations") or {}).get("color_music") or {}
+            animations = animation.get("animations") or {}
+            music = animations.get("color_music") or {}
+            scene_ids = {
+                i["id"] for i in (animations.get("scene") or {}).get("variants") or []
+            }
             names = {i["name"] for i in self.effects}
             for variant in music.get("variants") or []:
+                if self.animation_uses_actions and variant["id"] not in scene_ids:
+                    # Station 3 also exposes musical variants as named legacy scenes.
+                    scene = next(
+                        (
+                            i for i in self.effects
+                            if i["animation_type"] == "scene" and i["id"] == variant["id"]
+                        ),
+                        None,
+                    )
+                    if scene is not None:
+                        scene["animation_type"] = "color_music"
+                        continue
                 name = COLOR_MUSIC_NAMES.get(variant["id"], variant["id"])
                 while name in names:
                     name += " (цветомузыка)"
@@ -203,7 +223,8 @@ class YandexLight(LightEntity, YandexEntity):
 
         if effect is not None:
             color: dict = next(i for i in self.effects if i["name"] == effect)
-            if color["animation_type"] == "color_music":
+            animation_type = color["animation_type"]
+            if animation_type == "color_music" and not self.animation_uses_actions:
                 animations = (self.animation or {}).get("animations") or {}
                 music = animations.get("color_music") or {}
                 variant = {"id": color["id"]}
@@ -216,7 +237,7 @@ class YandexLight(LightEntity, YandexEntity):
                     await self.device_actions(**payload)
                 return
 
-            if self.animation:
+            if self.animation or animation_type == "color_music":
                 # same payload as Yandex app sends for Station 3 backlight,
                 # color_setting scene/color returns INTERNAL_ERROR for it
                 if color["animation_type"] == "color":
@@ -225,20 +246,22 @@ class YandexLight(LightEntity, YandexEntity):
                         "animations": {"color": {"variant": color["id"]}},
                     }
                 else:
-                    try:
-                        variant = next(
-                            i
-                            for i in self.animation["animations"]["scene"]["variants"]
-                            if i["id"] == color["id"]
-                        )
-                    except:
-                        variant = {"id": color["id"], "options": []}
-
+                    animations = (self.animation or {}).get("animations") or {}
+                    saved = (animations.get(animation_type) or {}).get("variants") or []
+                    variant = next((i for i in saved if i["id"] == color["id"]), None)
+                    animation = {"variant": color["id"]}
+                    if animation_type == "scene":
+                        animation["variants"] = [
+                            variant or {"id": color["id"], "options": []}
+                        ]
+                    elif variant is not None:
+                        animation["variants"] = [{
+                            "id": color["id"],
+                            "options": variant.get("options") or [],
+                        }]
                     payload["color_animation"] = {
-                        "current_animation_type": "scene",
-                        "animations": {
-                            "scene": {"variant": color["id"], "variants": [variant]}
-                        },
+                        "current_animation_type": animation_type,
+                        "animations": {animation_type: animation},
                     }
             else:
                 payload[color["animation_type"]] = color["id"]
