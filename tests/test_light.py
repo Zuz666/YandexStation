@@ -1253,7 +1253,9 @@ def test_ambi_select_music_without_changing_settings():
     device = ambi_device()
     original = deepcopy(device)
     session = AsyncMock(spec=YandexSession)
-    session.post.return_value.json.return_value = {"status": "ok"}
+    session.post.return_value.json.return_value = {
+        "operations": [{"result": {"status": "DONE"}}]
+    }
     session.get.return_value.json.return_value = {"status": "ok", **device}
     entity = YandexLight(YandexQuasar(session), device)
 
@@ -1383,7 +1385,6 @@ def test_failed_music_operation_does_not_power_on():
     device["capabilities"][0]["state"]["value"] = False
     session = AsyncMock(spec=YandexSession)
     session.post.return_value.json.return_value = {
-        "status": "ok",
         "operations": [{"result": {"status": "ERROR"}}],
     }
     session.get.return_value.json.return_value = {"status": "ok", **device}
