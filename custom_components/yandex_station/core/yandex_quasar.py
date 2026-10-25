@@ -1245,6 +1245,9 @@ class YandexQuasar(Dispatcher):
         for operation in resp.get("operations", []):
             assert operation["result"]["status"] != "ERROR", operation["result"]
 
+        # The official client tracks operations[].payload.action_id to completion;
+        # this path only refreshes state once. Whether these lamps return action_id
+        # for set_animation is unknown; an accepted response may not be final.
         device = await self.get_device(device)
         self.dispatch_update(device["id"], device)
 
