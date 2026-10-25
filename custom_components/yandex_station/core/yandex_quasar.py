@@ -477,7 +477,8 @@ class YandexQuasar(Dispatcher):
             },
         )
         resp = await r.json()
-        assert resp["status"] == "ok", resp
+        # Unlike legacy actions, operations may omit the top-level status.
+        assert resp.get("status", "ok") == "ok", resp
         for operation in resp.get("operations", []):
             assert operation["result"]["status"] != "ERROR", operation["result"]
 
