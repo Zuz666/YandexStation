@@ -47,7 +47,8 @@ class YandexLight(LightEntity, YandexEntity):
     min_brightness: int
     effects: list
     on_instance: str = None
-    # Last reported animation state, including saved variant options.
+    # Keep the last reported color_animation state to preserve saved
+    # variant options when switching effects.
     animation: dict = None
 
     def internal_init(self, capabilities: dict, properties: dict):
