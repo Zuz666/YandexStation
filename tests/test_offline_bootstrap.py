@@ -287,7 +287,7 @@ def test_offline_acceptance_a1_full_lifecycle(tmp_path):
                             )
                         with pytest.raises(RuntimeError):
                             await quasar.session.ws_connect(
-                                "wss://iot.quasar.yandex.ru/ws", role="cloud_ws"
+                                url="wss://iot.quasar.yandex.ru/ws", role="cloud_ws"
                             )
                         mock_session.get.assert_not_called()
                         mock_session.ws_connect.assert_not_called()

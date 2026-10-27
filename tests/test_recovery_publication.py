@@ -145,8 +145,8 @@ def test_recovery_fetches_missing_tokens_once_and_reconnects_owner():
             return_value='{"status":"ok","token":"fetched-candidate"}'
         )
         session.request_glagol = AsyncMock(return_value=token_resp)
-        async def fake_get(url, **kwargs):
-            if "scenarios" in url:
+        async def fake_get(*, path, role):
+            if "scenarios" in path:
                 # Scenario catalog is unavailable: reconciliation is skipped
                 raise RuntimeError("scenarios unavailable")
             return devices_response(device_catalog())
@@ -291,8 +291,8 @@ def test_recovery_refetches_token_after_persisted_rejection_restored_empty():
 
         session.request_glagol = AsyncMock(return_value=token_response("fresh-candidate"))
 
-        async def fake_get(url, **kwargs):
-            if "scenarios" in url:
+        async def fake_get(*, path, role):
+            if "scenarios" in path:
                 raise RuntimeError("scenarios unavailable")
             return devices_response(device_catalog())
 
@@ -324,15 +324,15 @@ def test_recovery_survives_inventory_outage_and_completes_without_reload():
 
         inventory_attempts = []
 
-        async def fake_get(url, **kwargs):
-            if "user/devices" in url:
-                inventory_attempts.append(url)
+        async def fake_get(*, path, role):
+            if "user/devices" in path:
+                inventory_attempts.append(path)
                 if len(inventory_attempts) == 1:
                     raise CloudRequestError("quasar", 503)
                 return devices_response(device_catalog())
-            if "scenarios" in url:
+            if "scenarios" in path:
                 raise RuntimeError("scenarios unavailable")
-            raise AssertionError(url)
+            raise AssertionError(path)
 
         session.get = AsyncMock(side_effect=fake_get)
         session.request_glagol = AsyncMock(return_value=token_response("fetched-candidate"))
@@ -373,7 +373,7 @@ def test_token_recovery_does_not_wait_for_inventory_availability():
         recovered = asyncio.Event()
         session.get = AsyncMock(side_effect=CloudRequestError("quasar", 503))
 
-        async def fetch(*args, **kwargs):
+        async def fetch(*, path, role, **kwargs):
             recovered.set()
             return token_response("independent-candidate")
 
@@ -437,7 +437,7 @@ def test_recovery_continues_remaining_speakers_after_token_fetch_failure():
 
         attempts = []
 
-        async def fetch(url, **kwargs):
+        async def fetch(*, path, role, **kwargs):
             did = kwargs["params"]["device_id"]
             attempts.append(did)
             if len(attempts) == 1:
@@ -496,10 +496,10 @@ def test_cached_token_missing_hdmi_config_fetched_after_publication():
             "quasar_config_version": "1",
         })
 
-        async def fake_get(url, **kwargs):
-            if "configuration" in url:
+        async def fake_get(*, path, role):
+            if "configuration" in path:
                 return config
-            if "scenarios" in url:
+            if "scenarios" in path:
                 raise RuntimeError("scenarios unavailable")
             return devices_response(device_catalog())
 
@@ -540,7 +540,7 @@ def test_fetched_token_reaches_existing_empty_glagol_client():
         from .test_glagol_lifecycle import FakeWS, ws_text
 
         session = MagicMock()
-        session.ws_connect = AsyncMock(side_effect=lambda *a, **k: FakeWS([
+        session.ws_connect = AsyncMock(side_effect=lambda *, url, role, **kwargs: FakeWS([
             ws_text('{"state":{"volume":0.3,"playing":false}}'),
         ]))
         cache = MagicMock()

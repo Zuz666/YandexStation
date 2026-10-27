@@ -46,7 +46,7 @@ class ScenarioCommandPeer:
     async def json(self):
         return {"status": "ok"}
 
-    async def put(self, url, *, role, json):
+    async def put(self, *, path, role, json):
         if self.put_failure:
             raise CloudRequestError(role, 403)
         if self.put_status is not None:
@@ -57,12 +57,12 @@ class ScenarioCommandPeer:
         await asyncio.sleep(0)
         return self
 
-    async def get(self, url, *, role):
+    async def get(self, *, path, role):
         if self.catalog is None:
             raise CloudRequestError(role, 404)
         return self.catalog
 
-    async def post(self, url, *, role):
+    async def post(self, *, path, role):
         self.executed.append(self.configured)
         self.action_started.set()
         if self.release_action:

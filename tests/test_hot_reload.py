@@ -630,8 +630,7 @@ if not builtins.hot_reload_release.wait(10):
                             peer_site._server.sockets[0].getsockname()[1]
                             for peer_site in sites
                         ]
-                        async def local_ws(url, **kwargs):
-                            kwargs.pop("role")
+                        async def local_ws(*, url, role, **kwargs):
                             return await client.ws_connect(
                                 url.replace("wss://", "ws://"), **kwargs
                             )
@@ -643,7 +642,7 @@ if not builtins.hot_reload_release.wait(10):
                         assert connections == ports
                         assert station.glagol is not None
                         request_started = asyncio.Event()
-                        async def pending_token_request(*args, **kwargs):
+                        async def pending_token_request(*, path, role, **kwargs):
                             request_started.set()
                             await asyncio.Event().wait()
                         active_quasar.policy.force_offline_local = False

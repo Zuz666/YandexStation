@@ -397,7 +397,7 @@ class YandexQuasar(Dispatcher):
 
     async def _check_cloud_inventory(self) -> tuple[int, int]:
         response = await self.session.get(
-            "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
+            path="m/v3/user/devices", role="quasar"
         )
         try:
             payload = await response.json()
@@ -482,7 +482,7 @@ class YandexQuasar(Dispatcher):
         _LOGGER.debug("Fetching device list from the cloud")
         try:
             r = await self.session.get(
-                "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
+                path="m/v3/user/devices", role="quasar"
             )
         except CloudRequestError as error:
             if error.status == 401:
@@ -622,7 +622,7 @@ class YandexQuasar(Dispatcher):
         """Fetch `/m/v4/user/scenarios/{id}/edit` when candidate steps are omitted."""
         try:
             r = await self.session.get(
-                f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/{scenario_id}/edit",
+                path=f"m/v4/user/scenarios/{scenario_id}/edit",
                 role="quasar",
             )
             resp = await r.json()
@@ -831,7 +831,7 @@ class YandexQuasar(Dispatcher):
     async def load_speaker_config(self, device: dict):
         """Fetch speaker `device_id` and `platform` when omitted from the device list."""
         r = await self.session.get(
-            f"https://iot.quasar.yandex.ru/m/user/devices/{device['id']}/configuration",
+            path=f"m/user/devices/{device['id']}/configuration",
             role="quasar",
         )
         resp = await r.json()
@@ -850,7 +850,7 @@ class YandexQuasar(Dispatcher):
             return
         try:
             r = await self.session.get(
-                "https://iot.quasar.yandex.ru/m/user/scenarios", role="quasar"
+                path="m/user/scenarios", role="quasar"
             )
             resp = await r.json()
             assert resp["status"] == "ok", resp
@@ -935,7 +935,7 @@ class YandexQuasar(Dispatcher):
 
         # load scenario info
         r = await self.session.get(
-            f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/{sid}/edit",
+            path=f"m/v4/user/scenarios/{sid}/edit",
             role="quasar",
         )
         resp = await r.json()
@@ -944,7 +944,7 @@ class YandexQuasar(Dispatcher):
         # convert to scenario patch
         payload = parse_scenario(resp["scenario"])
         r = await self.session.put(
-            f"https://iot.quasar.yandex.ru/m/v3/user/scenarios/{sid}", json=payload,
+            path=f"m/v3/user/scenarios/{sid}", json=payload,
             role="quasar",
         )
         resp = await r.json()
@@ -954,7 +954,7 @@ class YandexQuasar(Dispatcher):
         """Create a dummy cloud scenario for speaker voice/TTS control."""
         payload = scenario_speaker_tts("ХА " + device_id, hash, device_id, "пустышка")
         r = await self.session.post(
-            "https://iot.quasar.yandex.ru/m/v4/user/scenarios", json=payload,
+            path="m/v4/user/scenarios", json=payload,
             role="quasar",
         )
         resp = await r.json()
@@ -1026,7 +1026,7 @@ class YandexQuasar(Dispatcher):
                 )
                 phase = "scenario_update"
                 response = await self.session.put(
-                    f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/{sid}",
+                    path=f"m/v4/user/scenarios/{sid}",
                     role="quasar",
                     json=payload,
                 )
@@ -1037,7 +1037,7 @@ class YandexQuasar(Dispatcher):
                 phase = "scenario_action"
                 action_dispatched = True
                 response = await self.session.post(
-                    f"https://iot.quasar.yandex.ru/m/user/scenarios/{sid}/actions",
+                    path=f"m/user/scenarios/{sid}/actions",
                     role="quasar",
                 )
                 body = await response.json()
@@ -1099,7 +1099,7 @@ class YandexQuasar(Dispatcher):
         """Fetch the list of local speakers from the Glagol API (currently unused)."""
         try:
             r = await self.session.request_glagol(
-                "https://quasar.yandex.net/glagol/device_list", role="glagol_token"
+                path="device_list", role="glagol_token"
             )
             resp = await r.json()
             return [
@@ -1114,7 +1114,7 @@ class YandexQuasar(Dispatcher):
     async def get_device_config(self, device: dict) -> (dict, str):
         did = device["id"]
         r = await self.session.get(
-            f"https://iot.quasar.yandex.ru/m/v2/user/devices/{did}/configuration",
+            path=f"m/v2/user/devices/{did}/configuration",
             role="quasar",
         )
         resp = await r.json()
@@ -1126,7 +1126,7 @@ class YandexQuasar(Dispatcher):
 
         did = device["id"]
         r = await self.session.post(
-            f"https://iot.quasar.yandex.ru/m/v3/user/devices/{did}/configuration/quasar",
+            path=f"m/v3/user/devices/{did}/configuration/quasar",
             json={"config": config, "version": version},
             role="quasar",
         )
@@ -1135,7 +1135,7 @@ class YandexQuasar(Dispatcher):
 
     async def get_device(self, device: dict):
         r = await self.session.get(
-            f"https://iot.quasar.yandex.ru/m/user/{device['item_type']}s/{device['id']}",
+            path=f"m/user/{device['item_type']}s/{device['id']}",
             role="quasar",
         )
         resp = await r.json()
@@ -1152,7 +1152,7 @@ class YandexQuasar(Dispatcher):
             action["state"]["relative"] = True
 
         r = await self.session.post(
-            f"https://iot.quasar.yandex.ru/m/user/{device['item_type']}s/{device['id']}/actions",
+            path=f"m/user/{device['item_type']}s/{device['id']}/actions",
             json={"actions": [action]},
             role="quasar",
         )
@@ -1172,8 +1172,8 @@ class YandexQuasar(Dispatcher):
             "type": IOT_TYPES[instance],
         }
 
-        url = f"https://iot.quasar.yandex.ru/m/user/{device['item_type']}s/{device['id']}/actions"
-        r = await self.session.post(url, role="quasar", json={"actions": [action]})
+        path = f"m/user/{device['item_type']}s/{device['id']}/actions"
+        r = await self.session.post(path=path, role="quasar", json={"actions": [action]})
         resp = await r.json()
         assert resp["status"] == "ok", resp
 
@@ -1195,7 +1195,7 @@ class YandexQuasar(Dispatcher):
             actions.append({"type": type_, "state": state})
 
         r = await self.session.post(
-            f"https://iot.quasar.yandex.ru/m/user/{device['item_type']}s/{device['id']}/actions",
+            path=f"m/user/{device['item_type']}s/{device['id']}/actions",
             json={"actions": actions},
             role="quasar",
         )
@@ -1210,7 +1210,7 @@ class YandexQuasar(Dispatcher):
         _LOGGER.debug(f"Device color: {kwargs}")
 
         r = await self.session.post(
-            f"https://iot.quasar.yandex.ru/m/v3/user/custom/group/color/apply",
+            path="m/v3/user/custom/group/color/apply",
             json={"device_ids": [device["id"]], **kwargs},
             role="quasar",
         )
@@ -1223,7 +1223,7 @@ class YandexQuasar(Dispatcher):
 
     async def device_animation(self, device: dict, animation_type: str, animation: dict):
         r = await self.session.post(
-            f"https://iot.quasar.yandex.ru/m/user/devices/{device['id']}/operations",
+            path=f"m/user/devices/{device['id']}/operations",
             json={
                 "operations": [
                     {
@@ -1265,7 +1265,7 @@ class YandexQuasar(Dispatcher):
 
         try:
             r = await self.session.get(
-                "https://quasar.yandex.ru/devices_online_stats", role="account"
+                path="devices_online_stats", role="account"
             )
             resp = await r.json()
             assert resp["status"] == "ok", resp
@@ -1310,7 +1310,7 @@ class YandexQuasar(Dispatcher):
             updates_url, self._updates_url = self._updates_url, None
             if not updates_url:
                 r = await self.session.get(
-                    "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
+                    path="m/v3/user/devices", role="quasar"
                 )
                 resp = await r.json()
                 assert resp["status"] == "ok", resp
@@ -1323,7 +1323,7 @@ class YandexQuasar(Dispatcher):
                 updates_url = resp["updates_url"]
 
             ws = await self.session.ws_connect(
-                updates_url, role="cloud_ws", heartbeat=60
+                url=updates_url, role="cloud_ws", heartbeat=60
             )
             self.cloud_connection.update(
                 state="connected", connected_at=datetime.now(timezone.utc).isoformat(),
@@ -1359,7 +1359,7 @@ class YandexQuasar(Dispatcher):
 
         try:
             r = await self.session.get(
-                "https://iot.quasar.yandex.ru/m/v3/user/devices", role="quasar"
+                path="m/v3/user/devices", role="quasar"
             )
             resp = await r.json()
             assert resp["status"] == "ok", resp
@@ -1382,7 +1382,7 @@ class YandexQuasar(Dispatcher):
         try:
             # 1. Get all scenarios history
             r = await self.session.get(
-                "https://iot.quasar.yandex.ru/m/user/scenarios/history", role="quasar"
+                path="m/user/scenarios/history", role="quasar"
             )
             raw = await r.json()
 
@@ -1407,7 +1407,7 @@ class YandexQuasar(Dispatcher):
 
             # 4. Get speakers from launch devices
             r = await self.session.get(
-                f"https://iot.quasar.yandex.ru/m/v4/user/scenarios/launches/{scenario['id']}",
+                path=f"m/v4/user/scenarios/launches/{scenario['id']}",
                 role="quasar",
             )
             raw = await r.json()
@@ -1544,7 +1544,7 @@ class YandexQuasar(Dispatcher):
             _LOGGER.debug("Skipping token fetch for %s: cloud blocked by policy", did)
             return None
         r = await self.session.request_glagol(
-            "https://quasar.yandex.net/glagol/token",
+            path="token",
             role="glagol_token",
             params={"device_id": did, "platform": platform},
         )
@@ -1627,16 +1627,15 @@ class YandexQuasar(Dispatcher):
         assert kv and value in kv["values"], f"{key}={value}"
 
         if kv.get("api") == "user/settings":
-            # https://iot.quasar.yandex.ru/m/user/settings
             r = await self.session.post(
-                f"https://iot.quasar.yandex.ru/m/user/settings",
+                path="m/user/settings",
                 json={kv["key"]: kv["values"][value]},
                 role="quasar",
             )
 
         else:
             r = await self.session.get(
-                "https://quasar.yandex.ru/get_account_config", role="account"
+                path="get_account_config", role="account"
             )
             resp = await r.json()
             assert resp["status"] == "ok", resp
@@ -1645,7 +1644,7 @@ class YandexQuasar(Dispatcher):
             payload[kv["key"]] = kv["values"][value]
 
             r = await self.session.post(
-                "https://quasar.yandex.ru/set_account_config", json=payload,
+                path="set_account_config", json=payload,
                 role="account",
             )
 
@@ -1654,7 +1653,7 @@ class YandexQuasar(Dispatcher):
 
     async def get_alarms(self, device: dict):
         r = await self.session.post(
-            "https://rpc.alice.yandex.ru/gproxy/get_alarms",
+            path="gproxy/get_alarms",
             json={"device_ids": [device["quasar_info"]["device_id"]]},
             headers=ALARM_HEADERS,
             role="rpc",
@@ -1665,7 +1664,7 @@ class YandexQuasar(Dispatcher):
     async def create_alarm(self, device: dict, alarm: dict) -> bool:
         alarm["device_id"] = device["quasar_info"]["device_id"]
         resp = await self.session.post(
-            "https://rpc.alice.yandex.ru/gproxy/create_alarm",
+            path="gproxy/create_alarm",
             json={"alarm": alarm, "device_type": device["type"]},
             headers=ALARM_HEADERS,
             role="rpc",
@@ -1675,7 +1674,7 @@ class YandexQuasar(Dispatcher):
     async def change_alarm(self, device: dict, alarm: dict) -> bool:
         alarm["device_id"] = device["quasar_info"]["device_id"]
         resp = await self.session.post(
-            "https://rpc.alice.yandex.ru/gproxy/change_alarm",
+            path="gproxy/change_alarm",
             json={"alarm": alarm, "device_type": device["type"]},
             headers=ALARM_HEADERS,
             role="rpc",
@@ -1684,7 +1683,7 @@ class YandexQuasar(Dispatcher):
 
     async def cancel_alarms(self, device: dict, alarm_id: str) -> bool:
         resp = await self.session.post(
-            "https://rpc.alice.yandex.ru/gproxy/cancel_alarms",
+            path="gproxy/cancel_alarms",
             json={
                 "device_alarm_ids": [
                     {

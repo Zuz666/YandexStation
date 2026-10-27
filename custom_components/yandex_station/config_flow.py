@@ -458,21 +458,20 @@ class OptionsFlowHandler(OptionsFlow):
         else:
             invalid_endpoints = False
 
-        def format_effective(default_url: str, custom_url: str, role: str) -> str:
+        def format_effective(default_url: str, effective_url: str) -> str:
             if invalid_endpoints:
                 return "некорректная конфигурация адресов (проверьте YAML и параметры)"
-            resolved = session_config.resolve_url(custom_url, role)
-            if custom_url == default_url and not session_config.domain:
-                return f"{resolved} (по умолчанию)"
-            if custom_url in self.config_entry.options.values():
-                return f"{resolved} (GUI override)"
-            return f"{resolved} (из YAML)"
+            if effective_url == default_url and not session_config.domain:
+                return f"{effective_url} (по умолчанию)"
+            if effective_url in self.config_entry.options.values():
+                return f"{effective_url} (GUI override)"
+            return f"{effective_url} (из YAML)"
 
         placeholders = {
             f"current_{field.removesuffix('_base_url')}": format_effective(
-                default, getattr(session_config, field), role
+                default, getattr(session_config, field)
             )
-            for role, (field, default) in ROLE_BASE_FIELDS.items()
+            for field, default in ROLE_BASE_FIELDS.values()
         }
         placeholders.update(
             current_cookie=(

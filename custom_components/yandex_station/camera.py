@@ -81,7 +81,7 @@ class YandexSnapshotCamera(Camera, YandexEntity):
     ) -> bytes | None:
         try:
             url = self.device["parameters"]["snapshot_url"] + "/current.jpg"
-            r = await self.quasar.session.get(url, role="music")
+            r = await self.quasar.session.get(url=url, role="music")
             return await r.read()
         except Exception as error:
             _LOGGER.debug(

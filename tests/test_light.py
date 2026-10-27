@@ -1216,7 +1216,7 @@ def test_station3_music_actions_preserve_options_and_reported_state():
     asyncio.run(entity.async_turn_on(effect="Светомузыка", brightness=128))
 
     session.post.assert_awaited_once_with(
-        "https://iot.quasar.yandex.ru/m/user/devices/xxx/actions",
+        path="m/user/devices/xxx/actions",
         role="quasar",
         json={
             "actions": [
@@ -1257,7 +1257,7 @@ def test_station3_music_actions_preserve_options_and_reported_state():
     session.post.reset_mock()
     animation["animations"]["color_music"]["variant"] = "stroboscope"
     asyncio.run(entity.async_turn_on(effect="Стробоскоп"))
-    assert session.post.await_args.args[0].endswith("/actions")
+    assert session.post.await_args.kwargs["path"].endswith("/actions")
     actions = session.post.await_args.kwargs["json"]["actions"]
     assert actions == [{
         "type": "devices.capabilities.color_animation",
@@ -1295,7 +1295,7 @@ def test_station3_music_without_saved_options_does_not_reset_them():
     asyncio.run(entity.async_turn_on(effect="Светомузыка"))
 
     session.post.assert_awaited_once_with(
-        "https://iot.quasar.yandex.ru/m/user/devices/xxx/actions",
+        path="m/user/devices/xxx/actions",
         role="quasar",
         json={"actions": [{
             "type": "devices.capabilities.color_animation",
@@ -1421,7 +1421,7 @@ def test_ambi_select_music_without_changing_settings():
 
     # Official IoT client: set_animation is separate from type settings.
     session.post.assert_awaited_once_with(
-        "https://iot.quasar.yandex.ru/m/user/devices/synthetic-ambi/operations",
+        path="m/user/devices/synthetic-ambi/operations",
         json={
             "operations": [
                 {
@@ -1461,12 +1461,12 @@ def test_music_effect_identity_and_partial_updates():
         "Эквалайзер", "Вечеринка (цветомузыка)", "Игра", "future_music",
     ]
     asyncio.run(entity.async_turn_on(effect="Вечеринка (цветомузыка)"))
-    assert session.post.await_args.args[0].endswith("/operations")
+    assert session.post.await_args.kwargs["path"].endswith("/operations")
     assert session.post.await_args.kwargs["json"]["operations"][0]["payload"] == {
         "animation_type": "color_music", "animation": {"id": "party"}
     }
     asyncio.run(entity.async_turn_on(effect="Вечеринка"))
-    assert session.post.await_args.args[0].endswith("/actions")
+    assert session.post.await_args.kwargs["path"].endswith("/actions")
     assert session.post.await_args.kwargs["json"]["actions"][0]["state"]["value"] == {
         "current_animation_type": "scene",
         "animations": {"scene": {"variant": "party", "variants": [{"id": "party", "options": []}]}},
@@ -1521,7 +1521,7 @@ def test_music_selection_preserves_variant_options_and_turns_on():
 
     assert len(session.post.await_args_list) == 2
     operation_call, power_call = session.post.await_args_list
-    assert operation_call.args[0].endswith("/devices/synthetic-ambi/operations")
+    assert operation_call.kwargs["path"].endswith("/devices/synthetic-ambi/operations")
     operation = operation_call.kwargs["json"]["operations"][0]
     assert operation["payload"] == {
         "animation_type": "color_music",
@@ -1530,7 +1530,7 @@ def test_music_selection_preserves_variant_options_and_turns_on():
             "options": [{"instance": "autoplay", "enabled": False}],
         },
     }
-    assert power_call.args[0].endswith("/devices/synthetic-ambi/actions")
+    assert power_call.kwargs["path"].endswith("/devices/synthetic-ambi/actions")
     assert {
         action["state"]["instance"]: action["state"]["value"]
         for action in power_call.kwargs["json"]["actions"]
@@ -1552,7 +1552,7 @@ def test_failed_music_operation_does_not_power_on():
         asyncio.run(entity.async_turn_on(effect="Вечеринка", brightness=255))
 
     session.post.assert_awaited_once()
-    assert session.post.await_args.args[0].endswith("/operations")
+    assert session.post.await_args.kwargs["path"].endswith("/operations")
     session.get.assert_not_awaited()
     assert not entity.is_on
 
@@ -1595,7 +1595,7 @@ def test_music_capability_without_color_or_animation_state():
 
     asyncio.run(entity.async_turn_on(effect="Эквалайзер"))
 
-    assert session.post.await_args.args[0].endswith("/operations")
+    assert session.post.await_args.kwargs["path"].endswith("/operations")
     assert session.post.await_args.kwargs["json"]["operations"][0]["payload"] == {
         "animation_type": "color_music",
         "animation": {"id": "equalizer"},

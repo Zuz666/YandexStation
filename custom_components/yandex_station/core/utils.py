@@ -229,7 +229,7 @@ async def get_media_payload(session: YandexSession, media_id: str) -> dict | Non
             elif k == "kinopoisk.id":
                 try:
                     r = await session.get(
-                        "https://ott-widget.kinopoisk.ru/ott/api/kp-film-status/",
+                        url="https://ott-widget.kinopoisk.ru/ott/api/kp-film-status/",
                         params={"kpFilmId": m[1]},
                         role="music",
                     )
@@ -242,7 +242,7 @@ async def get_media_payload(session: YandexSession, media_id: str) -> dict | Non
             elif k == "bookmate":
                 try:
                     r = await session.post(
-                        "https://api-gateway-rest.bookmate.yandex.net/audiobook/album",
+                        url="https://api-gateway-rest.bookmate.yandex.net/audiobook/album",
                         json={"audiobook_uuid": m[1]},
                         role="music",
                     )
@@ -393,7 +393,7 @@ async def get_playlist_uid(
 ) -> int | None:
     try:
         r = await session.request_glagol(
-            f"https://api.music.yandex.net/users/{username}/playlists/{playlist_id}",
+            url=f"https://api.music.yandex.net/users/{username}/playlists/{playlist_id}",
             role="music",
         )
         resp = await r.json()

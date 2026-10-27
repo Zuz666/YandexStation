@@ -66,8 +66,8 @@ def test_created_scenario_binds_after_catalog_detail_and_restart_without_post():
         detail = AsyncMock()
         detail.json.return_value = {"status": "ok", "scenario": created}
 
-        async def fetch(url, **kwargs):
-            return detail if url.endswith("/edit") else catalog
+        async def fetch(*, path, role):
+            return detail if path.endswith("/edit") else catalog
 
         network.get = AsyncMock(side_effect=fetch)
         await restarted.load_scenarios()
@@ -207,8 +207,8 @@ def test_incomplete_candidate_resolves_via_detail_get():
             "scenario": wire_scenario("scen_detail"),
         }
 
-        async def fake_get(url, **kwargs):
-            assert url.endswith("/scenarios/scen_detail/edit"), url
+        async def fake_get(*, path, role):
+            assert path.endswith("/scenarios/scen_detail/edit"), path
             return detail
 
         session.get = AsyncMock(side_effect=fake_get)
@@ -225,7 +225,7 @@ def test_unavailable_detail_leaves_binding_unresolved():
         scenarios = [{"id": "scen_detail", "triggers": [{"value": hash_code}]}]
         quasar, speaker, _, session = quasar_with(scenarios=scenarios)
 
-        async def fake_get(url, **kwargs):
+        async def fake_get(*, path, role):
             raise RuntimeError("detail unavailable")
 
         session.get = AsyncMock(side_effect=fake_get)
@@ -242,7 +242,7 @@ def test_failed_catalog_get_clears_executable_bindings():
         quasar, speaker, _, session = quasar_with()
         speaker["scenario_id"] = "scen_stale"
 
-        async def fake_get(url, **kwargs):
+        async def fake_get(*, path, role):
             raise RuntimeError("catalog down")
 
         session.get = AsyncMock(side_effect=fake_get)
@@ -415,7 +415,7 @@ def test_scenario_worker_keeps_retrying_while_candidate_detail_unavailable():
         })
         responses = [broken, complete]
 
-        async def fetch(url, **kwargs):
+        async def fetch(*, path, role):
             return responses.pop(0)
 
         original = RecoveryBackoff.next_delay

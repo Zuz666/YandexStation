@@ -1,10 +1,8 @@
 """Per-entry session policy and trust boundaries (RFC v2 step 2).
 
-Every network caller must pass an explicit role string. Trust is
-role-scoped: credential-bearing requests may only target built-in Yandex
-origins plus their documented yandex.ru/yandex.com counterpart at the
-default port. Configured external overrides are permitted for anonymous
-requests only.
+Every network caller passes an explicit role. Credential-bearing cloud
+requests may only target HTTPS hosts in the Yandex domain families.
+Configured external overrides are permitted for anonymous requests only.
 """
 
 from __future__ import annotations
@@ -12,12 +10,12 @@ from __future__ import annotations
 import ipaddress
 import random
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from math import isfinite
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 try:
     from enum import StrEnum
@@ -93,8 +91,7 @@ DEFAULT_MOBILEPROXY_BASE_URL = "https://mobileproxy.passport.yandex.net"
 DEFAULT_GLAGOL_BASE_URL = "https://quasar.yandex.net/glagol"
 DEFAULT_RPC_BASE_URL = "https://rpc.alice.yandex.ru"
 
-#: Authoritative role -> (config field, default base URL) table; endpoint
-#: forms, configuration validation and role trust all derive from it.
+#: Configured request bases and their defaults; endpoint forms share this table.
 ROLE_BASE_FIELDS = {
     "quasar": ("quasar_base_url", DEFAULT_QUASAR_BASE_URL),
     "account": ("account_base_url", DEFAULT_ACCOUNT_BASE_URL),
@@ -233,39 +230,26 @@ def _same_origin(a, b) -> bool:
     )
 
 
-def _swap_base_prefix(url: str, default_base: str, custom_base: str) -> str:
-    """Origin+path-boundary replacement of a default base with a configured one."""
-    parts, base_parts, custom_parts = (
-        _url_parts(url), _url_parts(default_base), _url_parts(custom_base)
-    )
-    if (
-        parts is None or base_parts is None or custom_parts is None
-        or not custom_parts.hostname
-        or not _same_origin(parts, base_parts)
+def _passport_destination(url: str, configured_base: str | None) -> str:
+    """Map server-provided Passport targets, preserving configured prefixes."""
+    parts: SplitResult | None = _url_parts(url)
+    if parts is None or not any(
+        _same_origin(parts, _url_parts(source))
+        for source in (DEFAULT_PASSPORT_BASE_URL, "https://passport.yandex.com")
     ):
         return url
-    base_path = base_parts.path.rstrip("/")
+    base: SplitResult | None = _url_parts(configured_base)
+    if base is None or base.hostname is None:
+        raise ValueError("invalid_endpoint")
+    prefix = base.path.rstrip("/")
     path = parts.path or "/"
-    if base_path:
-        if path == base_path:
-            rest = "/"
-        elif path.startswith(base_path + "/"):
-            rest = path[len(base_path):]
-        else:
-            return url
-    else:
-        rest = path
-    custom_path = custom_parts.path.rstrip("/")
-    if (
-        custom_path
-        and (path == custom_path or path.startswith(custom_path + "/"))
-        and _same_origin(parts, custom_parts)
+    if prefix and _same_origin(parts, base) and (
+        path == prefix or path.startswith(prefix + "/")
     ):
         return url
-    new_path = custom_path + rest if custom_path else rest
-    netloc = _format_netloc(custom_parts.hostname, custom_parts.port)
     return urlunsplit(
-        (parts.scheme.lower(), netloc, new_path, parts.query, parts.fragment)
+        (parts.scheme.lower(), _format_netloc(base.hostname, base.port),
+         prefix + path, parts.query, parts.fragment)
     )
 
 def _apply_domain_suffix(url: str, domain: str) -> str:
@@ -382,7 +366,6 @@ class SessionConfig:
 
     cookie_storage_endpoints: list[dict[str, str]] | None = None
     csrf_endpoints: list[str] | None = None
-    _explicit_probe_roles: frozenset[str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.domain is not None:
@@ -392,16 +375,21 @@ class SessionConfig:
             if getattr(self, attr) is None:
                 setattr(self, attr, _apply_domain_suffix(default, self.domain)
                         if self.domain else default)
-        self._explicit_probe_roles = frozenset(
-            role for role, endpoints in (
-                ("cookie_probe", self.cookie_storage_endpoints),
-                ("csrf", self.csrf_endpoints),
-            ) if endpoints is not None
-        )
+        default_cookies = self.cookie_storage_endpoints is None
+        default_csrf = self.csrf_endpoints is None
         self.cookie_storage_endpoints = _normalize_cookie_endpoints(
             self.cookie_storage_endpoints
         )
         self.csrf_endpoints = _normalize_csrf_endpoints(self.csrf_endpoints)
+        # Default probes have no role-base prefix; explicit lists are exact.
+        if self.domain:
+            if default_cookies:
+                for endpoint in self.cookie_storage_endpoints:
+                    endpoint["url"] = _apply_domain_suffix(endpoint["url"], self.domain)
+            if default_csrf:
+                self.csrf_endpoints = [
+                    _apply_domain_suffix(url, self.domain) for url in self.csrf_endpoints
+                ]
         self.validate()
 
     @classmethod
@@ -441,24 +429,29 @@ class SessionConfig:
         for endpoint in self.csrf_endpoints:
             _check_https_endpoint(endpoint)
 
-    def resolve_url(self, url: str, role: str) -> str:
-        if role not in SESSION_ROLES:
+    def _request_url(
+        self, role: str, *, path: str | None = None, url: str | None = None
+    ) -> str:
+        """Prepare one explicitly selected destination for the session."""
+        if role not in SESSION_ROLES or (path is None) == (url is None):
             raise ValueError("invalid_endpoint")
-        if not url or role in self._explicit_probe_roles or role in ("music", "local_ws"):
+        if url is not None:
+            if role == "passport":
+                return _passport_destination(url, self.passport_base_url)
+            if role == "cloud_ws" and self.domain:
+                return _apply_domain_suffix(url, self.domain)
             return url
-        parts = _url_parts(url)
-        bases = (
-            (ROLE_BASE_FIELDS[role],) if role in ROLE_BASE_FIELDS
-            else ROLE_BASE_FIELDS.values() if role in ("cookie_probe", "csrf")
-            else ()
+        if role not in ROLE_BASE_FIELDS or not isinstance(path, str):
+            raise ValueError("invalid_endpoint")
+        parts = urlsplit(path)
+        if parts.scheme or parts.netloc or parts.fragment or path.startswith("/"):
+            raise ValueError("invalid_endpoint")
+        base = urlsplit(getattr(self, ROLE_BASE_FIELDS[role][0]))
+        return urlunsplit(
+            (base.scheme, base.netloc, base.path.rstrip("/") + "/" + parts.path,
+             parts.query, "")
         )
-        for attr, default in bases:
-            for source in (default, _apply_domain_suffix(default, "yandex.com")):
-                if _same_origin(parts, _url_parts(source)):
-                    return _swap_base_prefix(url, source, getattr(self, attr))
-        if self.domain and role in ("cookie_probe", "csrf", "cloud_ws"):
-            return _apply_domain_suffix(url, self.domain)
-        return url
+
 
     def validate_destination(
         self, url: str, role: str, *, credential: bool = False

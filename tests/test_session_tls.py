@@ -104,24 +104,16 @@ def test_ssl_false_allows_https_and_wss_through_diagnostic_proxy(tmp_path, caplo
                 client.cookie_jar.update_cookies(cookie, response_url=URL("https://yandex.ru"))
                 secure = YandexSession(client, config=SessionConfig(proxy=proxy_url))
                 with pytest.raises(ClientConnectorCertificateError):
-                    await secure.get(
-                        "https://iot.quasar.yandex.ru/probe", role="quasar",
-                        headers={"Authorization": "OAuth PRIVATE_TOKEN"},
-                    )
+                    await secure.get(path="probe", role="quasar", headers={"Authorization": "OAuth PRIVATE_TOKEN"},)
                 assert observed == []
 
                 with caplog.at_level(logging.WARNING):
                     diagnostic = YandexSession(
                         client, config=SessionConfig(proxy=proxy_url, ssl=False)
                     )
-                    response = await diagnostic.get(
-                        "https://iot.quasar.yandex.ru/probe", role="quasar",
-                        headers={"Authorization": "OAuth PRIVATE_TOKEN"},
-                    )
+                    response = await diagnostic.get(path="probe", role="quasar", headers={"Authorization": "OAuth PRIVATE_TOKEN"},)
                     assert await response.json() == {"status": "ok", "source": "diagnostic-peer"}
-                    ws = await diagnostic.ws_connect(
-                        "wss://iot.quasar.yandex.ru/ws", role="cloud_ws"
-                    )
+                    ws = await diagnostic.ws_connect(url="wss://iot.quasar.yandex.ru/ws", role="cloud_ws")
                     message = await ws.receive()
                     assert message.type == WSMsgType.TEXT
                     assert message.data == "diagnostic-peer-ready"

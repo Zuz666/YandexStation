@@ -105,6 +105,125 @@ def get_urls(client):
     return [str(call.args[0]) for call in client.get.call_args_list]
 
 
+def test_role_relative_path_preserves_glagol_prefix_and_operation_query():
+    async def scenario():
+        client = make_client(cookie_domains=())
+        client.get = AsyncMock(return_value=make_response(200))
+        session = YandexSession(
+            client, music_token="synthetic",
+            config=SessionConfig(
+                glagol_base_url="https://quasar.yandex.net/prefix?base=ignored"
+            ),
+        )
+        response = await session.request_glagol(
+            role="glagol_token", path="token?operation=1", params={"platform": "synthetic"}
+        )
+        assert response.status == 200
+        assert get_urls(client) == ["https://quasar.yandex.net/prefix/token?operation=1"]
+        assert client.get.call_args.kwargs["params"] == {"platform": "synthetic"}
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("selectors", [
+    {}, {"path": "m", "url": "https://iot.quasar.yandex.ru/m"},
+    {"path": "/m"}, {"path": "https://iot.quasar.yandex.ru/m"},
+])
+def test_invalid_destination_selector_has_no_auth_or_transport_side_effects(selectors):
+    async def scenario():
+        client = make_client(cookie_domains=())
+        session = YandexSession(client, x_token="synthetic")
+        with pytest.raises(ValueError, match="invalid_endpoint"):
+            await session.post(role="quasar", **selectors)
+        client.get.assert_not_called()
+        client.post.assert_not_called()
+        assert session.csrf_token is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("config, role, path, expected", [
+    ({"rpc_base_url": "https://[2001:db8::10]:8443/rpc"}, "rpc", "gproxy/get_alarms",
+     "https://[2001:db8::10]:8443/rpc/gproxy/get_alarms"),
+    ({"quasar_base_url": "https://iot.quasar.yandex.ru/prefix"}, "quasar", "",
+     "https://iot.quasar.yandex.ru/prefix/"),
+    ({"quasar_base_url": "https://iot.quasar.yandex.ru/api"}, "quasar", "api/devices/",
+     "https://iot.quasar.yandex.ru/api/api/devices/"),
+    ({"domain": "yandex.com"}, "account", "get_account_config",
+     "https://quasar.yandex.com/get_account_config"),
+    ({"domain": "yandex.com", "account_base_url": "https://quasar.yandex.ru"},
+     "account", "get_account_config", "https://quasar.yandex.ru/get_account_config"),
+])
+def test_fixed_destination_uses_effective_role_base(config, role, path, expected):
+    async def scenario():
+        client = make_client(cookie_domains=())
+        client.get = AsyncMock(return_value=make_response(200))
+        session = YandexSession(client, config=SessionConfig(**config))
+        await session.get(role=role, path=path, credential=False)
+        assert get_urls(client) == [expected]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("explicit, cookie_domain, expected", [
+    (False, ".yandex.com", "https://yandex.com/iot?storage=1"),
+    (True, ".yandex.ru", "https://yandex.ru/prefix/probe?custom=1"),
+])
+def test_probe_cookie_scope_matches_effective_destination(explicit, cookie_domain, expected):
+    async def scenario():
+        client = make_client(cookie_domains=(cookie_domain,))
+        client.get = AsyncMock(return_value=make_response(
+            200, json_body={"storage": {"user": {"uid": "synthetic"}}}, has_json=True
+        ))
+        config = SessionConfig(
+            domain="yandex.com",
+            cookie_storage_endpoints=(
+                [{"url": expected, "validator": "uid_in_storage"}] if explicit else None
+            ),
+        )
+        session = YandexSession(client, x_token="synthetic", config=config)
+        assert await session.refresh_cookies() is AuthOutcome.AUTHENTICATED
+        assert get_urls(client) == [expected]
+        client.post.assert_not_called()
+
+    asyncio.run(scenario())
+
+
+def test_admission_is_rechecked_after_csrf_await():
+    async def scenario():
+        client = make_client()
+        session = YandexSession(client)
+
+        def csrf_response(url, **kwargs):
+            session.cloud_ready = False
+            return csrf_page("synthetic")
+
+        client.get = AsyncMock(side_effect=csrf_response)
+        with pytest.raises(RuntimeError, match="cloud_not_published"):
+            await session.post(role="quasar", path="m/user/scenarios")
+        assert get_urls(client) == ["https://yandex.ru/iot"]
+        client.post.assert_not_called()
+
+    asyncio.run(scenario())
+
+
+def test_full_url_roles_preserve_cloud_domain_and_music_local_destinations():
+    async def scenario():
+        client = make_client(cookie_domains=())
+        client.ws_connect = AsyncMock()
+        client.get = AsyncMock(return_value=make_response(200))
+        session = YandexSession(client, config=SessionConfig(domain="yandex.com"))
+        await session.ws_connect(role="cloud_ws", url="wss://push.yandex.ru/v2/events")
+        await session.ws_connect(role="local_ws", url=LAN_WS_URL)
+        await session.get(role="music", url="https://music.yandex.ru/track/1")
+        assert [call.args[0] for call in client.ws_connect.call_args_list] == [
+            "wss://push.yandex.com/v2/events", LAN_WS_URL,
+        ]
+        assert get_urls(client) == ["https://music.yandex.ru/track/1"]
+
+    asyncio.run(scenario())
+
+
 # ---------------------------------------------------------------------------
 # cookie probes and auth outcomes
 # ---------------------------------------------------------------------------
@@ -699,7 +818,10 @@ def test_expired_candidate_cleared_before_refresh():
 def test_captured_put_403_refreshes_csrf_and_retries_once():
     async def scenario():
         client = make_client()
-        cfg = SessionConfig(csrf_endpoints=["https://yandex.ru/iot"])
+        cfg = SessionConfig(
+            quasar_base_url="https://iot.quasar.yandex.ru/prefix",
+            csrf_endpoints=["https://yandex.ru/iot"],
+        )
         session = YandexSession(client, config=cfg)
 
         await prime_csrf(session, client, "candidate_1")
@@ -709,10 +831,14 @@ def test_captured_put_403_refreshes_csrf_and_retries_once():
         client.put = AsyncMock(side_effect=[captured_forbidden(), ok])
 
         # Case 1: rotated token on /iot -> 1 refresh + 1 transparent retry -> 200 OK
-        r = await session.put(SCENARIO_PUT_URL, role="quasar", json={"scenario": {}})
+        r = await session.put(path="m/v4/user/scenarios/sid-1", role="quasar", json={"scenario": {}})
         assert r.status == 200
         assert client.get.call_count == 1
         assert client.put.call_count == 2
+        assert [call.args[0] for call in client.put.call_args_list] == [
+            "https://iot.quasar.yandex.ru/prefix/m/v4/user/scenarios/sid-1",
+            "https://iot.quasar.yandex.ru/prefix/m/v4/user/scenarios/sid-1",
+        ]
         assert session.csrf_token == "candidate_2"
         assert session._csrf_generation == generation + 1
         assert session.readiness.csrf_state == CsrfState.CANDIDATE
@@ -725,7 +851,7 @@ def test_captured_put_403_refreshes_csrf_and_retries_once():
         client.put = AsyncMock(return_value=captured_forbidden())
         session._last_request_ts = 0.0
         with pytest.raises(CloudRequestError) as exc:
-            await session.put(SCENARIO_PUT_URL, role="quasar", json={"scenario": {}})
+            await session.put(path="m/v4/user/scenarios/sid-1", role="quasar", json={"scenario": {}})
         assert exc.value.status == 403
         assert client.get.call_count == 1
         assert client.put.call_count == 1
@@ -739,7 +865,7 @@ def test_captured_put_403_refreshes_csrf_and_retries_once():
         client.put = AsyncMock(side_effect=[captured_forbidden(), captured_forbidden()])
         session._last_request_ts = 0.0
         with pytest.raises(CloudRequestError) as exc2:
-            await session.put(SCENARIO_PUT_URL, role="quasar", json={"scenario": {}})
+            await session.put(path="m/v4/user/scenarios/sid-1", role="quasar", json={"scenario": {}})
         assert exc2.value.status == 403
         assert client.get.call_count == 1
         assert client.put.call_count == 2
@@ -760,7 +886,7 @@ def test_captured_put_403_refreshes_csrf_and_retries_once():
             client.put = AsyncMock(return_value=other_403)
             session._last_request_ts = 0.0
             with pytest.raises(CloudRequestError) as exc3:
-                await session.put(SCENARIO_PUT_URL, role="quasar", json={"scenario": {}})
+                await session.put(path="m/v4/user/scenarios/sid-1", role="quasar", json={"scenario": {}})
             assert exc3.value.status == 403
             assert client.get.call_count == 0
             assert client.put.call_count == 1
@@ -788,7 +914,7 @@ def test_late_403_of_old_generation_keeps_same_string_candidate():
         client.put = AsyncMock(side_effect=dispatch)
 
         task_a = asyncio.create_task(
-            session.request("put", SCENARIO_PUT_URL, role="quasar")
+            session.request("put", path="m/v4/user/scenarios/sid-1", role="quasar")
         )
         for _ in range(3):
             await asyncio.sleep(0)
@@ -796,7 +922,7 @@ def test_late_403_of_old_generation_keeps_same_string_candidate():
 
         session._last_request_ts = 0.0
         task_b = asyncio.create_task(
-            session.request("put", SCENARIO_PUT_URL, role="quasar")
+            session.request("put", path="m/v4/user/scenarios/sid-1", role="quasar")
         )
         for _ in range(3):
             await asyncio.sleep(0)
@@ -847,9 +973,7 @@ def test_late_success_cannot_cancel_invalidated_candidate_cooldown(retry_after):
 
         client.put = AsyncMock(side_effect=dispatch)
         tasks = [
-            asyncio.create_task(session.put(
-                SCENARIO_PUT_URL, role="quasar", json={"request": index}
-            ))
+            asyncio.create_task(session.put(path="m/v4/user/scenarios/sid-1", role="quasar", json={"request": index}))
             for index in (1, 2)
         ]
         try:
@@ -872,7 +996,7 @@ def test_late_success_cannot_cancel_invalidated_candidate_cooldown(retry_after):
             if retry_after is not None:
                 assert retry_at - time.monotonic() > 350
             with pytest.raises(RuntimeError, match="csrf_unavailable"):
-                await session.put(SCENARIO_PUT_URL, role="quasar", json={})
+                await session.put(path="m/v4/user/scenarios/sid-1", role="quasar", json={})
             assert client.get.await_count == (1 if retry_after is None else 0)
             assert client.put.call_count == 2
         finally:
@@ -894,7 +1018,7 @@ def test_non_csrf_403_preserves_candidate():
         # RPC never receives CSRF and its 403 never touches the cache
         client.post = AsyncMock(return_value=make_response(403))
         with pytest.raises(CloudRequestError) as rpc_error:
-            await session.post(RPC_URL, role="rpc", json={})
+            await session.post(path="action", role="rpc", json={})
         assert rpc_error.value.role == "rpc"
         assert client.post.call_count == 1
         assert session.csrf_token == "candidate_1"
@@ -903,7 +1027,7 @@ def test_non_csrf_403_preserves_candidate():
         # quasar GET carries no CSRF header either
         client.get = AsyncMock(return_value=make_response(403))
         with pytest.raises(CloudRequestError) as get_error:
-            await session.get(QUASAR_URL, role="quasar")
+            await session.get(path="m/v3/user/devices", role="quasar")
         assert get_error.value.status == 403
         assert session.csrf_token == "candidate_1"
 
@@ -918,7 +1042,7 @@ def test_401_does_not_escalate_auth():
         client.get = AsyncMock(return_value=make_response(401, text="Unauthorized\n"))
 
         with pytest.raises(CloudRequestError) as exc:
-            await session.get(QUASAR_URL, role="quasar")
+            await session.get(path="m/v3/user/devices", role="quasar")
         assert exc.value.status == 401
         assert session.readiness.auth_state is AuthState.UNKNOWN
 
@@ -931,7 +1055,7 @@ def test_2xx_never_marks_auth_valid():
         session = YandexSession(client, config=SessionConfig())
         client.get = AsyncMock(return_value=make_response(200, text="<html>challenge</html>"))
 
-        r = await session.get(QUASAR_URL, role="quasar")
+        r = await session.get(path="m/v3/user/devices", role="quasar")
         assert r.status == 200
         # auth success belongs to probes/validated inventory, not a bare 2xx
         assert session.readiness.auth_state is AuthState.UNKNOWN
@@ -949,12 +1073,12 @@ def test_mutating_quasar_request_needs_candidate_before_dispatch():
         client.put = AsyncMock(return_value=make_response(200))
 
         with pytest.raises(RuntimeError, match="csrf_unavailable"):
-            await session.put(QUASAR_URL, role="quasar", json={})
+            await session.put(path="m/v3/user/devices", role="quasar", json={})
         client.put.assert_not_called()
 
         # GET proceeds without a CSRF candidate
         client.get = AsyncMock(return_value=make_response(200))
-        r = await session.get(QUASAR_URL, role="quasar")
+        r = await session.get(path="m/v3/user/devices", role="quasar")
         assert r.status == 200
 
     asyncio.run(scenario())
@@ -1086,7 +1210,7 @@ def test_csrf_state_changes_notify_readiness_listener():
         assert await session.ensure_csrf() == "candidate_2"
         client.put = AsyncMock(return_value=captured_forbidden())
         with pytest.raises(CloudRequestError):
-            await session.put(SCENARIO_PUT_URL, role="quasar", json={"scenario": {}})
+            await session.put(path="m/v4/user/scenarios/sid-1", role="quasar", json={"scenario": {}})
         assert events == ["candidate", "unavailable", "candidate", "unavailable"]
 
     asyncio.run(scenario())
@@ -1136,13 +1260,13 @@ def test_http_failures_raise_cloud_request_error_without_retry():
 
         client.put = AsyncMock(return_value=make_response(502))
         with pytest.raises(CloudRequestError) as put_error:
-            await session.put(QUASAR_URL, role="quasar", json={})
+            await session.put(path="m/v3/user/devices", role="quasar", json={})
         assert put_error.value.status == 502
         assert client.put.call_count == 1
 
         client.get = AsyncMock(return_value=make_response(500))
         with pytest.raises(CloudRequestError) as get_error:
-            await session.get(QUASAR_URL, role="quasar")
+            await session.get(path="m/v3/user/devices", role="quasar")
         assert get_error.value.role == "quasar"
         assert get_error.value.status == 500
         assert client.get.call_count == 1
@@ -1158,18 +1282,12 @@ def test_ws_handshake_guards():
 
         # Cloud websockets stay free of explicit account credentials.
         with pytest.raises(RuntimeError, match="cloud_ws_credentials_not_allowed"):
-            await session.ws_connect(
-                PUSH_WS_URL, role="cloud_ws", headers={"Authorization": "OAuth t"}
-            )
+            await session.ws_connect(url=PUSH_WS_URL, role="cloud_ws", headers={"Authorization": "OAuth t"})
         # local sockets never carry account credentials either
         with pytest.raises(RuntimeError, match="local_ws_credentials_not_allowed"):
-            await session.ws_connect(
-                LAN_WS_URL, role="local_ws", headers={"Ya-Client-Cookie": "x"}
-            )
+            await session.ws_connect(url=LAN_WS_URL, role="local_ws", headers={"Ya-Client-Cookie": "x"})
         with pytest.raises(RuntimeError, match="local_ws_credentials_not_allowed"):
-            await session.ws_connect(
-                LAN_WS_URL, role="local_ws", headers={"Cookie": "Session_id=x"}
-            )
+            await session.ws_connect(url=LAN_WS_URL, role="local_ws", headers={"Cookie": "Session_id=x"})
         client.ws_connect.assert_not_called()
 
     asyncio.run(scenario())
@@ -1193,14 +1311,14 @@ def test_request_glagol_music_token_flow():
         client.post = AsyncMock(side_effect=post)
         client.get = AsyncMock(return_value=make_response(200, json_body=[], has_json=True))
 
-        r = await session.request_glagol(GLAGOL_URL, role="glagol_token")
+        r = await session.request_glagol(path="device_list", role="glagol_token")
         assert r.status == 200
         assert session.music_token == "music_tok"
         sent = client.get.call_args.kwargs["headers"]
         assert sent["Authorization"] == "OAuth music_tok"
 
         # the OAuth token is fetched once and reused
-        await session.request_glagol(GLAGOL_URL, role="glagol_token")
+        await session.request_glagol(path="device_list", role="glagol_token")
         assert client.post.call_count == 1
 
     asyncio.run(scenario())
@@ -1216,7 +1334,7 @@ def test_request_glagol_validates_destination_before_token_fetch():
 
         # a foreign target never triggers the music/OAuth request
         with pytest.raises(ValueError, match="untrusted_credential_destination"):
-            await session.request_glagol(GLAGOL_URL, role="glagol_token")
+            await session.request_glagol(path="device_list", role="glagol_token")
         client.get.assert_not_called()
         client.post.assert_not_called()
 
@@ -1234,7 +1352,7 @@ def test_glagol_403_scoped_to_music_token_without_replay():
 
         client.get = AsyncMock(return_value=make_response(403))
         with pytest.raises(CloudRequestError) as exc:
-            await session.request_glagol(GLAGOL_URL, role="glagol_token")
+            await session.request_glagol(path="device_list", role="glagol_token")
         assert exc.value.role == "glagol_token"
         assert exc.value.status == 403
 
@@ -1253,7 +1371,7 @@ def test_missing_tokens_block_hidden_oauth():
         session = YandexSession(client, config=SessionConfig())
 
         with pytest.raises(RuntimeError, match="x_token_required"):
-            await session.request_glagol(GLAGOL_URL, role="glagol_token")
+            await session.request_glagol(path="device_list", role="glagol_token")
         client.get.assert_not_called()
         client.post.assert_not_called()
 
@@ -1274,18 +1392,18 @@ def test_cloud_not_published_blocks_before_egress():
         client.ws_connect = AsyncMock(return_value=MagicMock())
 
         with pytest.raises(RuntimeError, match="cloud_not_published"):
-            await session.get(QUASAR_URL, role="quasar")
+            await session.get(path="m/v3/user/devices", role="quasar")
         with pytest.raises(RuntimeError, match="cloud_not_published"):
-            await session.get(MUSIC_CDN_URL, role="music")
+            await session.get(url=MUSIC_CDN_URL, role="music")
         with pytest.raises(RuntimeError, match="cloud_not_published"):
-            await session.ws_connect(PUSH_WS_URL, role="cloud_ws")
+            await session.ws_connect(url=PUSH_WS_URL, role="cloud_ws")
 
         client.get.assert_not_called()
         client.post.assert_not_called()
         client.ws_connect.assert_not_called()
 
         # the LAN websocket path stays available without cloud admission
-        await session.ws_connect(LAN_WS_URL, role="local_ws", ssl=False)
+        await session.ws_connect(url=LAN_WS_URL, role="local_ws", ssl=False)
         assert client.ws_connect.await_count == 1
         assert "192.168.1.50" in str(client.ws_connect.call_args.args[0])
 
@@ -1305,18 +1423,18 @@ def test_offline_policy_blocks_cloud_roles_and_probes():
         client.ws_connect = AsyncMock(return_value=MagicMock())
 
         with pytest.raises(RuntimeError, match="cloud_blocked_by_policy"):
-            await session.get(QUASAR_URL, role="quasar")
+            await session.get(path="m/v3/user/devices", role="quasar")
         with pytest.raises(RuntimeError, match="cloud_blocked_by_policy"):
-            await session.get(MUSIC_CDN_URL, role="music")
+            await session.get(url=MUSIC_CDN_URL, role="music")
         with pytest.raises(RuntimeError, match="cloud_blocked_by_policy"):
-            await session.ws_connect(PUSH_WS_URL, role="cloud_ws")
+            await session.ws_connect(url=PUSH_WS_URL, role="cloud_ws")
 
         # probes are cloud roles too: refresh stays unavailable, never reauth
         assert await session.refresh_cookies() is AuthOutcome.UNAVAILABLE
         assert session.readiness.auth_state is AuthState.UNKNOWN
         client.post.assert_not_called()
 
-        await session.ws_connect(LAN_WS_URL, role="local_ws")
+        await session.ws_connect(url=LAN_WS_URL, role="local_ws")
         assert client.ws_connect.await_count == 1
 
     asyncio.run(scenario())
@@ -1331,30 +1449,24 @@ def test_credential_destination_trust_boundary():
         mirror.get = AsyncMock()
 
         with pytest.raises(ValueError, match="untrusted_credential_destination"):
-            await mirror_session.get(QUASAR_URL, role="quasar")
+            await mirror_session.get(path="m/v3/user/devices", role="quasar")
         mirror.get.assert_not_called()
 
         # unsigned CDN fetches with an empty jar stay allowed as role music
         client = make_client(cookie_domains=())
         session = YandexSession(client, config=SessionConfig())
         client.get = AsyncMock(return_value=make_response(200))
-        r = await session.get(MUSIC_CDN_URL, role="music")
+        r = await session.get(url=MUSIC_CDN_URL, role="music")
         assert r.status == 200
         assert client.get.call_count == 1
 
         # explicit credential=False cannot bypass a detected OAuth header
         with pytest.raises(ValueError, match="untrusted_credential_destination"):
-            await session.get(
-                MUSIC_CDN_URL,
-                role="music",
-                credential=False,
-                headers={"Authorization": "OAuth tok"},
-            )
+            await session.get(url=MUSIC_CDN_URL, role="music", credential=False,
+            headers={"Authorization": "OAuth tok"},)
         # an explicit Cookie header is credential-bearing too
         with pytest.raises(ValueError, match="untrusted_credential_destination"):
-            await session.get(
-                MUSIC_CDN_URL, role="music", headers={"Cookie": "Session_id=x"}
-            )
+            await session.get(url=MUSIC_CDN_URL, role="music", headers={"Cookie": "Session_id=x"})
         assert client.get.call_count == 1
 
         # implicitly scoped cookies must never ride to a foreign origin
@@ -1362,7 +1474,7 @@ def test_credential_destination_trust_boundary():
         cookied_session = YandexSession(cookied, config=SessionConfig())
         cookied.get = AsyncMock()
         with pytest.raises(ValueError, match="untrusted_credential_destination"):
-            await cookied_session.get(MUSIC_CDN_URL, role="music")
+            await cookied_session.get(url=MUSIC_CDN_URL, role="music")
         cookied.get.assert_not_called()
 
     asyncio.run(scenario())
@@ -1385,19 +1497,19 @@ def test_retry_after_hint_recorded_per_role():
             return_value=make_response(503, headers={"Retry-After": "120"})
         )
         with pytest.raises(CloudRequestError):
-            await session.put(QUASAR_URL, role="quasar", json={})
+            await session.put(path="m/v3/user/devices", role="quasar", json={})
         assert session.retry_after == {"quasar": "120"}
 
         # success of the role clears the stale hint
         client.put = AsyncMock(return_value=make_response(200))
-        r = await session.put(QUASAR_URL, role="quasar", json={})
+        r = await session.put(path="m/v3/user/devices", role="quasar", json={})
         assert r.status == 200
         assert session.retry_after == {}
 
         # a failure without the hint records nothing
         client.put = AsyncMock(return_value=make_response(502))
         with pytest.raises(CloudRequestError):
-            await session.put(QUASAR_URL, role="quasar", json={})
+            await session.put(path="m/v3/user/devices", role="quasar", json={})
         assert session.retry_after == {}
 
         # the glagol role tracks its own hint
@@ -1409,7 +1521,7 @@ def test_retry_after_hint_recorded_per_role():
             return_value=make_response(429, headers={"Retry-After": "60"})
         )
         with pytest.raises(CloudRequestError):
-            await glagol_session.request_glagol(GLAGOL_URL, role="glagol_token")
+            await glagol_session.request_glagol(path="device_list", role="glagol_token")
         assert glagol_session.retry_after == {"glagol_token": "60"}
 
     asyncio.run(scenario())
@@ -1430,7 +1542,7 @@ def test_csrf_invalidation_honors_retry_after_hint():
         }
         client.put = AsyncMock(return_value=forbidden)
         with pytest.raises(CloudRequestError):
-            await session.put(SCENARIO_PUT_URL, role="quasar", json={})
+            await session.put(path="m/v4/user/scenarios/sid-1", role="quasar", json={})
 
         assert session.csrf_token is None
         remaining = session._csrf_retry_at - time.monotonic()

@@ -206,7 +206,7 @@ class YandexGlagol:
 
             connection_url = self.url
             ws = self.ws = await self.session.ws_connect(
-                connection_url, role="local_ws", heartbeat=55, ssl=False
+                url=connection_url, role="local_ws", heartbeat=55, ssl=False
             )
             if connection_url != self.url:
                 return

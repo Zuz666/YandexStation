@@ -265,10 +265,6 @@ class BasicSession:
             # jar cannot be inspected: assume cookies apply
             return True
 
-    def _resolve_destination(self, url: str, role: str, credential: bool) -> str:
-        resolved = self.config.resolve_url(url, role)
-        self._validate_destination(resolved, role, credential)
-        return resolved
 
     @staticmethod
     def _clamp_attempt_timeout(kwargs: dict) -> None:
@@ -308,27 +304,34 @@ class BasicSession:
         ``credential=False`` was requested.
         """
         self._check_role_admission(role)
-        resolved = self.config.resolve_url(url, role)
         credential_bearing = self._has_credentials(
             kwargs
-        ) or self._jar_sends_cookies(resolved)
+        ) or self._jar_sends_cookies(url)
         if credential is None:
             credential = role in CREDENTIAL_ROLES or credential_bearing
         elif not credential:
             # explicit False cannot bypass credential detection
             credential = credential_bearing
-        self._validate_destination(resolved, role, credential)
+        self._validate_destination(url, role, credential)
         kwargs["proxy"] = self.config.proxy
         kwargs["ssl"] = self.config.ssl
         self._clamp_attempt_timeout(kwargs)
         kwargs["allow_redirects"] = False
-        return getattr(self._session, method)(resolved, **kwargs)
+        return getattr(self._session, method)(url, **kwargs)
 
-    def _get(self, url: str, *, role: str, **kwargs) -> Awaitable[ClientResponse]:
-        return self._request("get", url, role=role, **kwargs)
+    def _get(self, *, role: str, **kwargs) -> Awaitable[ClientResponse]:
+        return self._request(
+            "get", self.config._request_url(
+                role, path=kwargs.pop("path", None), url=kwargs.pop("url", None)
+            ), role=role, **kwargs
+        )
 
-    def _post(self, url: str, *, role: str, **kwargs) -> Awaitable[ClientResponse]:
-        return self._request("post", url, role=role, **kwargs)
+    def _post(self, *, role: str, **kwargs) -> Awaitable[ClientResponse]:
+        return self._request(
+            "post", self.config._request_url(
+                role, path=kwargs.pop("path", None), url=kwargs.pop("url", None)
+            ), role=role, **kwargs
+        )
 
     @property
     def closed(self):
@@ -425,7 +428,7 @@ class YandexSession(BasicSession):
 
     async def get_qr(self) -> str:
         """Get link to QR-code auth."""
-        r = await self._get("https://passport.yandex.ru/pwl-yandex", role="passport")
+        r = await self._get(path="pwl-yandex", role="passport")
         assert r.ok, r.status
 
         resp = await r.text()
@@ -434,7 +437,7 @@ class YandexSession(BasicSession):
         self.auth_headers = {"X-CSRF-Token": m[1]}
 
         r = await self._post(
-            "https://passport.yandex.ru/pwl-yandex/api/passport/auth/password/submit",
+            path="pwl-yandex/api/passport/auth/password/submit",
             role="passport",
             json={"retpath": "https://passport.yandex.ru/"},
             headers=self.auth_headers,
@@ -443,7 +446,7 @@ class YandexSession(BasicSession):
         self.auth_json = await r.json()
 
         r = await self._post(
-            "https://passport.yandex.ru/pwl-yandex/api/passport/auth/magic/code",
+            path="pwl-yandex/api/passport/auth/magic/code",
             role="passport",
             data={
                 "location_id": "0",
@@ -460,7 +463,7 @@ class YandexSession(BasicSession):
     async def login_qr(self) -> LoginResponse:
         """Check if already logged in."""
         r = await self._post(
-            "https://passport.yandex.ru/pwl-yandex/api/passport/auth/magic/code/status",
+            path="pwl-yandex/api/passport/auth/magic/code/status",
             role="passport",
             json=self.auth_json,
             headers=self.auth_headers,
@@ -472,7 +475,7 @@ class YandexSession(BasicSession):
             return LoginResponse({})
 
         r = await self._post(
-            "https://passport.yandex.ru/pwl-yandex/api/passport/sessions/get_session",
+            path="pwl-yandex/api/passport/sessions/get_session",
             role="passport",
             data={"track_id": resp["trackId"]},
             headers=self.auth_headers,
@@ -506,7 +509,7 @@ class YandexSession(BasicSession):
             cookies = "; ".join([f"{p['name']}={p['value']}" for p in raw])
 
         r = await self._post(
-            "https://mobileproxy.passport.yandex.net/1/bundle/oauth/token_by_sessionid",
+            path="1/bundle/oauth/token_by_sessionid",
             role="mobileproxy",
             data={
                 "client_id": "c0ebe342af7d48fbbbfcf2d2eedb8f9e",
@@ -522,7 +525,7 @@ class YandexSession(BasicSession):
     async def validate_token(self, x_token: str) -> LoginResponse:
         """Return user info using token."""
         r = await self._get(
-            "https://mobileproxy.passport.yandex.net/1/bundle/account/short_info/?avatar_size=islands-300",
+            path="1/bundle/account/short_info/?avatar_size=islands-300",
             role="mobileproxy",
             headers={"Authorization": f"OAuth {x_token}"},
         )
@@ -552,7 +555,7 @@ class YandexSession(BasicSession):
         payload = {"type": "x-token", "retpath": "https://www.yandex.ru"}
         headers = {"Ya-Consumer-Authorization": f"OAuth {x_token}"}
         r = await self._post(
-            "https://mobileproxy.passport.yandex.net/1/bundle/auth/x_token/",
+            path="1/bundle/auth/x_token/",
             role="mobileproxy",
             data=payload,
             headers=headers,
@@ -613,7 +616,9 @@ class YandexSession(BasicSession):
         foreign host offering ``/auth/finish`` never counts. The secret
         ``track_id`` is sent only to the first verified destination.
         """
-        url: str | None = f"{host.rstrip('/')}/auth/session/"
+        resolved = self.config._request_url(
+            "passport", url=f"{host.rstrip('/')}/auth/session/"
+        )
         sent_track = False
         # Relative redirect targets resolve against the origin root, but a
         # target on the default passport host is swapped onto the configured
@@ -624,20 +629,19 @@ class YandexSession(BasicSession):
             finish_paths.add(base_path + "/auth/finish")
 
         for hop in range(MAX_AUTH_REDIRECTS + 1):
-            resolved = self.config.resolve_url(url, "passport")
             self._validate_destination(resolved, "passport", credential=True)
 
             params = {"track_id": track_id} if not sent_track else None
             sent_track = True
-            r = await self._get(
-                resolved, role="passport", params=params, allow_redirects=False
+            r = await self._request(
+                "get", resolved, role="passport", params=params
             )
             location = r.headers.get("Location")
             if not isinstance(location, str) or not location:
                 return False
 
             target = urljoin(resolved, location)
-            target_resolved = self.config.resolve_url(target, "passport")
+            target_resolved = self.config._request_url("passport", url=target)
             try:
                 self._validate_destination(
                     target_resolved, "passport", credential=True
@@ -649,7 +653,7 @@ class YandexSession(BasicSession):
                 return True
             if hop == MAX_AUTH_REDIRECTS:
                 return False
-            url = target
+            resolved = target_resolved
 
         return False
 
@@ -710,7 +714,7 @@ class YandexSession(BasicSession):
         destinations = []
         for probe in self._ordered_cookie_probes():
             try:
-                resolved = self.config.resolve_url(probe["url"], "cookie_probe")
+                resolved = probe["url"]
                 self.config.validate_destination(
                     resolved, "cookie_probe", credential=True
                 )
@@ -760,7 +764,7 @@ class YandexSession(BasicSession):
     async def _probe_cookie_endpoint(self, url: str, validator: str) -> _ProbeResult:
         """Interpret one cookie storage probe response."""
         try:
-            r = await self._get(url, role="cookie_probe")
+            r = await self._get(url=url, role="cookie_probe")
             if r.status != 200:
                 _LOGGER.debug(
                     "Cookie probe unavailable: validator=%s HTTP=%s", validator, r.status
@@ -850,7 +854,7 @@ class YandexSession(BasicSession):
         self.retry_after.pop("csrf", None)
         for url in self.config.csrf_endpoints:
             try:
-                r = await self._get(url, role="csrf")
+                r = await self._get(url=url, role="csrf")
                 if r.status != 200:
                     self._record_retry_after("csrf", r.headers, keep_existing=True)
                     _LOGGER.debug("CSRF endpoint unavailable: role=csrf HTTP=%s", r.status)
@@ -976,7 +980,7 @@ class YandexSession(BasicSession):
             "access_token": x_token,
         }
         r = await self._post(
-            "https://oauth.mobile.yandex.net/1/token",
+            url="https://oauth.mobile.yandex.net/1/token",
             role="music",
             credential=True,
             data=payload,
@@ -992,14 +996,14 @@ class YandexSession(BasicSession):
             raise RuntimeError("music_token_unavailable")
         return resp["access_token"]
 
-    async def get(self, url: str, *, role: str, **kwargs) -> ClientResponse:
-        return await self.request("get", url, role=role, **kwargs)
+    async def get(self, *, role: str, **kwargs) -> ClientResponse:
+        return await self.request("get", role=role, **kwargs)
 
-    async def post(self, url: str, *, role: str, **kwargs) -> ClientResponse:
-        return await self.request("post", url, role=role, **kwargs)
+    async def post(self, *, role: str, **kwargs) -> ClientResponse:
+        return await self.request("post", role=role, **kwargs)
 
-    async def put(self, url: str, *, role: str, **kwargs) -> ClientResponse:
-        return await self.request("put", url, role=role, **kwargs)
+    async def put(self, *, role: str, **kwargs) -> ClientResponse:
+        return await self.request("put", role=role, **kwargs)
 
     @staticmethod
     async def _is_boundary_csrf_403(response: ClientResponse) -> bool:
@@ -1042,7 +1046,7 @@ class YandexSession(BasicSession):
         if credential_header:
             raise RuntimeError("cloud_ws_credentials_not_allowed")
 
-    async def ws_connect(self, url: str, *, role: str, **kwargs):
+    async def ws_connect(self, *, url: str, role: str, **kwargs):
         self._check_role_admission(role)
         if role == "local_ws":
             kwargs["proxy"] = None
@@ -1051,7 +1055,8 @@ class YandexSession(BasicSession):
             kwargs.setdefault("proxy", self.config.proxy)
         kwargs.setdefault("ssl", self.config.ssl)
         self._check_ws_handshake(role, kwargs)
-        resolved = self._resolve_destination(url, role, credential=role == "cloud_ws")
+        resolved = self.config._request_url(role, url=url)
+        self._validate_destination(resolved, role, credential=role == "cloud_ws")
         try:
             ws = await asyncio.wait_for(
                 self._session.ws_connect(resolved, **kwargs), ATTEMPT_TIMEOUT
@@ -1067,13 +1072,20 @@ class YandexSession(BasicSession):
     async def request(
         self,
         method: str,
-        url: str,
         *,
         role: str,
-        _csrf_retry: bool = False,
+        path: str | None = None,
+        url: str | None = None,
         **kwargs,
     ) -> ClientResponse:
-        """Public request function.
+        destination = self.config._request_url(role, path=path, url=url)
+        return await self._request_built(method, destination, role=role, **kwargs)
+
+    async def _request_built(
+        self, method: str, url: str, *, role: str, _csrf_retry: bool = False,
+        **kwargs,
+    ) -> ClientResponse:
+        """Execute one prepared destination, including a bounded CSRF retry.
 
         Mutating quasar requests attach a CSRF candidate before dispatch.
         On a boundary text/plain 403 without Retry-After, the stale candidate
@@ -1091,7 +1103,7 @@ class YandexSession(BasicSession):
         sent_generation = None
         if role == "quasar" and method in CSRF_METHODS:
             self._check_role_admission(role)
-            self._resolve_destination(url, role, credential=True)
+            self._validate_destination(url, role, credential=True)
             csrf = await self.ensure_csrf()
             if csrf is None:
                 raise RuntimeError("csrf_unavailable")
@@ -1127,9 +1139,11 @@ class YandexSession(BasicSession):
                 and retry_after is None
                 and boundary_403
             ):
+                self._check_role_admission(role)
+                self._validate_destination(url, role, credential=True)
                 fresh_csrf = await self.ensure_csrf()
                 if fresh_csrf is not None and fresh_csrf != sent_token:
-                    return await self.request(
+                    return await self._request_built(
                         method, url, role=role, _csrf_retry=True, **kwargs
                     )
                 if fresh_csrf is not None:
@@ -1140,7 +1154,8 @@ class YandexSession(BasicSession):
         raise CloudRequestError(role, r.status)
 
     async def request_glagol(
-        self, url: str, *, role: str, method: str = "get", **kwargs
+        self, *, role: str, path: str | None = None, url: str | None = None,
+        method: str = "get", **kwargs
     ) -> ClientResponse:
         """Authenticated music/glagol API path (explicit OAuth, no replay).
 
@@ -1149,8 +1164,8 @@ class YandexSession(BasicSession):
         foreign target never triggers the token fetch. A music refusal is
         scoped to the music token; it never changes account auth or CSRF.
         """
+        resolved = self.config._request_url(role, path=path, url=url)
         self._check_role_admission(role)
-        resolved = self.config.resolve_url(url, role)
         self._validate_destination(resolved, role, credential=True)
 
         headers = kwargs.setdefault("headers", {})
@@ -1163,7 +1178,7 @@ class YandexSession(BasicSession):
 
         # OAuth should be capitalize, or music will be 128 bitrate quality
         headers["Authorization"] = f"OAuth {self.music_token}"
-        r = await self._request(method, url, role=role, credential=True, **kwargs)
+        r = await self._request(method, resolved, role=role, credential=True, **kwargs)
         if r.status == 200:
             self.retry_after.pop(role, None)
             return r

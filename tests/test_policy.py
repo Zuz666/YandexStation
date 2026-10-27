@@ -88,217 +88,17 @@ def test_readiness_and_computed_cloud_state():
 
 def test_unknown_request_roles_are_rejected():
     with pytest.raises(ValueError, match="invalid_endpoint"):
-        SessionConfig().resolve_url("https://iot.quasar.yandex.ru/x", "bogus_role")
-    with pytest.raises(ValueError, match="invalid_endpoint"):
         SessionConfig().validate_destination("https://iot.quasar.yandex.ru/x", "bogus_role")
 
 
-def test_resolve_url_base_joining_is_role_scoped_and_exact():
-    cfg = SessionConfig(
-        quasar_base_url="https://mirror.example.org",
-        account_base_url="https://account.example.org",
-    )
-    assert (
-        cfg.resolve_url("https://iot.quasar.yandex.ru/m/v3/user/devices", "quasar")
-        == "https://mirror.example.org/m/v3/user/devices"
-    )
-    # account role does not inherit the quasar override
-    assert (
-        cfg.resolve_url("https://iot.quasar.yandex.ru/m/v3/user/devices", "account")
-        == "https://iot.quasar.yandex.ru/m/v3/user/devices"
-    )
-    # suffix lookalike hosts are never rewritten
-    assert (
-        cfg.resolve_url("https://iot.quasar.yandex.ru.evil.com/m", "quasar")
-        == "https://iot.quasar.yandex.ru.evil.com/m"
-    )
-    # port mismatch is never rewritten
-    assert (
-        cfg.resolve_url("https://iot.quasar.yandex.ru:8443/m", "quasar")
-        == "https://iot.quasar.yandex.ru:8443/m"
-    )
-    # probe endpoints follow the matching base override
-    assert (
-        cfg.resolve_url("https://quasar.yandex.ru/get_account_config", "cookie_probe")
-        == "https://account.example.org/get_account_config"
-    )
-
-
-def test_resolve_url_preserves_configured_path_prefix():
-    cfg = SessionConfig(glagol_base_url="https://mirror.example.org/prefix")
-    assert (
-        cfg.resolve_url("https://quasar.yandex.net/glagol/token", "glagol_token")
-        == "https://mirror.example.org/prefix/token"
-    )
-    # path boundary: /glagolish does not start with /glagol/
-    assert (
-        cfg.resolve_url("https://quasar.yandex.net/glagolish/token", "glagol_token")
-        == "https://quasar.yandex.net/glagolish/token"
-    )
-    # exact base path maps to the prefix root
-    assert (
-        cfg.resolve_url("https://quasar.yandex.net/glagol", "glagol_token")
-        == "https://mirror.example.org/prefix/"
-    )
-
-
-def test_resolve_url_idempotent_for_resolved_urls():
-    # same-hostname configured prefix: validate-then-resolve callers may
-    # resolve twice; the configured prefix must not duplicate
-    cfg = SessionConfig(glagol_base_url="https://quasar.yandex.net/glagol/v2")
-    once = cfg.resolve_url("https://quasar.yandex.net/glagol/token", "glagol_token")
-    assert once == "https://quasar.yandex.net/glagol/v2/token"
-    assert cfg.resolve_url(once, "glagol_token") == once
-
-    cfg2 = SessionConfig(quasar_base_url="https://iot.quasar.yandex.ru/api")
-    first = cfg2.resolve_url("https://iot.quasar.yandex.ru/m/v3/user/devices", "quasar")
-    assert first == "https://iot.quasar.yandex.ru/api/m/v3/user/devices"
-    assert cfg2.resolve_url(first, "quasar") == first
-    # an already-resolved URL exactly at the configured prefix stays put
-    assert cfg2.resolve_url("https://iot.quasar.yandex.ru/api", "quasar") == "https://iot.quasar.yandex.ru/api"
-
-
-def test_resolve_url_domain_variants_on_label_boundary():
-    cfg = SessionConfig(domain="yandex.com")
-    assert (
-        cfg.resolve_url("https://quasar.yandex.ru/get_account_config", "account")
-        == "https://quasar.yandex.com/get_account_config"
-    )
-    assert (
-        cfg.resolve_url("https://yandex.ru/iot?storage=1", "cookie_probe")
-        == "https://yandex.com/iot?storage=1"
-    )
-    assert (
-        cfg.resolve_url("wss://push.yandex.ru/v2/events", "cloud_ws")
-        == "wss://push.yandex.com/v2/events"
-    )
-    assert (
-        cfg.resolve_url("https://iot.quasar.yandex.com/x", "quasar")
-        == "https://iot.quasar.yandex.com/x"
-    )
-    # lookalike registrable domains are untouched
-    assert cfg.resolve_url("https://evilyandex.ru/x", "account") == "https://evilyandex.ru/x"
-    assert (
-        cfg.resolve_url("https://not.yandex.ru.evil.com/x", "account")
-        == "https://not.yandex.ru.evil.com/x"
-    )
-    # music/CDN and local websocket URLs are never rewritten
-    assert (
-        cfg.resolve_url("https://api.music.yandex.net/tracks", "music")
-        == "https://api.music.yandex.net/tracks"
-    )
-    assert cfg.resolve_url("wss://192.168.1.42:1961/", "local_ws") == "wss://192.168.1.42:1961/"
-
-
-def test_resolve_url_music_never_rewritten():
-    cfg = SessionConfig(quasar_base_url="https://mirror.example.org", domain="yandex.com")
-    assert (
-        cfg.resolve_url("https://api.music.yandex.net/tracks", "music")
-        == "https://api.music.yandex.net/tracks"
-    )
-    assert (
-        cfg.resolve_url("https://cdn-userproxy.example.net/file.mp3", "music")
-        == "https://cdn-userproxy.example.net/file.mp3"
-    )
-
-
-def test_resolve_url_domain_preserves_explicit_base_overrides():
-    # RFC v2 4.2: the legacy domain option affects only the built-in
-    # default Yandex hosts before explicit overrides are applied; an
-    # explicit base is preserved exactly, even on an official mirror host
-    cfg = SessionConfig(
-        quasar_base_url="https://iot.quasar.yandex.ru/api", domain="yandex.com"
-    )
-    resolved = cfg.resolve_url("https://iot.quasar.yandex.ru/m/v3/user/devices", "quasar")
-    assert resolved == "https://iot.quasar.yandex.ru/api/m/v3/user/devices"
-    # resolving the overridden endpoint again is stable (idempotent)
-    assert cfg.resolve_url(resolved, "quasar") == resolved
-
-    # an explicit base pinned to the other mirror keeps its host
-    cfg_pin = SessionConfig(
-        passport_base_url="https://passport.yandex.com", domain="yandex.ru"
-    )
-    pinned = cfg_pin.resolve_url("https://passport.yandex.ru/auth/session/", "passport")
-    assert pinned == "https://passport.yandex.com/auth/session/"
-    assert cfg_pin.resolve_url(pinned, "passport") == pinned
-
-    # a foreign override is untouched by domain...
-    cfg_foreign = SessionConfig(
-        quasar_base_url="https://mirror.example.org", domain="yandex.com"
-    )
-    assert (
-        cfg_foreign.resolve_url("https://iot.quasar.yandex.ru/m", "quasar")
-        == "https://mirror.example.org/m"
-    )
-    # ...and never gains credential trust
-    with pytest.raises(ValueError, match="untrusted_credential_destination"):
-        cfg_foreign.validate_destination(
-            cfg_foreign.resolve_url("https://iot.quasar.yandex.ru/m", "quasar"),
-            "quasar",
-            credential=True,
-        )
-
-    # without overrides the domain option still mirrors the defaults
-    cfg_default = SessionConfig(domain="yandex.com")
-    assert (
-        cfg_default.resolve_url("https://iot.quasar.yandex.ru/m", "quasar")
-        == "https://iot.quasar.yandex.com/m"
-    )
-
-    # an explicit override equal to the old default keeps provenance: it
-    # is an exact endpoint, not a default host the domain may mirror
-    cfg_same = SessionConfig(
-        passport_base_url="https://passport.yandex.ru", domain="yandex.com"
-    )
-    assert (
-        cfg_same.resolve_url("https://passport.yandex.ru/auth/session/", "passport")
-        == "https://passport.yandex.ru/auth/session/"
-    )
-
-
-def test_resolve_url_domain_preserves_explicit_probe_lists():
-    # explicitly configured csrf/cookie endpoint lists are exact endpoints:
-    # domain never rewrites them, re-resolving is stable and the endpoints
-    # stay trusted credential probes
-    cfg = SessionConfig(
-        domain="yandex.com",
-        csrf_endpoints=["https://yandex.ru/prefixed/csrf"],
-        cookie_storage_endpoints=[
-            {
-                "url": "https://yandex.ru/prefixed/iot?storage=1",
-                "validator": "uid_in_storage",
-            }
-        ],
-    )
-    csrf = cfg.resolve_url("https://yandex.ru/prefixed/csrf", "csrf")
-    assert csrf == "https://yandex.ru/prefixed/csrf"
-    assert cfg.resolve_url(csrf, "csrf") == csrf
-    cfg.validate_destination(csrf, "csrf", credential=True)
-
-    probe = cfg.resolve_url("https://yandex.ru/prefixed/iot?storage=1", "cookie_probe")
-    assert probe == "https://yandex.ru/prefixed/iot?storage=1"
-    assert cfg.resolve_url(probe, "cookie_probe") == probe
-    cfg.validate_destination(probe, "cookie_probe", credential=True)
-
-    # with the default lists the same default hosts are still mirrored
-    cfg_default = SessionConfig(domain="yandex.com")
-    assert (
-        cfg_default.resolve_url("https://yandex.ru/iot?storage=1", "cookie_probe")
-        == "https://yandex.com/iot?storage=1"
-    )
-
-
-def test_resolve_url_domain_provenance_from_configs():
+def test_domain_provenance_from_configs():
     # entry options > YAML > defaults provenance decides explicitness, not
     # a value comparison against the old default
     cfg = SessionConfig.from_configs(
         yaml_config={"domain": "yandex.com"},
         entry_options={"passport_base_url": "https://passport.yandex.ru"},
     )
-    assert (
-        cfg.resolve_url("https://passport.yandex.ru/auth/session/", "passport")
-        == "https://passport.yandex.ru/auth/session/"
-    )
+    assert cfg.passport_base_url == "https://passport.yandex.ru"
 
     # an empty-string option keeps fallback semantics; the YAML explicit
     # base below it stays an exact endpoint
@@ -309,10 +109,7 @@ def test_resolve_url_domain_provenance_from_configs():
         },
         entry_options={"quasar_base_url": ""},
     )
-    assert (
-        cfg2.resolve_url("https://iot.quasar.yandex.ru/m/v3/user/devices", "quasar")
-        == "https://iot.quasar.yandex.ru/m/v3/user/devices"
-    )
+    assert cfg2.quasar_base_url == "https://iot.quasar.yandex.ru"
 
     # an explicitly configured list equal to the defaults is explicit too
     cfg3 = SessionConfig.from_configs(
@@ -321,14 +118,14 @@ def test_resolve_url_domain_provenance_from_configs():
             "csrf_endpoints": list(DEFAULT_CSRF_ENDPOINTS),
         }
     )
-    assert cfg3.resolve_url("https://yandex.ru/iot", "csrf") == "https://yandex.ru/iot"
+    assert cfg3.csrf_endpoints == ["https://yandex.ru/iot"]
 
     # with only domain configured the default hosts are still mirrored
     cfg4 = SessionConfig.from_configs(entry_options={"domain": "yandex.com"})
-    assert (
-        cfg4.resolve_url("https://quasar.yandex.ru/get_account_config", "account")
-        == "https://quasar.yandex.com/get_account_config"
-    )
+    assert cfg4.account_base_url == "https://quasar.yandex.com"
+    assert cfg4.cookie_storage_endpoints == [
+        {"url": "https://yandex.com/iot?storage=1", "validator": "uid_in_storage"}
+    ]
 
 
 def test_config_validation_rejects_unsafe_endpoints():
@@ -383,28 +180,12 @@ def test_endpoint_override_precedence():
     assert cfg4.csrf_endpoints == DEFAULT_CSRF_ENDPOINTS
 
 
-def test_default_endpoint_constants_not_shared_between_instances():
-    a = SessionConfig()
-    b = SessionConfig()
-    assert a.cookie_storage_endpoints == DEFAULT_COOKIE_STORAGE_ENDPOINTS
-    assert a.cookie_storage_endpoints is not b.cookie_storage_endpoints
-    assert a.cookie_storage_endpoints[0] is not b.cookie_storage_endpoints[0]
-    assert a.csrf_endpoints is not b.csrf_endpoints
-    assert a.csrf_endpoints is not DEFAULT_CSRF_ENDPOINTS
-
-
 def test_session_config_instances_isolated():
     cfg1 = SessionConfig(domain="yandex.com", proxy="http://proxy1:8080")
     cfg2 = SessionConfig(domain=None, proxy="http://proxy2:8080")
 
-    assert (
-        cfg1.resolve_url("https://quasar.yandex.ru/get_account_config", "account")
-        == "https://quasar.yandex.com/get_account_config"
-    )
-    assert (
-        cfg2.resolve_url("https://quasar.yandex.ru/get_account_config", "account")
-        == "https://quasar.yandex.ru/get_account_config"
-    )
+    assert cfg1.account_base_url == "https://quasar.yandex.com"
+    assert cfg2.account_base_url == "https://quasar.yandex.ru"
 
     # mutating one instance never leaks into another or into defaults
     cfg1.cookie_storage_endpoints.append(
@@ -432,27 +213,6 @@ def test_validate_destination_yandex_domain_suffix_for_credentials():
         cfg.validate_destination(
             "https://mirror.example.org/m/v3/user/devices", "quasar", credential=True
         )
-def test_resolve_url_preserves_ipv6_bracket_serialization():
-    cfg = SessionConfig(rpc_base_url="https://[2001:db8::10]:8443/rpc")
-    assert (
-        cfg.resolve_url("https://rpc.alice.yandex.ru/gproxy/get_alarms", "rpc")
-        == "https://[2001:db8::10]:8443/rpc/gproxy/get_alarms"
-    )
-    # idempotent re-resolve keeps the brackets and port
-    resolved = cfg.resolve_url("https://rpc.alice.yandex.ru/gproxy/get_alarms", "rpc")
-    assert cfg.resolve_url(resolved, "rpc") == resolved
-
-
-def test_resolve_url_guard_requires_matching_custom_origin():
-    # a same-path prefix on the DEFAULT host must still rewrite to a
-    # mirror override (guard skips only on the configured origin)
-    cfg = SessionConfig(quasar_base_url="https://mirror.example.org/api")
-    assert (
-        cfg.resolve_url("https://iot.quasar.yandex.ru/api/v3/user/devices", "quasar")
-        == "https://mirror.example.org/api/api/v3/user/devices"
-    )
-
-
 def test_enum_string_representation():
     # fallback StrEnum must render plain wire strings for logs/diagnostics
     assert str(AuthOutcome.UNAVAILABLE) == "unavailable"

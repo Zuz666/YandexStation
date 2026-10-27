@@ -110,6 +110,41 @@ def test_separate_forms_merge_changes_and_invalid_urls_leave_options_untouched(t
     asyncio.run(scenario())
 
 
+def test_api_urls_display_effective_prefixes_and_cleared_override(tmp_path):
+    async def scenario():
+        gui_base = "https://iot.quasar.yandex.ru/gui"
+        yaml_base = "https://iot.quasar.yandex.ru/yaml"
+        glagol_base = "https://quasar.yandex.net/prefix/glagol"
+        async with core_flow(tmp_path, options={
+            "quasar_base_url": gui_base,
+            "include": ["offline-1"],
+        }) as (hass, entry, lifecycle):
+            hass.data[DOMAIN][DATA_CONFIG] = {
+                "quasar_base_url": yaml_base,
+                "glagol_base_url": glagol_base,
+            }
+            urls = await options_step(hass, "api_urls")
+            current = urls["description_placeholders"]
+            assert current["current_quasar"] == f"{gui_base} (GUI override)"
+            assert current["current_glagol"] == f"{glagol_base} (из YAML)"
+            assert current["current_account"] == (
+                "https://quasar.yandex.ru (по умолчанию)"
+            )
+            with patch.object(hass.config_entries, "async_reload", new_callable=AsyncMock,
+                              return_value=True):
+                saved = await asyncio.create_task(hass.config_entries.options.async_configure(
+                    urls["flow_id"], {"quasar_base_url": ""}
+                ))
+                assert saved["type"] == "create_entry"
+                assert dict(entry.options) == {"include": ["offline-1"]}
+                inherited = await options_step(hass, "api_urls")
+                assert inherited["description_placeholders"]["current_quasar"] == (
+                    f"{yaml_base} (из YAML)"
+                )
+
+    asyncio.run(scenario())
+
+
 def test_unchanged_options_closed_gate_and_disabled_retry(tmp_path):
     async def scenario():
         async with core_flow(tmp_path, disabled=True) as (hass, entry, lifecycle):
@@ -483,6 +518,9 @@ def test_core_qr_poll_pending_then_success_keeps_the_same_flow(tmp_path):
             async def reload_entry(entry_id):
                 reloads.append((entry_id, dict(entry.data)))
                 return True
+            client.get = AsyncMock(side_effect=get)
+            client.post = AsyncMock(side_effect=post)
+
 
             with patch("homeassistant.loader.async_get_integration",
                        new_callable=AsyncMock, return_value=loaded), \
@@ -492,8 +530,6 @@ def test_core_qr_poll_pending_then_success_keeps_the_same_flow(tmp_path):
                        return_value=client), \
                  patch("custom_components.yandex_station.config_flow.generate_qr_code",
                        return_value="synthetic-qr-image"), \
-                 patch.object(YandexSession, "_get", side_effect=get), \
-                 patch.object(YandexSession, "_post", side_effect=post), \
                  patch.object(hass.config_entries, "async_reload",
                               side_effect=reload_entry):
                 form = await hass.config_entries.flow.async_init(

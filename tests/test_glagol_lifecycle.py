@@ -322,8 +322,7 @@ def test_discovery_port_change_reconnects_to_new_loopback_peer():
         try:
             async with ClientSession() as client:
                 class LocalSession:
-                    async def ws_connect(self, url, **kwargs):
-                        kwargs.pop("role")
+                    async def ws_connect(self, *, url, role, **kwargs):
                         return await client.ws_connect(
                             url.replace("wss://", "ws://"), **kwargs
                         )
@@ -360,7 +359,7 @@ def test_overlapping_restarts_leave_one_reader_and_stop_closes_every_socket():
                         continue
                 await super().close()
 
-        async def connect(*args, **kwargs):
+        async def connect(*, url, role, **kwargs):
             ws = HeldClose([]) if not sockets else FakeWS([])
             sockets.append(ws)
             readers.append(asyncio.current_task())

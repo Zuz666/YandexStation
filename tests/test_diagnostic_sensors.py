@@ -129,8 +129,8 @@ def test_quasar_sync_transitions_readiness_to_online():
             "households": [{"name": "Home", "all": []}],
         }
 
-        async def fake_get(url, **kwargs):
-            if "scenarios" in url:
+        async def fake_get(*, path, role):
+            if "scenarios" in path:
                 raise AssertionError("No speakers require scenario inventory")
             return mock_resp_devices
 
@@ -217,8 +217,8 @@ def test_quasar_sync_scenarios_failure_degrades_readiness():
         }
         quasar.add_scenario = AsyncMock()
 
-        async def fake_get(url, **kwargs):
-            if "scenarios" in url:
+        async def fake_get(*, path, role):
+            if "scenarios" in path:
                 raise RuntimeError("500 Internal Server Error")
             return mock_resp_devices
 
