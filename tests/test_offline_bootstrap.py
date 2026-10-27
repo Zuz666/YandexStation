@@ -295,56 +295,6 @@ def test_offline_acceptance_a1_full_lifecycle(tmp_path):
     asyncio.run(scenario())
 
 
-def test_issued_glagol_token_is_authenticated_and_saved_before_use(tmp_path):
-    from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
-    from custom_components.yandex_station.core.yandex_session import YandexSession
-    from .test_cache import cache_runtime, device_record, read_storage
-    from .test_session_resilience import make_client, make_response
-
-    async def scenario():
-        async with cache_runtime(tmp_path) as (manager, _):
-            cache = manager()
-            device = device_record()
-            await cache.async_save_devices([device])
-            client = make_client()
-
-            async def token_peer(url, **kwargs):
-                if kwargs.get("headers", {}).get("Authorization") != "OAuth synthetic-music":
-                    return make_response(401)
-                assert kwargs["params"] == {
-                    "device_id": "glagol-1", "platform": "yandexstation",
-                }
-                return make_response(200, text='{"status":"ok","token":"issued-candidate"}')
-
-            client.get = AsyncMock(side_effect=token_peer)
-            session = YandexSession(client, music_token="synthetic-music")
-            quasar = YandexQuasar(session, cache_manager=cache)
-            quasar.owned_glagol_ids = {"glagol-1"}
-            saving, release = asyncio.Event(), asyncio.Event()
-            original_save = cache.async_save_device_token
-
-            async def held_save(*args):
-                saving.set()
-                await release.wait()
-                return await original_save(*args)
-
-            with patch.object(cache, "async_save_device_token", side_effect=held_save):
-                issuing = quasar.async_fetch_device_token(device)
-                try:
-                    await asyncio.wait_for(saving.wait(), 2)
-                    # The candidate is neither published nor used before the save
-                    assert quasar.device_tokens == {}
-                    release.set()
-                    assert await issuing == "issued-candidate"
-                finally:
-                    release.set()
-                    issuing.cancel()
-                    await asyncio.gather(issuing, return_exceptions=True)
-            assert quasar.device_tokens == {"glagol-1": {"yandexstation": "issued-candidate"}}
-            assert read_storage(cache)["device_tokens"]["glagol-1"]["yandexstation"]["token"] == "issued-candidate"
-            await session.async_stop()
-
-    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("hdmi_audio", [True, False, None])

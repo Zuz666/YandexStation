@@ -647,7 +647,9 @@ if not builtins.hot_reload_release.wait(10):
                             await asyncio.Event().wait()
                         active_quasar.policy.force_offline_local = False
                         active_quasar.session.request_glagol = pending_token_request
-                        pending_token = active_quasar.async_fetch_device_token(device)
+                        pending_token = asyncio.create_task(
+                            active_quasar.async_fetch_device_token(device)
+                        )
                         await asyncio.wait_for(request_started.wait(), 2)
                         old_glagol = station.glagol
                         service_keys = set(lifecycle.service_targets)

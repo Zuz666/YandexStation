@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from asyncio import Future
-from typing import Callable, Dict, Optional
+from typing import Awaitable, Callable, Dict, Optional
 
 from aiohttp import (
     ClientConnectorError,
@@ -16,7 +16,7 @@ from aiohttp import (
 from zeroconf import ServiceBrowser, ServiceStateChange, Zeroconf
 
 from .policy import TokenState
-from .yandex_session import YandexSession
+from .yandex_session import YandexSession, safe_error_summary
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,17 +33,18 @@ class YandexGlagol:
         session: YandexSession,
         device: dict,
         token: str | None = None,
-        quasar=None,
+        *,
+        on_token_rejected: Callable[[str], Awaitable[str | None]] | None = None,
     ):
         self.session = session
         self.device = device
-        self.quasar = quasar
+        self._on_token_rejected = on_token_rejected
         self.device_token = token
         self.token_state = TokenState.CANDIDATE if token else TokenState.MISSING
         self._token_rejected_at: float | None = None
         self.url: Optional[str] = None
         self.ws: Optional[ClientWebSocketResponse] = None
-        self.update_handler: Callable = None
+        self.update_handler: Callable | None = None
         self.waiters: Dict[str, Future] = {}
         self._connect_task: Optional[asyncio.Task] = None
         self._stopped = False
@@ -151,12 +152,9 @@ class YandexGlagol:
             return True
 
     async def _handle_token_rejection(self, rejected_token: str) -> int:
-        """Handle peer CLOSE (4000, 'Invalid token') for this connection.
-
-        Invalidates only this (device_id, platform) tuple in local state, RAM,
-        and durable storage, then performs at most one single-flight token fetch
-        when cloud access is allowed. Returns the initial failure count for backoff.
-        """
+        """Report a current peer rejection and locally adopt a replacement."""
+        reader = self._connect_task
+        ws = self.ws
         did = self.device.get("quasar_info", {}).get("device_id")
         if self._token_rejected_at is None:
             self._token_rejected_at = time.monotonic()
@@ -165,26 +163,22 @@ class YandexGlagol:
         )
         self.token_state = TokenState.REJECTED
         self.device_token = None
-        if self.quasar is not None:
-            info = self.device["quasar_info"]
-            ram = self.quasar.device_tokens.get(info["device_id"], {})
-            if ram.get(info["platform"]) == rejected_token:
-                ram.pop(info["platform"], None)
-            if self.quasar.cache_manager is not None:
-                try:
-                    await self.quasar.cache_manager.async_invalidate_device_token(
-                        info["device_id"], info["platform"], rejected_token
-                    )
-                except Exception as e:
-                    _LOGGER.debug(
-                        "Token invalidation save failed: %s", type(e).__name__
-                    )
-            if not self.quasar.stopping and self.quasar.policy.effective_cloud_allowed:
-                new_token = await self.quasar.async_fetch_device_token(self.device)
-                if new_token and new_token != rejected_token:
-                    self.device_token = new_token
-                    self.token_state = TokenState.CANDIDATE
-                    return 0
+        if self.update_handler:
+            self.update_handler(None)
+        if self._on_token_rejected is not None:
+            new_token = await self._on_token_rejected(rejected_token)
+            if (
+                not self._stopped
+                and self._connect_task is reader
+                and self.ws is ws
+                and self.token_state is TokenState.REJECTED
+                and self.device_token is None
+                and new_token
+                and new_token != rejected_token
+            ):
+                self.device_token = new_token
+                self.token_state = TokenState.CANDIDATE
+                return 0
         # Without a replacement candidate, wait for standard reconnect backoff
         return 2
 
@@ -291,7 +285,7 @@ class YandexGlagol:
                     raise msg.data
 
         except (ClientConnectorError, ConnectionResetError, ServerTimeoutError) as e:
-            self.debug(f"Connection error: {repr(e)}")
+            self.debug(f"Connection error: {safe_error_summary(e)}")
 
         except asyncio.CancelledError:
             self.debug("Stopping connection: CancelledError")
@@ -299,12 +293,19 @@ class YandexGlagol:
             raise
 
         except RuntimeError as e:
-            # Raised when the Home Assistant client session is closed during shutdown
-            self.debug(f"Stopping connection: {repr(e)}")
-            self._stopped = True
+            # Only a genuinely closed client session makes this stop terminal.
+            if getattr(self.session, "closed", False) is True:
+                self.debug(f"Stopping connection: {safe_error_summary(e)}")
+                self._stopped = True
+            else:
+                _LOGGER.error(
+                    "%s => local | %s", self.name, safe_error_summary(e)
+                )
+                raise
 
         except Exception as e:
-            _LOGGER.error(f"{self.name} => local | {repr(e)}")
+            _LOGGER.error("%s => local | %s", self.name, safe_error_summary(e))
+            raise
 
         finally:
             if ws is not None and not ws.closed:

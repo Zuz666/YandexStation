@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 from aiohttp import ClientError, ContentTypeError, WSMsgType
 
+from homeassistant.exceptions import HomeAssistantError
+
 from .quasar_info import has_quasar
 from .yandex_session import CloudRequestError, YandexSession, safe_error_summary
 from .policy import (
@@ -321,7 +323,11 @@ class YandexQuasar(Dispatcher):
         self.online_updated.set()
         self.updates_task: asyncio.Task | None = None
         self._recovery_task: asyncio.Task | None = None
-        self._token_tasks: dict[str, asyncio.Task] = {}
+        self._token_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._token_invalidation_tasks: set[asyncio.Task] = set()
+        # Scoped to this entry runtime, not persisted across setup/reload.
+        # Fetching a different candidate does not prove the peer accepted it.
+        self._rejected_device_tokens: dict[tuple[str, str], set[str]] = {}
         self._scenario_worker_task: asyncio.Task | None = None
         self._history_tasks: set[asyncio.Task] = set()
         self.fresh_device_ids: set[str] = set()
@@ -1497,16 +1503,14 @@ class YandexQuasar(Dispatcher):
             for speaker in self.owned_speakers + self.owned_modules:
                 if self.stopping:
                     return
-                info = speaker["quasar_info"]
-                token = self.device_tokens.get(info["device_id"], {}).get(info["platform"])
+                token = self.cached_device_token(speaker)
                 initialize = first_pass
                 if not token:
-                    try:
-                        token = await self.async_fetch_device_token(speaker)
-                        initialize = initialize or bool(token)
-                    except Exception as error:
-                        _LOGGER.debug("Token recovery: %s", safe_error_summary(error))
+                    token = await self.async_fetch_device_token(speaker)
+                    initialize = initialize or bool(token)
                     tokens_pending |= not bool(token)
+                if self.stopping:
+                    return
                 entity = speaker.get("entity")
                 if initialize and entity is not None and getattr(entity, "hass", None):
                     try:
@@ -1523,38 +1527,164 @@ class YandexQuasar(Dispatcher):
         ):
             await self.update_online_stats()
 
-    def async_fetch_device_token(self, device: dict) -> asyncio.Task:
-        """Fetch a Glagol device token using a single-flight task per speaker."""
-        did = device["quasar_info"]["device_id"]
-        task = self._token_tasks.get(did)
-        if task is not None and not task.done():
-            return task
-        task = asyncio.create_task(self._async_fetch_device_token(device))
-        self._token_tasks[did] = task
-        task.add_done_callback(lambda _t, did=did: self._token_tasks.pop(did, None))
-        return task
+    @staticmethod
+    def _device_token_key(device: dict) -> tuple[str, str]:
+        info = device["quasar_info"]
+        return info["device_id"], info["platform"]
+
+    def cached_device_token(self, device: dict) -> str | None:
+        """Return a local candidate without waiting for storage or the cloud."""
+        key = self._device_token_key(device)
+        token = self.device_tokens.get(key[0], {}).get(key[1])
+        if self.stopping or token in self._rejected_device_tokens.get(key, ()):
+            return None
+        return token
+
+    async def async_reject_device_token(
+        self, device: dict, rejected_token: str
+    ) -> str | None:
+        """Own compare-invalidation, persistence and replacement acquisition."""
+        key = self._device_token_key(device)
+        did, platform = key
+        if self.stopping:
+            return None
+        if did not in self.owned_glagol_ids:
+            raise RuntimeError("speaker_not_owned")
+        self._rejected_device_tokens.setdefault(key, set()).add(rejected_token)
+        tokens = self.device_tokens.get(did, {})
+        if tokens.get(platform) == rejected_token:
+            tokens.pop(platform)
+        if self.cache_manager is not None:
+            # Retain ownership even if this reader leaves while the cache lock
+            # is held by an older save. That save must precede invalidation.
+            task = asyncio.create_task(
+                self._async_invalidate_device_token(self.cache_manager, key, rejected_token)
+            )
+            self._token_invalidation_tasks.add(task)
+            task.add_done_callback(self._token_invalidation_done)
+            await asyncio.shield(task)
+        if self.stopping or did not in self.owned_glagol_ids:
+            return None
+        if token := self.cached_device_token(device):
+            return token
+        return await self.async_fetch_device_token(device)
+
+    async def _async_invalidate_device_token(
+        self, cache: CacheManager, key: tuple[str, str], rejected_token: str
+    ) -> None:
+        try:
+            durable = await cache.async_invalidate_device_token(
+                *key, rejected_token
+            )
+        except (HomeAssistantError, OSError) as error:
+            _LOGGER.warning("Token invalidation: %s", safe_error_summary(error))
+        except RuntimeError as error:
+            if str(error) not in {
+                "cache_closed", "cache_unavailable", "cache_write_failed",
+            }:
+                raise
+            _LOGGER.warning("Token invalidation: %s", safe_error_summary(error))
+        else:
+            if not durable:
+                _LOGGER.warning("Token invalidation: cache_write_failed")
+
+    def _token_invalidation_done(self, task: asyncio.Task) -> None:
+        self._token_invalidation_tasks.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            _LOGGER.debug("Token invalidation: %s", safe_error_summary(error))
+
+    async def async_fetch_device_token(self, device: dict) -> str | None:
+        """Share owner work without letting one reader cancel other waiters."""
+        key = self._device_token_key(device)
+        if self.stopping:
+            return None
+        if key[0] not in self.owned_glagol_ids:
+            raise RuntimeError("speaker_not_owned")
+        task = self._token_tasks.get(key)
+        if task is None or task.done():
+            task = asyncio.create_task(self._async_fetch_device_token(device))
+            self._token_tasks[key] = task
+            task.add_done_callback(
+                lambda done, key=key: self._token_fetch_done(key, done)
+            )
+        token = await asyncio.shield(task)
+        if self.stopping or key[0] not in self.owned_glagol_ids:
+            return None
+        current = self.cached_device_token(device)
+        if current:
+            return current
+        if token in self._rejected_device_tokens.get(key, ()):
+            return None
+        return token
+
+    def _token_fetch_done(
+        self, key: tuple[str, str], task: asyncio.Task
+    ) -> None:
+        if self._token_tasks.get(key) is task:
+            self._token_tasks.pop(key)
+        # A reader can leave before completion. Retrieve the exception even
+        # without waiters; awaiting the task still propagates programming bugs.
+        if not task.cancelled() and (error := task.exception()) is not None:
+            _LOGGER.debug("Token acquisition: %s", safe_error_summary(error))
 
     async def _async_fetch_device_token(self, device: dict) -> str | None:
-        """Fetch, decode and durably save one Glagol token; the sole owner of this flow."""
-        info = device["quasar_info"]
-        did, platform = info["device_id"], info["platform"]
-        if self.stopping or did not in self.owned_glagol_ids:
+        """Fetch, validate and save a candidate before publishing it in RAM."""
+        key = self._device_token_key(device)
+        did, platform = key
+        if self.stopping:
+            return None
+        if did not in self.owned_glagol_ids:
             raise RuntimeError("speaker_not_owned")
         if not self.policy.effective_cloud_allowed:
             _LOGGER.debug("Skipping token fetch for %s: cloud blocked by policy", did)
             return None
-        r = await self.session.request_glagol(
-            path="token",
-            role="glagol_token",
-            params={"device_id": did, "platform": platform},
-        )
-        # @dext0r: fix bug with wrong content-type
-        resp = json.loads(await r.text())
+        previous = self.cached_device_token(device)
+        try:
+            r = await self.session.request_glagol(
+                path="token",
+                role="glagol_token",
+                params={"device_id": did, "platform": platform},
+            )
+            # @dext0r: fix bug with wrong content-type
+            resp = json.loads(await r.text())
+        except (
+            ClientError, CloudRequestError, asyncio.TimeoutError, OSError,
+            json.JSONDecodeError, UnicodeError,
+        ) as error:
+            _LOGGER.debug("Token acquisition: %s", safe_error_summary(error))
+            return None
+        except RuntimeError as error:
+            if str(error) not in {
+                "cloud_blocked_by_policy", "cloud_not_published",
+                "x_token_required", "music_token_unavailable",
+                "device_token_unavailable", "Session is closed",
+            }:
+                raise
+            _LOGGER.debug("Token acquisition: %s", safe_error_summary(error))
+            return None
         token = resp.get("token") if isinstance(resp, dict) else None
         if not isinstance(token, str) or not token or resp.get("status") != "ok":
-            raise RuntimeError("device_token_unavailable")
+            _LOGGER.debug("Token acquisition: device_token_unavailable")
+            return None
+        if self.stopping or did not in self.owned_glagol_ids:
+            return None
+        current = self.cached_device_token(device)
+        if current and current != previous:
+            return current
+        if token in self._rejected_device_tokens.get(key, ()):
+            _LOGGER.debug("Token acquisition: rejected_candidate")
+            return current
         if self.cache_manager is not None:
+            # No await separates the rejection check from entering the cache
+            # lock: a subsequent rejection queues behind this save, never ahead.
             await self.cache_manager.async_save_device_token(did, platform, token)
+        if self.stopping or did not in self.owned_glagol_ids:
+            return None
+        current = self.cached_device_token(device)
+        if current and current != previous:
+            return current
+        if token in self._rejected_device_tokens.get(key, ()):
+            return current
         self.device_tokens.setdefault(did, {})[platform] = token
         return token
 
@@ -1587,6 +1717,12 @@ class YandexQuasar(Dispatcher):
         if token_tasks:
             await asyncio.gather(*token_tasks, return_exceptions=True)
         self._token_tasks.clear()
+        # Accepted invalidations outlive their readers and must run after any
+        # older shielded Store save, even during unload.
+        invalidations = tuple(self._token_invalidation_tasks)
+        if invalidations:
+            await asyncio.gather(*invalidations, return_exceptions=True)
+        self._token_invalidation_tasks.clear()
         if self._scenario_worker_task is not None:
             self._scenario_worker_task.cancel()
             try:

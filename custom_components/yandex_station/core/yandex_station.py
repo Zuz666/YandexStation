@@ -5,6 +5,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from functools import partial
 from typing import Optional
 
 import yaml
@@ -375,11 +376,15 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             or not (self.quasar.policy.local_updates or did in self.quasar.yaml_glagol_hosts)
         ):
             return
-        info = self.device["quasar_info"]
-        token = self.quasar.device_tokens.get(did, {}).get(info["platform"])
+        token = self.quasar.cached_device_token(self.device)
         if not self.glagol:
             self.glagol = YandexGlagol(
-                self.quasar.session, self.device, token=token, quasar=self.quasar
+                self.quasar.session,
+                self.device,
+                token=token,
+                on_token_rejected=partial(
+                    self.quasar.async_reject_device_token, self.device
+                ),
             )
             self.glagol.update_handler = self.async_set_state
         elif token:
