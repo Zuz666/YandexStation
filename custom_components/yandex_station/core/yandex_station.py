@@ -770,19 +770,30 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             if player_state["duration"]:
                 self._attr_supported_features |= MediaPlayerEntityFeature.SEEK
 
-            # https://github.com/home-assistant/frontend/blob/dev/src/data/media-player.ts
-            # supported computeMediaDescription: music/image/playlist/tvshow/channel
-            if player_state["type"] == "Track":
-                self._attr_media_artist = player_state["subtitle"] or None
+            # Prefer explicit content types over the legacy display marker.
+            content_type = player_state.get("type")
+            player_type = player_state.get("playerType")
+            subtitle = player_state.get("subtitle") or None
+            if content_type == "Track":
+                self._attr_media_artist = subtitle
                 self._attr_media_content_type = MediaType.MUSIC
-            elif player_state["type"] == "FmRadio":
+            elif content_type == "FmRadio":
                 self._attr_media_content_type = "radio"
-            elif player_state["liveStreamText"] == "Прямой эфир":
-                self._attr_media_channel = player_state["subtitle"] or None
+            elif player_type in ("com.yandex.tv.live", "live"):
+                self._attr_media_channel = subtitle
                 self._attr_media_content_type = MediaType.CHANNEL
-            elif player_state["playerType"] == "ru.yandex.quasar.app":
+            elif content_type == "movie":
+                self._attr_media_content_type = MediaType.MOVIE
+            elif content_type == "tv_show_episode":
                 self._attr_media_content_type = MediaType.TVSHOW
-                self._attr_media_series_title = player_state["subtitle"] or None
+                self._attr_media_series_title = subtitle
+            elif content_type == "video":
+                self._attr_media_content_type = MediaType.VIDEO
+            elif player_state.get("liveStreamText") == "Прямой эфир":
+                self._attr_media_channel = subtitle
+                self._attr_media_content_type = MediaType.CHANNEL
+            elif player_type in ("com.yandex.tv.videoplayer", "ru.yandex.quasar.app"):
+                self._attr_media_content_type = MediaType.VIDEO
 
             if player_state["playlistType"] == "Track":
                 self._attr_media_playlist = MediaType.TRACK
