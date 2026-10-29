@@ -32,9 +32,14 @@ async def exercise(scenario, config):
     from homeassistant.config_entries import ConfigEntries
     from homeassistant.const import MAJOR_VERSION, MINOR_VERSION
     from homeassistant.core import HomeAssistant
+    try:
+        from homeassistant.core_config import DATA_CUSTOMIZE
+    except ImportError:
+        from homeassistant.config import DATA_CUSTOMIZE
     from homeassistant.helpers import entity_registry as er
     from homeassistant.helpers.entity_component import EntityComponent
     from homeassistant.helpers.entity_platform import EntityPlatform
+    from homeassistant.helpers.entity_values import EntityValues
     from custom_components.yandex_station.core.const import DATA_CONFIG, DOMAIN
     from custom_components.yandex_station.core.policy import EntryPolicy
     from custom_components.yandex_station.core.yandex_glagol import YandexGlagol
@@ -78,6 +83,10 @@ async def exercise(scenario, config):
         "configured", "hdmi", "cached_alias"
     ) else {}
     hass.data[DOMAIN] = {DATA_CONFIG: settings}
+    hass.data[DATA_CUSTOMIZE] = EntityValues({
+        "media_player.later": {"friendly_name": "Kitchen TV"},
+        "media_player.receiver": {"friendly_name": "Receiver TV"},
+    })
     platforms = [EntityPlatform(hass=hass, logger=logger, domain="media_player",
         platform_name=name, platform=None, scan_interval=timedelta(hours=1),
         entity_namespace=None) for name in (DOMAIN, "synthetic")]
@@ -121,22 +130,24 @@ async def exercise(scenario, config):
                 entry = registry.async_get_or_create(
                     "media_player", "synthetic", "Later", suggested_object_id="later"
                 )
+                registry.async_update_entity(entry.entity_id, name="Registry TV")
                 hass.states.async_set(entry.entity_id, "unavailable", {
                     "restored": True, "supported_features": MediaPlayerEntityFeature.PLAY_MEDIA,
                 })
                 await hass.async_block_till_done()
                 await add_player("Later")
-                assert station.source_list == ["Станция", "Later"]
+                assert hass.states.get("media_player.later").name == "Kitchen TV"
+                assert station.source_list == ["Станция", "Kitchen TV"]
                 assert_tv()
-                await station.async_select_source("Later")
+                await station.async_select_source("Kitchen TV")
                 registry.async_update_entity(station.entity_id,
                     new_entity_id="media_player.renamed_station")
                 await hass.async_block_till_done()
                 station.async_set_state({"state": {"aliceState": "IDLE", "volume": 0.3}})
                 await add_player("Second")
                 state = hass.states.get("media_player.renamed_station")
-                assert state.attributes["source_list"] == ["Станция", "Later", "Second"]
-                assert state.attributes["source"] == "Later"
+                assert state.attributes["source_list"] == ["Станция", "Kitchen TV", "Second"]
+                assert state.attributes["source"] == "Kitchen TV"
                 assert state.attributes["device_class"] == "tv"
                 assert registry.async_get(state.entity_id).id == identity
                 await station.async_remove()
