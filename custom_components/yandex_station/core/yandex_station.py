@@ -1132,10 +1132,14 @@ class YandexStation(YandexStationBase):
         }
         if self.sync_sources is None:
             self.sync_sources = {}
+        configured = bool(self.hass.data[DOMAIN][DATA_CONFIG].get("media_players"))
         additions = {
             name: source for name, source in discovered.items()
             if name not in self.sync_sources
-            and name not in (self._attr_source_list or [])
+            and (
+                name not in (self._attr_source_list or [])
+                or configured and name in (SOURCE_STATION, SOURCE_HDMI)
+            )
         }
         if not additions:
             return False
@@ -1145,7 +1149,9 @@ class YandexStation(YandexStationBase):
             self._attr_source_list = [SOURCE_STATION]
             self._attr_source = SOURCE_STATION
         self.sync_sources.update(additions)
-        self._attr_source_list = self._attr_source_list + list(additions)
+        self._attr_source_list = self._attr_source_list + [
+            name for name in additions if name not in self._attr_source_list
+        ]
         return True
 
     async def async_select_source(self, source: str):

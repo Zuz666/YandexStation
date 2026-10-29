@@ -21,7 +21,7 @@ if __name__ != "__main__":
     import pytest
 
     test_source_discovery = pytest.mark.parametrize(
-        "scenario", ["discovery", "configured", "hdmi", "unload"]
+        "scenario", ["discovery", "configured", "hdmi", "hdmi_ready", "unload"]
     )(test_source_discovery)
 
 
@@ -30,6 +30,7 @@ async def exercise(scenario, config):
     from homeassistant import bootstrap, loader
     from homeassistant.components.media_player import MediaPlayerEntity, MediaPlayerEntityFeature
     from homeassistant.config_entries import ConfigEntries
+    from homeassistant.const import MAJOR_VERSION, MINOR_VERSION
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers import entity_registry as er
     from homeassistant.helpers.entity_component import EntityComponent
@@ -42,40 +43,68 @@ async def exercise(scenario, config):
     class Player(MediaPlayerEntity):
         _attr_should_poll = False
         _attr_state = "off"
-        _attr_supported_features = MediaPlayerEntityFeature.PLAY_MEDIA
+        _attr_supported_features = MediaPlayerEntityFeature.PLAY_MEDIA | MediaPlayerEntityFeature.PAUSE
 
         def __init__(self, name):
             self._attr_name = self._attr_unique_id = name
 
-    hass = HomeAssistant(config)
+        async def async_media_pause(self):
+            self._attr_state = "paused"
+            self.async_write_ha_state()
+
+    try:
+        hass = HomeAssistant(config)
+    except TypeError:
+        hass = HomeAssistant()
+    hass.config.config_dir = config
     hass.config.skip_pip = True
-    loader.async_setup(hass)
+    if hasattr(loader, "async_setup"):
+        loader.async_setup(hass)
     hass.config_entries = ConfigEntries(hass, {})
     await loader.async_get_custom_components(hass)
-    await bootstrap.async_load_base_functionality(hass)
+    if hasattr(bootstrap, "async_load_base_functionality"):
+        await bootstrap.async_load_base_functionality(hass)
+    else:
+        from homeassistant.helpers import area_registry, device_registry, issue_registry
+        await area_registry.async_load(hass)
+        await device_registry.async_load(hass)
+        await er.async_load(hass)
+        await issue_registry.async_load(hass)
     logger = logging.getLogger(__name__)
-    EntityComponent(logger, "media_player", hass)
+    component = EntityComponent(logger, "media_player", hass)
+    component.async_register_entity_service("media_pause", {}, "async_media_pause")
     settings = {"media_players": {"media_player.receiver": "HDMI"}} if scenario in (
-        "configured", "hdmi"
+        "configured", "hdmi", "hdmi_ready"
     ) else {}
     hass.data[DOMAIN] = {DATA_CONFIG: settings}
     platforms = [EntityPlatform(hass=hass, logger=logger, domain="media_player",
         platform_name=name, platform=None, scan_interval=timedelta(hours=1),
         entity_namespace=None) for name in (DOMAIN, "synthetic")]
+    if hasattr(component, "_platforms"):
+        for platform in platforms:
+            component._platforms[platform.platform_name] = platform
     quasar = YandexQuasar(None)
     quasar.get_device_config = AsyncMock(side_effect=RuntimeError("HDMI not ready"))
+    if scenario == "hdmi_ready":
+        quasar.get_device_config = AsyncMock(return_value=({"hdmiAudio": False}, 1))
     quasar.set_device_config = AsyncMock()
     station = YandexStation(quasar, {
         "id": "station", "name": "Station", "capabilities": [],
         "host": "127.0.0.1", "port": 1905,
         "quasar_info": {"device_id": "station", "platform": (
-            "yandexstation_2" if scenario in ("hdmi", "unload") else "yandexmini_2"
+            "yandexstation_2" if scenario in ("hdmi", "hdmi_ready", "unload") else "yandexmini_2"
         )},
     })
 
     async def add_player(name):
         await platforms[1].async_add_entities([Player(name)])
         await hass.async_block_till_done()
+
+    def assert_tv():
+        assert hass.states.get(station.entity_id).attributes["device_class"] == "tv"
+        # Also check registry reflection on the current target, unlike HA 2023.2.
+        if (MAJOR_VERSION, MINOR_VERSION) >= (2026, 10):
+            assert er.async_get(hass).async_get(station.entity_id).original_device_class == "tv"
 
     with patch.object(YandexGlagol, "start_or_restart", new=AsyncMock()):
         try:
@@ -95,7 +124,7 @@ async def exercise(scenario, config):
                 await hass.async_block_till_done()
                 await add_player("Later")
                 assert station.source_list == ["Станция", "Later"]
-                assert registry.async_get(station.entity_id).original_device_class == "tv"
+                assert_tv()
                 await station.async_select_source("Later")
                 registry.async_update_entity(station.entity_id,
                     new_entity_id="media_player.renamed_station")
@@ -130,7 +159,7 @@ async def exercise(scenario, config):
             else:
                 await add_player("Receiver")
                 assert station.source_list == ["Станция", "HDMI"]
-                assert registry.async_get(station.entity_id).original_device_class == "tv"
+                assert_tv()
                 if scenario == "hdmi":
                     await station.async_select_source("HDMI")
                     quasar.get_device_config.side_effect = None
@@ -140,7 +169,17 @@ async def exercise(scenario, config):
                     await station.async_select_source("Станция")
                     await station.async_select_source("HDMI")
                     assert station.hdmi_audio is False
-                    assert quasar.set_device_config.await_count == 0
+                await station.async_select_source("HDMI")
+                station.async_set_state({"state": {
+                    "aliceState": "LISTENING", "volume": 0.0, "playing": False,
+                    "playerState": {"hasPrev": False, "hasNext": False, "duration": 10,
+                        "type": "Track", "subtitle": "", "playlistType": "Track",
+                        "extra": {}, "entityInfo": {}, "id": "synthetic-track",
+                        "progress": 1, "title": "Synthetic track"},
+                }})
+                await hass.async_block_till_done()
+                assert hass.states.get("media_player.receiver").state == "paused"
+                quasar.set_device_config.assert_not_awaited()
             print(f"{scenario}: passed")
         finally:
             for platform in platforms:
