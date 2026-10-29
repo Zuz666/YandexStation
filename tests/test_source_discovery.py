@@ -158,13 +158,13 @@ async def exercise(scenario, config):
                     quasar.get_device_config.assert_not_awaited()
             elif scenario == "cached":
                 await add_player("Receiver")
-                assert station.source_list == ["Станция", "HDMI", "Receiver"]
+                assert station.source_list == ["Станция", "HDMI", "Receiver TV"]
                 assert station.source == "HDMI"
-                await station.async_select_source("Receiver")
+                await station.async_select_source("Receiver TV")
                 await add_player("Second")
                 state = hass.states.get(station.entity_id)
-                assert state.attributes["source_list"] == ["Станция", "HDMI", "Receiver", "Second"]
-                assert state.attributes["source"] == "Receiver"
+                assert state.attributes["source_list"] == ["Станция", "HDMI", "Receiver TV", "Second"]
+                assert state.attributes["source"] == "Receiver TV"
                 assert state.attributes["device_class"] == "tv"
                 quasar.get_device_config.assert_not_awaited()
             elif scenario == "unload":
