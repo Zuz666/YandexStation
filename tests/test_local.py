@@ -1,3 +1,5 @@
+import pytest
+
 from homeassistant.components.media_player import (
     MediaPlayerEntityFeature,
     MediaPlayerState,
@@ -6,6 +8,219 @@ from homeassistant.components.media_player import (
 )
 
 from . import FakeYandexStation
+
+
+def _player_frame(*, omit=(), **changes):
+    player = {
+        "duration": 1920.0,
+        "entityInfo": {"description": "", "id": "", "type": ""},
+        "extra": {},
+        "hasNext": False,
+        "hasPause": True,
+        "hasPlay": False,
+        "hasPrev": False,
+        "hasProgressBar": True,
+        "id": "",
+        "liveStreamText": "",
+        "playerType": "com.yandex.tv.live",
+        "playlistDescription": "",
+        "playlistId": "",
+        "playlistPuid": "",
+        "playlistType": "",
+        "progress": 27.0,
+        "showPlayer": True,
+        "subtitle": "360 Новости — Новости 360",
+        "title": "Новости 360",
+        "type": "",
+    }
+    player.update(changes)
+    for key in omit:
+        player.pop(key)
+    return {
+        "state": {
+            "aliceState": "IDLE",
+            "canStop": True,
+            "hdmi": {"capable": True, "present": False},
+            "playerState": player,
+            "playing": True,
+            "volume": 0.2,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "changes,channel",
+    [
+        ({}, "360 Новости — Новости 360"),
+        ({"subtitle": ""}, None),
+        ({"subtitle": None, "liveStreamText": None}, None),
+        ({"omit": ("liveStreamText",)}, "360 Новости — Новости 360"),
+        ({"playerType": "live"}, "360 Новости — Новости 360"),  # Synthetic alias.
+    ],
+)
+def test_yaos_live_tv(changes, channel):
+    # Reconstructed envelope using measured modern Live TV markers, not raw capture.
+    entity = FakeYandexStation()
+    entity.async_set_state(_player_frame(**changes))
+
+    assert entity.media_content_type == MediaType.CHANNEL
+    assert entity.media_channel == channel
+    assert entity.media_artist is None
+    assert entity.media_series_title is None
+    assert entity.media_content_id == ""
+    assert entity.media_title == "Новости 360"
+    assert entity.media_duration == 1920.0
+    assert entity.media_position == 27.0
+    assert entity.state == MediaPlayerState.PLAYING
+
+
+@pytest.mark.parametrize(
+    "kind,subtitle,duration,title,expected,series",
+    [
+        ("tv_show_episode", "Смешарики", 390.0, "1. Скамейка",
+         MediaType.TVSHOW, "Смешарики"),
+        ("movie", "", 6756.0, "Чебурашка", MediaType.MOVIE, None),
+    ],
+)
+def test_yaos_kinopoisk_vod(kind, subtitle, duration, title, expected, series):
+    # Reconstructed from J-0193 measured fields; other envelope values are synthetic.
+    entity = FakeYandexStation()
+    entity.async_set_state(_player_frame(
+        type=kind, playerType="com.yandex.tv.videoplayer", subtitle=subtitle,
+        duration=duration, title=title, id="synthetic-vod",
+    ))
+
+    assert entity.media_content_type == expected
+    assert entity.media_series_title == series
+    assert entity.media_artist is None
+    assert entity.media_channel is None
+    assert entity.media_title == title
+    assert entity.media_content_id == "synthetic-vod"
+    assert entity.media_duration == duration
+    assert entity.media_position == 27.0
+
+
+@pytest.mark.parametrize(
+    "changes,live_text,expected",
+    [
+        ({"type": "Track"}, "Прямой эфир", MediaType.MUSIC),
+        ({"type": "FmRadio"}, "Прямой эфир", "radio"),
+        ({"type": "movie"}, "", MediaType.CHANNEL),
+        ({"type": "video", "playerType": "live"}, "", MediaType.CHANNEL),
+        ({"type": "movie", "playerType": "unknown", "subtitle": "комедия, 6+"},
+         "Прямой эфир", MediaType.MOVIE),
+        ({"type": "video", "playerType": "unknown"}, "Прямой эфир", MediaType.VIDEO),
+        ({"type": "tv_show_episode", "playerType": "unknown"},
+         "Прямой эфир", MediaType.TVSHOW),
+        ({"playerType": "com.yandex.tv.videoplayer"}, "", MediaType.VIDEO),
+        ({"playerType": "com.yandex.tv.videoplayer", "subtitle": ""}, "", MediaType.VIDEO),
+        ({"playerType": "ru.yandex.quasar.app"}, "", MediaType.VIDEO),
+        ({"playerType": "ru.yandex.quasar.app", "subtitle": ""}, "", MediaType.VIDEO),
+        ({"type": "unrecognized", "playerType": "unknown"}, "", None),
+    ],
+)
+def test_video_classification_priority(changes, live_text, expected):
+    # Synthetic conflicts: audio beats live; explicit VOD beats only the old text.
+    frame = _player_frame(**{
+        "subtitle": "Подпись", "liveStreamText": live_text, **changes,
+    })
+    entity = FakeYandexStation()
+    entity.async_set_state(frame)
+
+    assert entity.media_content_type == expected
+    assert entity.media_artist == ("Подпись" if expected == MediaType.MUSIC else None)
+    assert entity.media_channel == ("Подпись" if expected == MediaType.CHANNEL else None)
+    assert entity.media_series_title == (
+        "Подпись" if expected == MediaType.TVSHOW else None
+    )
+
+
+@pytest.mark.parametrize("mode", ["absent", "null", "empty"])
+@pytest.mark.parametrize(
+    "signal,expected",
+    [
+        ({"type": "Track"}, MediaType.MUSIC),
+        ({"type": "FmRadio"}, "radio"),
+        ({"type": "movie"}, MediaType.MOVIE),
+        ({"type": "tv_show_episode"}, MediaType.TVSHOW),
+        ({"type": "video"}, MediaType.VIDEO),
+        ({"playerType": "com.yandex.tv.live"}, MediaType.CHANNEL),
+        ({"liveStreamText": "Прямой эфир"}, MediaType.CHANNEL),
+        ({"playerType": "com.yandex.tv.videoplayer"}, MediaType.VIDEO),
+        ({}, None),
+    ],
+)
+def test_classification_optional_fields(mode, signal, expected):
+    # Missing/null/empty optional markers do not mask the remaining positive signal.
+    optional = ("type", "playerType", "liveStreamText", "subtitle")
+    changes = dict.fromkeys(optional, None if mode == "null" else "")
+    changes.update(signal)
+    omitted = tuple(key for key in optional if key not in signal)
+    entity = FakeYandexStation()
+    entity.async_set_state(_player_frame(
+        omit=omitted if mode == "absent" else (), **changes,
+    ))
+
+    assert entity.media_content_type == expected
+    assert entity.media_artist is None
+    assert entity.media_channel is None
+    assert entity.media_series_title is None
+    assert entity.media_title == "Новости 360"
+
+
+def test_content_type_transitions_reset_metadata(monkeypatch):
+    entity = FakeYandexStation()
+    # Cloud fallback publishes unconditionally; this seam has no HA instance.
+    monkeypatch.setattr(entity, "async_write_ha_state", lambda: None)
+    for changes, expected, metadata in [
+        ({"playerType": "com.yandex.tv.live"}, MediaType.CHANNEL,
+         (None, "Подпись", None)),
+        ({"type": "Track"}, MediaType.MUSIC, ("Подпись", None, None)),
+        ({"type": "FmRadio"}, "radio", (None, None, None)),
+        ({"type": "tv_show_episode"}, MediaType.TVSHOW, (None, None, "Подпись")),
+        ({"type": "movie"}, MediaType.MOVIE, (None, None, None)),
+        ({"type": "video"}, MediaType.VIDEO, (None, None, None)),
+        ({"type": "unknown"}, None, (None, None, None)),
+    ]:
+        # Every update owns a fresh envelope; never mutate retained local_state.
+        entity.async_set_state(_player_frame(**{
+            "playerType": "unknown", "subtitle": "Подпись",
+            "id": "synthetic-content", "playlistType": "Playlist",
+            "extra": {"coverURI": "https://example.invalid/cover.jpg"},
+            "entityInfo": {"type": "Playlist", "repeatMode": "All", "shuffled": True},
+            **changes,
+        }))
+        assert entity.media_content_type == expected
+        assert (entity.media_artist, entity.media_channel,
+                entity.media_series_title) == metadata
+        assert entity.media_playlist == MediaType.PLAYLIST
+        assert entity.repeat == RepeatMode.ALL
+        assert entity.shuffle is True
+        assert entity.media_image_url == "https://example.invalid/cover.jpg"
+
+    idle = _player_frame()
+    del idle["state"]["playerState"]
+    idle["state"]["playing"] = False
+    entity.async_set_state(idle)
+    assert entity.state == MediaPlayerState.IDLE
+    assert entity.assumed_state is False
+    for cloud in (False, True):
+        if cloud:
+            entity.async_set_state(None)
+        assert entity.assumed_state is cloud
+        assert entity.media_content_type is None
+        assert entity.media_artist is None
+        assert entity.media_channel is None
+        assert entity.media_series_title is None
+        assert entity.media_title is None
+        assert entity.media_content_id is None
+        assert entity.media_duration is None
+        assert entity.media_position is None
+        assert entity.media_position_updated_at is None
+        assert entity.media_image_url is None
+        assert entity.media_playlist is None
+        assert entity.repeat is None
+        assert entity.shuffle is None
 
 
 def test_idle():
@@ -445,8 +660,8 @@ def test_video():
 
     assert entity.media_artist is None
     assert entity.media_content_id == "4e0a11ba3b549da0b7291235f8a50c2e"
-    assert entity.media_content_type == MediaType.TVSHOW
-    assert entity.media_series_title == "Фиксики, 1 сезон, 1 серия"
+    assert entity.media_content_type == MediaType.VIDEO
+    assert entity.media_series_title is None
     assert entity.shuffle is None
 
 
@@ -486,6 +701,6 @@ def test_movie():
 
     assert entity.media_artist is None
     assert entity.media_content_id == "402f8e529e4e7a31b3b43f4383cbc10d"
-    assert entity.media_content_type == MediaType.TVSHOW
-    assert entity.media_series_title == "военный, боевик, история, биография, 18+, 2019"
+    assert entity.media_content_type == MediaType.VIDEO
+    assert entity.media_series_title is None
     assert entity.shuffle is None
