@@ -12,6 +12,7 @@ from custom_components.yandex_station.core.yandex_quasar import YandexQuasar
 from custom_components.yandex_station.binary_sensor import YandexStationLocalConnection
 from custom_components.yandex_station.core.yandex_station import YandexStation
 from .test_cache import device_record
+from .test_local import _player_frame
 from .test_ownership import ownership_runtime
 
 
@@ -159,6 +160,22 @@ async def verify_firmware_only_diagnostics(tmp_path):
 
         assert sensor.is_on is True
         assert sensor.extra_state_attributes["software_version"] == "v2"
+        assert sensor.extra_state_attributes["last_heartbeat"] == heartbeat
+
+        # A rejected media heartbeat can still carry new firmware diagnostics.
+        video = _player_frame(
+            type="tv_show_episode", playerType="com.yandex.tv.videoplayer",
+            subtitle="Три кота", title="2. Киношедевр",
+        )
+        station.async_set_state({**video, "softwareVersion": "v2"})
+        heartbeat = sensor.extra_state_attributes["last_heartbeat"]
+        background = _player_frame(type="Track", playerType="music_thin")
+        background["state"]["playing"] = False
+        station.async_set_state({**background, "softwareVersion": "v3"})
+        assert station.media_title == "2. Киношедевр"
+        assert station.media_series_title == "Три кота"
+        assert sensor.is_on is True
+        assert sensor.extra_state_attributes["software_version"] == "v3"
         assert sensor.extra_state_attributes["last_heartbeat"] == heartbeat
 
 
