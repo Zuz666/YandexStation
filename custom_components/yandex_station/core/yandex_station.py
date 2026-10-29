@@ -561,6 +561,22 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
         if self.local_state == state:
             return
 
+        # A paused background player must not replace another player's playback.
+        # Missing identity or an idle frame cannot identify a background player.
+        current_player = (self.local_state or {}).get("playerState") or {}
+        incoming_player = state.get("playerState") or {}
+        current_type = current_player.get("playerType")
+        incoming_type = incoming_player.get("playerType")
+        if (
+            self.local_state
+            and self.local_state.get("playing") is True
+            and state.get("playing") is False
+            and current_type
+            and incoming_type
+            and incoming_type != current_type
+        ):
+            return
+
         self.local_state = state
 
         if sw_version := data.get("softwareVersion"):
@@ -597,7 +613,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             if player_state["duration"]:
                 self._attr_supported_features |= MediaPlayerEntityFeature.SEEK
 
-            # Prefer explicit content types over the legacy display marker.
+            # Audio first, then live TV, explicit VOD types and generic video.
             content_type = player_state.get("type")
             player_type = player_state.get("playerType")
             subtitle = player_state.get("subtitle") or None
@@ -606,7 +622,10 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                 self._attr_media_content_type = MediaType.MUSIC
             elif content_type == "FmRadio":
                 self._attr_media_content_type = "radio"
-            elif player_type in ("com.yandex.tv.live", "live"):
+            elif (
+                player_type in ("com.yandex.tv.live", "live")
+                or player_state.get("liveStreamText") == "Прямой эфир"
+            ):
                 self._attr_media_channel = subtitle
                 self._attr_media_content_type = MediaType.CHANNEL
             elif content_type == "movie":
@@ -614,12 +633,10 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             elif content_type == "tv_show_episode":
                 self._attr_media_content_type = MediaType.TVSHOW
                 self._attr_media_series_title = subtitle
-            elif content_type == "video":
-                self._attr_media_content_type = MediaType.VIDEO
-            elif player_state.get("liveStreamText") == "Прямой эфир":
-                self._attr_media_channel = subtitle
-                self._attr_media_content_type = MediaType.CHANNEL
-            elif player_type in ("com.yandex.tv.videoplayer", "ru.yandex.quasar.app"):
+            elif (
+                content_type == "video"
+                or player_type in ("com.yandex.tv.videoplayer", "ru.yandex.quasar.app")
+            ):
                 self._attr_media_content_type = MediaType.VIDEO
 
             if player_state["playlistType"] == "Track":
@@ -1117,6 +1134,10 @@ class YandexStation(YandexStationBase):
         super().async_set_state(data)
 
         if not self.sync_enabled or data is None or "playerState" not in data["state"]:
+            return
+
+        # Ignored background frames must not pause a synchronized player either.
+        if self.local_state != data["state"]:
             return
 
         state = data["state"]

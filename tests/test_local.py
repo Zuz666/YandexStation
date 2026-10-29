@@ -100,6 +100,52 @@ def test_yaos_kinopoisk_vod(kind, subtitle, duration, title, expected, series):
     assert entity.media_position == 27.0
 
 
+def test_glagol_anti_flap_concurrent_players():
+    entity = FakeYandexStation()
+    video = dict(playerType="com.yandex.tv.videoplayer", type="tv_show_episode",
+                 title="2. Киношедевр", subtitle="Три кота")
+    music = dict(playerType="music_thin", type="Track",
+                 title="Звезда по имени Солнце", subtitle="КИНО")
+    for fields, playing, expected_state, expected_type, title, series in [
+        (video, True, MediaPlayerState.PLAYING, MediaType.TVSHOW,
+         "2. Киношедевр", "Три кота"),
+        (music, False, MediaPlayerState.PLAYING, MediaType.TVSHOW,
+         "2. Киношедевр", "Три кота"),
+        (video, False, MediaPlayerState.PAUSED, MediaType.TVSHOW,
+         "2. Киношедевр", "Три кота"),
+        (music, False, MediaPlayerState.PAUSED, MediaType.MUSIC,
+         "Звезда по имени Солнце", None),
+        (video, True, MediaPlayerState.PLAYING, MediaType.TVSHOW,
+         "2. Киношедевр", "Три кота"),
+        (music, True, MediaPlayerState.PLAYING, MediaType.MUSIC,
+         "Звезда по имени Солнце", None),
+        (video, False, MediaPlayerState.PLAYING, MediaType.MUSIC,
+         "Звезда по имени Солнце", None),
+    ]:
+        frame = _player_frame(**fields)
+        frame["state"]["playing"] = playing
+        entity.async_set_state(frame)
+        assert entity.state == expected_state
+        assert entity.media_content_type == expected_type
+        assert entity.media_title == title
+        assert entity.media_series_title == series
+
+
+@pytest.mark.parametrize(
+    "current,incoming",
+    [(None, "music_thin"), ("", "music_thin"),
+     ("com.yandex.tv.videoplayer", None), ("com.yandex.tv.videoplayer", "")],
+)
+def test_glagol_pause_without_player_identity(current, incoming):
+    entity = FakeYandexStation()
+    entity.async_set_state(_player_frame(playerType=current, type="movie"))
+    paused = _player_frame(playerType=incoming, type="Track", title="Другой трек")
+    paused["state"]["playing"] = False
+    entity.async_set_state(paused)
+    assert entity.state == MediaPlayerState.PAUSED
+    assert entity.media_title == "Другой трек"
+
+
 @pytest.mark.parametrize(
     "changes,live_text,expected",
     [
@@ -107,11 +153,10 @@ def test_yaos_kinopoisk_vod(kind, subtitle, duration, title, expected, series):
         ({"type": "FmRadio"}, "Прямой эфир", "radio"),
         ({"type": "movie"}, "", MediaType.CHANNEL),
         ({"type": "video", "playerType": "live"}, "", MediaType.CHANNEL),
-        ({"type": "movie", "playerType": "unknown", "subtitle": "комедия, 6+"},
-         "Прямой эфир", MediaType.MOVIE),
-        ({"type": "video", "playerType": "unknown"}, "Прямой эфир", MediaType.VIDEO),
+        ({"type": "movie", "playerType": "unknown"}, "Прямой эфир", MediaType.CHANNEL),
+        ({"type": "video", "playerType": "unknown"}, "Прямой эфир", MediaType.CHANNEL),
         ({"type": "tv_show_episode", "playerType": "unknown"},
-         "Прямой эфир", MediaType.TVSHOW),
+         "Прямой эфир", MediaType.CHANNEL),
         ({"playerType": "com.yandex.tv.videoplayer"}, "", MediaType.VIDEO),
         ({"playerType": "com.yandex.tv.videoplayer", "subtitle": ""}, "", MediaType.VIDEO),
         ({"playerType": "ru.yandex.quasar.app"}, "", MediaType.VIDEO),
@@ -120,7 +165,7 @@ def test_yaos_kinopoisk_vod(kind, subtitle, duration, title, expected, series):
     ],
 )
 def test_video_classification_priority(changes, live_text, expected):
-    # Synthetic conflicts: audio beats live; explicit VOD beats only the old text.
+    # Synthetic conflicts: audio beats live; either live marker beats VOD.
     frame = _player_frame(**{
         "subtitle": "Подпись", "liveStreamText": live_text, **changes,
     })
@@ -198,6 +243,9 @@ def test_content_type_transitions_reset_metadata(monkeypatch):
         assert entity.shuffle is True
         assert entity.media_image_url == "https://example.invalid/cover.jpg"
 
+    entity.async_set_state(_player_frame(
+        type="movie", playerType="com.yandex.tv.videoplayer",
+    ))
     idle = _player_frame()
     del idle["state"]["playerState"]
     idle["state"]["playing"] = False
