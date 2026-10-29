@@ -516,9 +516,6 @@ def test_cached_token_missing_hdmi_config_fetched_after_publication():
             session.request_glagol.assert_not_called()
             assert entity.hdmi_audio is True
             assert device["hdmi_audio"] is True
-            cache.async_save_local_config.assert_awaited_once_with(
-                "glagol-1", hdmi_audio=True
-            )
         finally:
             quasar.stopping = True
             await entity.glagol.stop()

@@ -33,6 +33,7 @@ def _run_isolated(tmp_path, mode, expected_reason=None):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "reload behavior verified" in result.stdout
+    return result.stdout
 
 
 @pytest.mark.parametrize("mode", [
@@ -86,7 +87,7 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
     except TypeError:
         entry = ConfigEntry(**values)
     records = [entry.as_dict()]
-    if mode in {"entries_retry_mix", "entries_disabled"}:
+    if mode in {"entries_retry_mix", "entries_disabled", "entries_discovery_reconnect"}:
         secondary = {**entry.as_dict(), "entry_id": "entry-secondary",
                      "unique_id": "synthetic-secondary"}
         if mode == "entries_disabled":
@@ -119,8 +120,49 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
         hass, None, None, None, ["127.0.0.1"], 0, [], "intermediate"
     )
     hass.http.app[KEY_HASS] = hass
+    if mode == "entries_discovery_reconnect":
+        # Only the transport/browser are synthetic; Core setup, discovery callback,
+        # station generation and the two loopback WebSocket peers are real.
+        class SyntheticZeroconf:
+            address = b"\x7f\x00\x00\x01"
+            port = None
+
+            def get_service_info(self, service_type, name):
+                return SimpleNamespace(
+                    addresses=[self.address], port=self.port,
+                    properties={
+                        b"deviceId": b"synthetic-glagol",
+                        b"platform": b"yandexstation",
+                    },
+                )
+
+        class SyntheticBrowser:
+            def __init__(self, zeroconf, service_type, handlers):
+                self.zeroconf = zeroconf
+                self.handler = handlers[0]
+                self.cancelled = False
+
+            def emit(self, port, address=b"\x7f\x00\x00\x01"):
+                self.zeroconf.address = address
+                self.zeroconf.port = port
+                self.handler(self.zeroconf, "_yandexio._tcp.local.", "synthetic", None)
+
+            def cancel(self):
+                self.cancelled = True
+
+        fake_zeroconf = SyntheticZeroconf()
+        patch("zeroconf.ServiceBrowser", SyntheticBrowser).start()
+        patch(
+            "custom_components.yandex_station.core.yandex_glagol.ServiceBrowser",
+            SyntheticBrowser,
+        ).start()
+        patch(
+            "homeassistant.components.zeroconf.async_get_instance",
+            new=AsyncMock(return_value=fake_zeroconf),
+        ).start()
     assert await async_setup(hass, {DOMAIN: {
-        "local_updates": False, "force_offline_local": True,
+        "local_updates": mode == "entries_discovery_reconnect",
+        "force_offline_local": True,
         "enable_code_reload": True,
     }})
     lifecycle = get_lifecycle(hass)
@@ -163,6 +205,9 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
             await cache.async_save_device_token(
                 "synthetic-glagol", "yandexstation", "synthetic-candidate"
             )
+            await cache.async_save_local_config(
+                "synthetic-glagol", host="127.0.0.4", port=19001, hdmi_audio=False
+            )
         else:
             await cache.async_save_devices([])
         await cache.async_close()
@@ -175,7 +220,58 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
             return_value=mode != "entries_unload_fail"
         )
         hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
-        assert await hass.config_entries.async_setup(entry.entry_id)
+        if mode == "entries_discovery_reconnect":
+            from homeassistant.helpers.storage import Store
+            from custom_components.yandex_station.core.const import DATA_SPEAKERS
+
+            # Accumulate through the real browser callback before any account setup.
+            lifecycle.runtimes.pop(entry.entry_id)
+            browser = lifecycle.discovery_listener.browser
+            browser.emit(19002, b"\x7f\x00\x00\x02")
+            await _until(lambda: "synthetic-glagol" in hass.data[DOMAIN][DATA_SPEAKERS])
+            hass.data[DOMAIN][DATA_CONFIG]["devices"] = {
+                "synthetic-glagol": {"host": "127.0.0.3", "name": "YAML station"},
+            }
+            stored = CacheManager(hass, entry.entry_id, account_login=entry.unique_id)
+            restored = await stored.async_load()
+            assert restored.local_config["synthetic-glagol"] == {
+                "host": "127.0.0.4", "port": 19001, "hdmi_audio": False,
+            }
+            await stored.async_close()
+            entered, release = asyncio.Event(), asyncio.Event()
+            save = Store.async_save
+
+            async def setup_save(store, data):
+                if (
+                    store.path == cache.path
+                    and data.get("local_config", {}).get("synthetic-glagol", {}).get("host")
+                    == "127.0.0.2"
+                ):
+                    entered.set()
+                    await release.wait()
+                await save(store, data)
+
+            with patch.object(Store, "async_save", new=setup_save):
+                setup = asyncio.create_task(hass.config_entries.async_setup(entry.entry_id))
+                try:
+                    await asyncio.wait_for(entered.wait(), 3)
+                    accumulated = lifecycle.runtimes[entry.entry_id].speakers[0]
+                    assert (accumulated["host"], accumulated["port"]) == ("127.0.0.2", 19002)
+                    assert accumulated["hdmi_audio"] is False
+                finally:
+                    release.set()
+                assert await setup
+            configured = lifecycle.runtimes[entry.entry_id].speakers[0]
+            assert (configured["host"], configured["port"]) == ("127.0.0.3", 19002)
+            assert configured["name"] == "YAML station"
+            assert configured["hdmi_audio"] is False
+            secondary = hass.config_entries.async_get_entry("entry-secondary")
+            second_cache = CacheManager(hass, secondary.entry_id, account_login=secondary.unique_id)
+            await second_cache.async_save_devices(restored.devices)
+            await second_cache.async_close()
+            assert await hass.config_entries.async_setup(secondary.entry_id)
+        else:
+            assert await hass.config_entries.async_setup(entry.entry_id)
         assert entry.state is ConfigEntryState.LOADED, entry.state
         print("Core loaded entry state:", entry.state)
         if mode == "entries_retry_mix":
@@ -197,41 +293,6 @@ async def _run_case(config: Path, mode: str, expected_reason=None):
                 assert hass.config_entries.async_get_entry(
                     "entry-retry"
                 ).state is ConfigEntryState.SETUP_RETRY
-    if mode == "entries_discovery_reconnect":
-        # Only the transport/browser are synthetic; Core setup, discovery callback,
-        # station generation and the two loopback WebSocket peers are real.
-        class SyntheticZeroconf:
-            port = None
-
-            def get_service_info(self, service_type, name):
-                return SimpleNamespace(
-                    addresses=[b"\x7f\x00\x00\x01"], port=self.port,
-                    properties={
-                        b"deviceId": b"synthetic-glagol",
-                        b"platform": b"yandexstation",
-                    },
-                )
-
-        class SyntheticBrowser:
-            def __init__(self, zeroconf, service_type, handlers):
-                self.zeroconf = zeroconf
-                self.handler = handlers[0]
-                self.cancelled = False
-
-            def emit(self, port):
-                self.zeroconf.port = port
-                self.handler(self.zeroconf, "_yandexio._tcp.local.", "synthetic", None)
-
-            def cancel(self):
-                self.cancelled = True
-
-        fake_zeroconf = SyntheticZeroconf()
-        patch("zeroconf.ServiceBrowser", SyntheticBrowser).start()
-        patch(
-            "homeassistant.components.zeroconf.async_get_instance",
-            new=AsyncMock(return_value=fake_zeroconf),
-        ).start()
-        hass.data[DOMAIN][DATA_CONFIG]["local_updates"] = True
     hold = asyncio.Event()
     blocking_media = mode in {
         "drain", "drain_head_service", "parallel_reload", "cancel_waiter",
@@ -601,14 +662,23 @@ if not builtins.hot_reload_release.wait(10):
                     }
                     station.async_write_ha_state = MagicMock()
                     device["entity"] = station
+                    other_quasar = lifecycle.runtimes["entry-secondary"]
+                    assert not other_quasar.owned_glagol_ids
+                    other_device = other_quasar.speakers[0]
+                    other_station = YandexStation(other_quasar, other_device)
+                    other_station.hass = hass
+                    other_station.async_write_ha_state = MagicMock()
+                    other_device["entity"] = other_station
+                    # YAML explicitly admits the owner even with local updates off.
+                    active_quasar.policy.local_updates = False
                     browser = lifecycle.discovery_listener.browser
                     assert isinstance(browser, SyntheticBrowser)
                     connections = []
-                    received = [asyncio.Event(), asyncio.Event()]
+                    received = {}
 
                     async def peer(request):
                         connections.append(request.transport.get_extra_info("sockname")[1])
-                        received[len(connections) - 1].set()
+                        received[connections[-1]].set()
                         ws = web.WebSocketResponse()
                         await ws.prepare(request)
                         async for _ in ws:
@@ -622,7 +692,7 @@ if not builtins.hot_reload_release.wait(10):
                     try:
                         sites = [
                             web.TCPSite(peer_runner, "127.0.0.1", 0)
-                            for _ in range(2)
+                            for _ in range(4)
                         ]
                         for peer_site in sites:
                             await peer_site.start()
@@ -630,17 +700,68 @@ if not builtins.hot_reload_release.wait(10):
                             peer_site._server.sockets[0].getsockname()[1]
                             for peer_site in sites
                         ]
+                        received = {peer_port: asyncio.Event() for peer_port in ports}
                         async def local_ws(*, url, role, **kwargs):
                             return await client.ws_connect(
                                 url.replace("wss://", "ws://"), **kwargs
                             )
                         active_quasar.session.ws_connect = local_ws
-                        for index, peer_port in enumerate(ports):
-                            browser.emit(peer_port)
-                            await asyncio.wait_for(received[index].wait(), 3)
-                            assert device["port"] == peer_port
-                        assert connections == ports
+                        other_quasar.session.ws_connect = local_ws
+                        gates = {
+                            peer_port: (asyncio.Event(), asyncio.Event())
+                            for peer_port in (ports[0], ports[1], ports[3])
+                        }
+                        store = active_quasar.cache_manager._store
+                        save = store.async_save
+
+                        async def delayed_save(data):
+                            peer_port = data["local_config"]["synthetic-glagol"]["port"]
+                            if peer_port in gates:
+                                entered, release = gates[peer_port]
+                                entered.set()
+                                await release.wait()
+                            await save(data)
+
+                        patch.object(store, "async_save", new=delayed_save).start()
+                        browser.emit(ports[0])
+                        await asyncio.wait_for(gates[ports[0]][0].wait(), 3)
+                        browser.emit(ports[1])
+                        await _until(lambda: device["port"] == ports[1])
+                        gates[ports[0]][1].set()
+                        await asyncio.wait_for(gates[ports[1]][0].wait(), 3)
+                        await _until(lambda: lifecycle.active_consumers == 1)
+                        # The superseded event has returned, but the newest Store
+                        # is still held: neither event may have connected yet.
+                        assert station.glagol is None and not connections
+                        gates[ports[1]][1].set()
+                        await asyncio.wait_for(received[ports[1]].wait(), 3)
+                        browser.emit(ports[2])
+                        await asyncio.wait_for(received[ports[2]].wait(), 3)
+                        await _until(lambda: lifecycle.active_consumers == 0)
+                        assert connections == ports[1:3]
+                        assert other_station.glagol is None
+                        assert device["host"] == other_device["host"] == "127.0.0.1"
+                        assert device["hdmi_audio"] is False
+                        print("local-info sources: snapshot -> accumulated mDNS -> YAML -> new mDNS")
+                        print("local-info saved both accounts; owner-only endpoints:", connections)
                         assert station.glagol is not None
+                        # An owner without local permission or a YAML host still
+                        # learns the address, without replacing its live endpoint.
+                        hass.data[DOMAIN][DATA_CONFIG].pop("devices")
+                        active_quasar.yaml_glagol_hosts.clear()
+                        connected_url = station.glagol.url
+                        browser.emit(ports[0])
+                        await _until(lambda: other_device["port"] == ports[0])
+                        await _until(lambda: lifecycle.active_consumers == 0)
+                        assert device["port"] == ports[0]
+                        assert station.glagol.url == connected_url
+                        assert connections == ports[1:3]
+                        assert other_station.glagol is None
+                        for owner in (entry, secondary):
+                            saved = CacheManager(hass, owner.entry_id, account_login=owner.unique_id)
+                            snapshot = await saved.async_load()
+                            assert snapshot.local_config["synthetic-glagol"]["port"] == ports[0]
+                            await saved.async_close()
                         request_started = asyncio.Event()
                         async def pending_token_request(*, path, role, **kwargs):
                             request_started.set()
@@ -655,7 +776,15 @@ if not builtins.hot_reload_release.wait(10):
                         service_keys = set(lifecycle.service_targets)
                         route_count = len(list(hass.http.app.router.routes()))
                         _change_behavior(root, "v3")
-                        repeated = await _reload(hass, lifecycle, DOMAIN)
+                        # Reload drains the accepted discovery write before
+                        # unloading the account and restoring its snapshot.
+                        browser.emit(ports[3])
+                        await asyncio.wait_for(gates[ports[3]][0].wait(), 3)
+                        reload_task = asyncio.create_task(_reload(hass, lifecycle, DOMAIN))
+                        await _until(lambda: not lifecycle.context.admission_open)
+                        assert not reload_task.done()
+                        gates[ports[3]][1].set()
+                        repeated = await reload_task
                         assert repeated["status"] == "success", repeated
                         assert old_glagol._stopped and old_glagol.ws is None
                         assert pending_token.cancelled()
@@ -666,7 +795,16 @@ if not builtins.hot_reload_release.wait(10):
                         assert set(lifecycle.service_targets) == service_keys
                         assert len(list(hass.http.app.router.routes())) == route_count
                         assert await _get_body(client, signed) == b"v3"
+                        assert connections == ports[1:3]
+                        restored_owner = lifecycle.runtimes[entry.entry_id].speakers[0]
+                        assert (restored_owner["host"], restored_owner["port"]) == ("127.0.0.1", ports[3])
+                        assert restored_owner["hdmi_audio"] is False
+                        print("local-info accepted write restored after teardown:",
+                              restored_owner["host"], restored_owner["port"], "HDMI=False")
                     finally:
+                        if "gates" in locals():
+                            for _, release in gates.values():
+                                release.set()
                         if station.glagol is not None:
                             await station.glagol.stop()
                         await peer_runner.cleanup()
@@ -702,6 +840,13 @@ if not builtins.hot_reload_release.wait(10):
         await lifecycle.async_stop()
         await hass.async_stop()
         patch.stopall()
+
+
+async def _until(predicate):
+    async def wait():
+        while not predicate():
+            await asyncio.sleep(.01)
+    await asyncio.wait_for(wait(), 3)
 
 
 async def _get_body(client, url):
@@ -759,4 +904,9 @@ def _change_behavior(root, version):
 
 
 if __name__ == "__main__":
-    asyncio.run(_run_case(Path.cwd(), sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None))
+    if sys.argv[1] == "local_info_smoke":
+        import tempfile
+        with tempfile.TemporaryDirectory() as temporary:
+            print(_run_isolated(Path(temporary), "entries_discovery_reconnect"), end="")
+    else:
+        asyncio.run(_run_case(Path.cwd(), sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None))

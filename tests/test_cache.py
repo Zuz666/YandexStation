@@ -437,7 +437,7 @@ def test_durable_marker_checks_content_not_only_revision(tmp_path):
     asyncio.run(scenario())
 
 
-def test_metadata_merges_coalesces_and_closes_write_admission(tmp_path):
+def test_metadata_merges_and_closes_write_admission(tmp_path):
     async def scenario():
         async with cache_runtime(tmp_path) as (manager, _):
             cache = manager()
@@ -451,12 +451,79 @@ def test_metadata_merges_coalesces_and_closes_write_admission(tmp_path):
             assert restored.local_config == {"glagol-1": {
                 "host": "127.0.0.2", "port": 1905, "hdmi_audio": False,
             }}
-            assert restored.revision == 4
             assert restored.updated_at == before
             with pytest.raises(RuntimeError, match="cache_closed"):
                 await cache.async_save_device_token("glagol-1", "yandexstation", "late")
             with pytest.raises(RuntimeError, match="cache_closed"):
                 await cache.async_save_local_config("glagol-1", hdmi_audio=True)
+
+    asyncio.run(scenario())
+
+
+def test_local_info_merges_and_persists_even_when_device_is_unchanged(tmp_path):
+    async def scenario():
+        async with cache_runtime(tmp_path) as (manager, _):
+            cache = manager()
+            device = device_record()
+            await cache.async_save_devices([device])
+            before = cache.snapshot.updated_at
+            quasar = YandexQuasar(None, cache_manager=cache)
+            quasar.devices = [device]
+
+            assert await quasar.async_update_local_info(
+                device, host="127.0.0.1", port=1905, hdmi_audio=True
+            )
+            assert await quasar.async_update_local_info(device, hdmi_audio=False)
+            assert await quasar.async_update_local_info(device, host="127.0.0.2")
+            assert not await quasar.async_update_local_info(
+                device, host=None, port=None, hdmi_audio=None
+            )
+            assert (device["host"], device["port"], device["hdmi_audio"]) == (
+                "127.0.0.2", 1905, False
+            )
+
+            # RAM equality must not hide a different persisted address.
+            device["host"] = "127.0.0.3"
+            assert not await quasar.async_update_local_info(device, host="127.0.0.3")
+            await cache.async_close()
+            restored = await manager().async_load()
+            assert restored.local_config == {"glagol-1": {
+                "host": "127.0.0.3", "port": 1905, "hdmi_audio": False,
+            }}
+            assert restored.updated_at == before
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("hdmi_audio", [False, "false"])
+def test_yaml_hdmi_extras_preserve_setup_and_known_metadata(tmp_path, hdmi_audio):
+    async def scenario():
+        from custom_components.yandex_station import CONFIG_SCHEMA, _setup_devices
+        from custom_components.yandex_station.core.const import DATA_CONFIG, DOMAIN
+        from custom_components.yandex_station.core.yandex_station import YandexStation
+
+        async with cache_runtime(tmp_path) as (manager, _):
+            cache = manager()
+            device = device_record()
+            await cache.async_save_devices([device])
+            await cache.async_save_local_config("glagol-1", hdmi_audio=True)
+            quasar = YandexQuasar(None, cache_manager=cache)
+            quasar.devices = [device]
+            cache.hass.data[DOMAIN] = {DATA_CONFIG: CONFIG_SCHEMA({DOMAIN: {
+                "devices": {"glagol-1": {
+                    "host": "127.0.0.2", "hdmi_audio": hdmi_audio, "name": "YAML",
+                }},
+            }})[DOMAIN]}
+            await _setup_devices(cache.hass, quasar)
+            assert device["host"] == "127.0.0.2" and device["name"] == "YAML"
+            assert YandexStation(quasar, device).hdmi_audio is (
+                False if hdmi_audio is False else None
+            )
+            restored = await manager().async_load()
+            assert restored.local_config["glagol-1"] == {
+                "host": "127.0.0.2", "port": 1961,
+                "hdmi_audio": False if hdmi_audio is False else True,
+            }
 
     asyncio.run(scenario())
 

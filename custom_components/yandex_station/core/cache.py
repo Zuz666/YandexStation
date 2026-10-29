@@ -626,7 +626,7 @@ class CacheManager:
         port: int | None = None,
         hdmi_audio: bool | None = None,
     ) -> None:
-        """Merge metadata; one owned delayed write coalesces discovery/config changes."""
+        """Merge known metadata fields and save a changed snapshot under the lock."""
         _require_id(glagol_id, "glagol_id")
         if host is not None and not isinstance(host, str):
             raise ValueError("host must be a string")

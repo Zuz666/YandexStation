@@ -402,7 +402,6 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
 
     def _apply_hdmi_audio(self, enabled: bool):
         self.hdmi_audio = enabled
-        self.device["hdmi_audio"] = enabled
         # for HomeKit source list support
         self._attr_device_class = MediaPlayerDeviceClass.TV
         external = [
@@ -441,10 +440,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             return
 
         self._apply_hdmi_audio(enabled)
-        if self.quasar.cache_manager:
-            await self.quasar.cache_manager.async_save_local_config(
-                self.device["quasar_info"]["device_id"], hdmi_audio=enabled
-            )
+        await self.quasar.async_update_local_info(self.device, hdmi_audio=enabled)
 
     async def sync_hdmi_audio(self):
         # if HDMI supported and state loaded
@@ -479,10 +475,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
             return
 
         self._apply_hdmi_audio(enabled)
-        if self.quasar.cache_manager:
-            await self.quasar.cache_manager.async_save_local_config(
-                self.device["quasar_info"]["device_id"], hdmi_audio=enabled
-            )
+        await self.quasar.async_update_local_info(self.device, hdmi_audio=enabled)
 
     async def response(self, card: dict, request_id: str):
         if not card:

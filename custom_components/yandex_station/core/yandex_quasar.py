@@ -344,6 +344,31 @@ class YandexQuasar(Dispatcher):
         self.last_cloud_check: dict | None = None
         self._cloud_check_task: asyncio.Task | None = None
 
+    async def async_update_local_info(
+        self,
+        device: dict,
+        *,
+        host: str | None = None,
+        port: int | None = None,
+        hdmi_audio: bool | None = None,
+    ) -> bool:
+        """Apply known fields to an account-owned device, then persist them.
+
+        None leaves a field unchanged. The result reports RAM changes only,
+        not durability or whether the caller's observation is still current.
+        """
+        changed = False
+        for key, value in (("host", host), ("port", port), ("hdmi_audio", hdmi_audio)):
+            if value is not None and device.get(key) != value:
+                device[key] = value
+                changed = True
+        if self.cache_manager is not None:
+            await self.cache_manager.async_save_local_config(
+                device["quasar_info"]["device_id"],
+                host=host, port=port, hdmi_audio=hdmi_audio,
+            )
+        return changed
+
     async def async_check_cloud(self) -> dict:
         """Read the authenticated inventory once; never run recovery or save it."""
         if self.stopping or not self.policy.effective_cloud_allowed:

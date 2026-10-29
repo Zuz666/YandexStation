@@ -275,10 +275,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             for device in quasar.speakers + quasar.modules:
                 did = device["quasar_info"]["device_id"]
                 if observation := observations.get(did):
-                    device["host"] = observation["host"]
-                    device["port"] = observation["port"]
-                    await cache_manager.async_save_local_config(
-                        did, host=observation["host"], port=observation["port"]
+                    await quasar.async_update_local_info(
+                        device, host=observation["host"], port=observation["port"]
                     )
             await _setup_devices(hass, quasar)
 
@@ -370,17 +368,14 @@ async def _init_local_discovery(hass: HomeAssistant):
             for device in quasar.speakers + quasar.modules:
                 if device["quasar_info"]["device_id"] != did:
                     continue
-                changed = (device.get("host"), device.get("port")) != (host, port)
-                device["host"], device["port"] = host, port
-                if quasar.cache_manager is not None:
-                    try:
-                        await quasar.cache_manager.async_save_local_config(
-                            did, host=host, port=port
-                        )
-                    except RuntimeError:
-                        if quasar.stopping:
-                            continue
-                        raise
+                try:
+                    changed = await quasar.async_update_local_info(
+                        device, host=host, port=port
+                    )
+                except RuntimeError:
+                    if quasar.stopping:
+                        continue
+                    raise
                 if speakers.get(did) is not observation:
                     return
                 if (
@@ -523,14 +518,23 @@ async def _setup_devices(hass: HomeAssistant, quasar: YandexQuasar):
 
     for device in quasar.speakers + quasar.modules:
         did = device["quasar_info"]["device_id"]
-        if upd := confdevices.get(did) or confdevices.get(did.lower()):
-            if upd.get(CONF_HOST):
-                quasar.yaml_glagol_hosts.add(did)
-            device.update(upd)
-        if quasar.cache_manager and (device.get("host") or device.get("port")):
-            await quasar.cache_manager.async_save_local_config(
-                did, host=device.get("host"), port=device.get("port")
-            )
+        upd = confdevices.get(did) or confdevices.get(did.lower()) or {}
+        if upd.get(CONF_HOST):
+            quasar.yaml_glagol_hosts.add(did)
+        device.update({
+            key: value for key, value in upd.items()
+            if key not in ("host", "port", "hdmi_audio")
+        })
+        hdmi_audio = upd.get("hdmi_audio")
+        if hdmi_audio is not None and not isinstance(hdmi_audio, bool):
+            # YAML permits arbitrary extras; only bool is known HDMI metadata.
+            device["hdmi_audio"] = hdmi_audio
+            hdmi_audio = None
+        await quasar.async_update_local_info(
+            device, host=upd.get("host", device.get("host")),
+            port=upd.get("port", device.get("port")),
+            hdmi_audio=hdmi_audio,
+        )
 
 
 async def async_remove_config_entry_device(

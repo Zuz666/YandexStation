@@ -2,7 +2,7 @@ import asyncio
 import json
 from contextlib import nullcontext
 import logging
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -21,6 +21,7 @@ from custom_components.yandex_station.core.yandex_station import (
     YandexStation,
 )
 from .test_glagol_lifecycle import FakeWS, ws_text
+from .test_cache import cache_runtime
 from . import false, null, true, update_ha_state
 
 
@@ -327,7 +328,7 @@ def test_restart_media_command_reconnects_local_session():
     asyncio.run(scenario())
 
 
-def test_hdmi_apply_and_switch_preserve_external_sync_sources():
+def test_hdmi_switch_preserves_external_sync_sources():
     async def scenario():
         quasar = YandexQuasar(MagicMock())
         station = YandexStation(quasar, local_station_device(hdmi_audio=True))
@@ -347,9 +348,10 @@ def test_hdmi_apply_and_switch_preserve_external_sync_sources():
         assert station.source == SOURCE_STATION
         assert station.source_list == [SOURCE_STATION, SOURCE_HDMI, "Kodi"]
 
-        # a later HDMI refresh must not drop the external source or selection
+        # Selecting an external source does not change the known HDMI setting.
         station._attr_source = "Kodi"
-        station._apply_hdmi_audio(True)
+        await station.sync_hdmi_audio()
+        assert station.hdmi_audio is False
         assert station.source_list == [SOURCE_STATION, SOURCE_HDMI, "Kodi"]
         assert station.source == "Kodi"
 
@@ -366,7 +368,7 @@ def test_initial_hdmi_discovery_with_external_sources():
             "Kodi": {"entity_id": "media_player.kodi", "name": "Kodi"}
         }
         station._attr_source_list = [SOURCE_STATION, "Kodi"]
-        station._attr_source = SOURCE_STATION
+        station._attr_source = "Kodi"
         quasar.get_device_config = AsyncMock(return_value=({"hdmiAudio": True}, 1))
 
         await station.init_hdmi_audio()
@@ -374,6 +376,7 @@ def test_initial_hdmi_discovery_with_external_sources():
         quasar.get_device_config.assert_awaited_once()
         assert station.hdmi_audio is True
         assert station.source_list == [SOURCE_STATION, SOURCE_HDMI, "Kodi"]
+        assert station.source == "Kodi"
 
         # a cached HDMI state is not refetched
         cached = YandexStation(quasar, local_station_device(hdmi_audio=False))
@@ -486,7 +489,6 @@ def test_failed_hdmi_refresh_does_not_abort_entity_teardown():
 
 def test_domain_shutdown_stops_guarded_hdmi_before_closing_its_cache(tmp_path):
     async def scenario():
-        from .test_cache import cache_runtime
         from custom_components.yandex_station.core.lifecycle import get_lifecycle
 
         async with cache_runtime(tmp_path) as (manager, _):
@@ -517,7 +519,10 @@ def test_domain_shutdown_stops_guarded_hdmi_before_closing_its_cache(tmp_path):
                 release.set()
                 await asyncio.sleep(0)
                 assert station.hdmi_audio is None
+                assert "hdmi_audio" not in device
                 assert cache.snapshot.local_config == {}
+                restored = await manager().async_load()
+                assert restored.local_config == {}
                 await station.async_will_remove_from_hass()
             finally:
                 task.cancel()
@@ -559,5 +564,216 @@ def test_local_initialization_cannot_schedule_hdmi_after_entity_removal():
         assert station.hdmi_audio is None
         assert station._hdmi_refresh_task is None
         quasar.get_device_config.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_hdmi_projection_and_device_change_before_store_without_stale_reapply(tmp_path):
+    async def scenario():
+        from datetime import timedelta
+        from homeassistant import bootstrap, loader
+        from homeassistant.helpers.entity_component import EntityComponent
+        from homeassistant.helpers.entity_platform import EntityPlatform
+
+        async with cache_runtime(tmp_path) as (manager, _):
+            cache = manager()
+            hass = cache.hass
+            hass.config.skip_pip = True
+            if hasattr(loader, "async_setup"):
+                loader.async_setup(hass)
+            await loader.async_get_custom_components(hass)
+            if hasattr(bootstrap, "async_load_base_functionality"):
+                await bootstrap.async_load_base_functionality(hass)
+            else:
+                from homeassistant.helpers import (
+                    area_registry, device_registry, entity_registry, issue_registry,
+                )
+                await area_registry.async_load(hass)
+                await device_registry.async_load(hass)
+                await entity_registry.async_load(hass)
+                await issue_registry.async_load(hass)
+            hass.data[DOMAIN] = {DATA_CONFIG: {}}
+            logger = logging.getLogger(__name__)
+            EntityComponent(logger, "media_player", hass)
+            platform = EntityPlatform(
+                hass=hass, logger=logger, domain="media_player",
+                platform_name=DOMAIN, platform=None,
+                scan_interval=timedelta(hours=1), entity_namespace=None,
+            )
+            device = local_station_device()
+            await cache.async_save_devices([device])
+            quasar = YandexQuasar(MagicMock(), cache_manager=cache)
+            quasar.devices = [device]
+            quasar.owned_glagol_ids = {"glagol-device"}
+            quasar.get_device_config = AsyncMock(return_value=({"hdmiAudio": True}, 1))
+            changed = asyncio.Event()
+
+            async def set_config(*_):
+                changed.set()
+
+            quasar.set_device_config = set_config
+            station = YandexStation(quasar, device)
+            # Register a real entity before publishing. Without an address,
+            # adding it does not start unrelated local/cloud discovery.
+            host = device.pop("host")
+            await platform.async_add_entities([station])
+            device["host"] = host
+            assert hass.states.get(station.entity_id) is not None
+            station.async_set_state({"state": {"aliceState": "IDLE", "volume": 0.3}})
+            first_started, second_started = asyncio.Event(), asyncio.Event()
+            release_first, release_second = asyncio.Event(), asyncio.Event()
+            original_save = cache._store.async_save
+
+            async def delayed_save(payload):
+                enabled = payload["local_config"]["glagol-device"]["hdmi_audio"]
+                (first_started if enabled else second_started).set()
+                await (release_first if enabled else release_second).wait()
+                await original_save(payload)
+
+            tasks = []
+            with patch.object(cache._store, "async_save", side_effect=delayed_save):
+                try:
+                    tasks.append(asyncio.create_task(station.init_hdmi_audio()))
+                    await asyncio.wait_for(first_started.wait(), 2)
+                    assert station.hdmi_audio is True
+                    assert device["hdmi_audio"] is True
+                    assert station.source == SOURCE_HDMI
+                    assert station.device_class == "tv"
+
+                    tasks.append(asyncio.create_task(
+                        station.async_select_source(SOURCE_STATION)
+                    ))
+                    await asyncio.wait_for(changed.wait(), 2)
+                    # The second accepted cloud transition applies even while
+                    # the first Store write still holds the cache lock.
+                    assert station.hdmi_audio is False
+                    assert device["hdmi_audio"] is False
+                    assert station.source == SOURCE_STATION
+                    published = cache.hass.states.get(station.entity_id)
+                    assert published.attributes["source"] == SOURCE_STATION
+                    assert published.attributes["source_list"] == [
+                        SOURCE_STATION, SOURCE_HDMI,
+                    ]
+
+                    release_first.set()
+                    await asyncio.wait_for(tasks[0], 2)
+                    await asyncio.wait_for(second_started.wait(), 2)
+                    # Resuming the older refresh must not restore its True.
+                    assert station.hdmi_audio is False
+                    assert device["hdmi_audio"] is False
+                    assert station.source == SOURCE_STATION
+                finally:
+                    release_first.set()
+                    release_second.set()
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    await platform.async_reset()
+                    for result in results:
+                        if isinstance(result, BaseException):
+                            raise result
+            restored = await manager().async_load()
+            assert restored.local_config["glagol-device"]["hdmi_audio"] is False
+
+    asyncio.run(scenario())
+
+
+def test_hdmi_accepted_store_write_finishes_during_domain_shutdown(tmp_path):
+    async def scenario():
+        from custom_components.yandex_station.core.lifecycle import get_lifecycle
+
+        async with cache_runtime(tmp_path) as (manager, _):
+            cache = manager()
+            device = local_station_device()
+            await cache.async_save_devices([device])
+            session = MagicMock()
+            session.async_stop = AsyncMock()
+            quasar = YandexQuasar(session, cache_manager=cache)
+            quasar.devices = [device]
+            quasar.get_device_config = AsyncMock(return_value=({"hdmiAudio": True}, 1))
+            station = YandexStation(quasar, device)
+            device["entity"] = station
+            lifecycle = get_lifecycle(cache.hass)
+            lifecycle.runtimes[cache.entry_id] = quasar
+            started, release = asyncio.Event(), asyncio.Event()
+            original_save = cache._store.async_save
+
+            async def delayed_save(payload):
+                started.set()
+                await release.wait()
+                await original_save(payload)
+
+            stopping = None
+            with patch.object(cache._store, "async_save", side_effect=delayed_save):
+                station._hdmi_refresh_task = refresh = asyncio.create_task(
+                    station.init_hdmi_audio()
+                )
+                try:
+                    await asyncio.wait_for(started.wait(), 2)
+                    stopping = asyncio.create_task(lifecycle.async_stop())
+                    with pytest.raises(asyncio.TimeoutError):
+                        await asyncio.wait_for(asyncio.shield(stopping), 0.01)
+                    assert not refresh.done()
+                    assert station.hdmi_audio is True
+                    assert device["hdmi_audio"] is True
+                    assert station.source == SOURCE_HDMI
+                finally:
+                    release.set()
+                    await asyncio.gather(
+                        refresh, *([stopping] if stopping else []),
+                        return_exceptions=True,
+                    )
+            assert refresh.cancelled()
+            assert stopping is not None and stopping.exception() is None
+            assert station.hdmi_audio is True
+            assert device["hdmi_audio"] is True
+            assert station.source == SOURCE_HDMI
+            restored = await manager().async_load()
+            assert restored.local_config["glagol-device"]["hdmi_audio"] is True
+
+    asyncio.run(scenario())
+
+
+def test_hdmi_store_error_keeps_known_state_flushes_and_restores_without_save(tmp_path):
+    async def scenario():
+        async with cache_runtime(tmp_path) as (manager, _):
+            cache = manager()
+            device = local_station_device(hdmi_audio=True)
+            await cache.async_save_devices([device])
+            await cache.async_save_local_config("glagol-device", hdmi_audio=True)
+            quasar = YandexQuasar(MagicMock(), cache_manager=cache)
+            quasar.devices = [device]
+            quasar.get_device_config = AsyncMock(return_value=({"hdmiAudio": True}, 1))
+            quasar.set_device_config = AsyncMock()
+            station = YandexStation(quasar, device)
+            station.async_write_ha_state = MagicMock()
+
+            with patch.object(cache._store, "async_save", side_effect=OSError("disk")):
+                await station.async_select_source(SOURCE_STATION)
+            assert station.hdmi_audio is False
+            assert device["hdmi_audio"] is False
+            assert station.source == SOURCE_STATION
+            before_flush = await manager().async_load()
+            assert before_flush.local_config["glagol-device"]["hdmi_audio"] is True
+
+            assert await cache.async_flush()
+            restored_cache = manager()
+            restored = await restored_cache.async_load()
+            assert restored.local_config["glagol-device"]["hdmi_audio"] is False
+
+            # Projecting the restored bool is not another observation or write.
+            cached_quasar = YandexQuasar(MagicMock(), cache_manager=restored_cache)
+            cached_quasar.get_device_config = AsyncMock(
+                side_effect=AssertionError("cached HDMI must not be fetched")
+            )
+            with patch.object(restored_cache._store, "async_save") as saving:
+                cached = YandexStation(cached_quasar, local_station_device(
+                    **restored.local_config["glagol-device"]
+                ))
+                await cached.init_hdmi_audio()
+                assert cached.hdmi_audio is False
+                assert cached.source == SOURCE_STATION
+                assert cached.source_list == [SOURCE_STATION, SOURCE_HDMI]
+                assert cached.device_class == "tv"
+                saving.assert_not_awaited()
+            cached_quasar.get_device_config.assert_not_awaited()
 
     asyncio.run(scenario())
