@@ -828,6 +828,14 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
                 )
                 return
 
+            player_type = (self.local_state.get("playerState") or {}).get("playerType")
+            if player_type in ("com.yandex.tv.videoplayer", "com.yandex.tv.live"):
+                # YaOS video uses the continue scenario; play targets the audio player.
+                await self.glagol.send(
+                    utils.update_form("personal_assistant.scenarios.player_continue")
+                )
+                return
+
             await self.glagol.send({"command": "play"})
 
         else:

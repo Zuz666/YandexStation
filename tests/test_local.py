@@ -1,3 +1,6 @@
+import asyncio
+from unittest.mock import AsyncMock
+
 import pytest
 
 from homeassistant.components.media_player import (
@@ -98,6 +101,51 @@ def test_yaos_kinopoisk_vod(kind, subtitle, duration, title, expected, series):
     assert entity.media_content_id == "synthetic-vod"
     assert entity.media_duration == duration
     assert entity.media_position == 27.0
+
+
+@pytest.mark.parametrize("backend,continue_video", [
+    ("com.yandex.tv.videoplayer", True), ("com.yandex.tv.live", True),
+    ("music_thin", False), ("ru.yandex.quasar.app", False),
+    ("unknown", False), (None, False),
+])
+def test_media_play_resumes_selected_player(backend, continue_video):
+    async def scenario():
+        entity = FakeYandexStation()
+        entity.glagol = AsyncMock()
+        entity.async_set_state(_player_frame(
+            playing=False, playerType=backend, type="tv_show_episode",
+            omit=("playerType",) if backend is None else (),
+        ))
+        if continue_video:
+            entity.async_set_state(_player_frame(
+                playing=False, playerType="music_thin", type="Track",
+            ))
+        await entity.async_media_play()
+        if continue_video:
+            entity.glagol.send.assert_awaited_once_with({
+                "command": "serverAction",
+                "serverActionEventPayload": {
+                    "type": "server_action", "name": "update_form",
+                    "payload": {
+                        "form_update": {
+                            "name": "personal_assistant.scenarios.player_continue",
+                            "slots": [],
+                        },
+                        "resubmit": True,
+                    },
+                },
+            })
+            entity.async_set_state(_player_frame(playerType="music_thin", type="Track"))
+            entity.async_set_state(_player_frame(
+                playing=False, playerType="music_thin", type="Track",
+            ))
+            await entity.async_media_play()
+            entity.glagol.send.assert_awaited_with({"command": "play"})
+        else:
+            entity.glagol.send.assert_awaited_once_with({"command": "play"})
+        assert entity.state == MediaPlayerState.PAUSED
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("backend", ["com.yandex.tv.videoplayer", "com.yandex.tv.live"])
