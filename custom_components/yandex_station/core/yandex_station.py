@@ -622,6 +622,7 @@ class YandexStationBase(MediaBrowser, RestoreEntity):
 
         if self.hass:
             self.async_write_ha_state()
+
     @callback
     def _update_local_player(self, state: dict):
         self._attr_supported_features = LOCAL_FEATURES
