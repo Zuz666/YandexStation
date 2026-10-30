@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from copy import deepcopy
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -177,6 +178,20 @@ async def verify_firmware_only_diagnostics(tmp_path):
         assert sensor.is_on is True
         assert sensor.extra_state_attributes["software_version"] == "v3"
         assert sensor.extra_state_attributes["last_heartbeat"] == heartbeat
+
+        # A real common-state change is delivered without selecting background audio.
+        background = _player_frame(playing=False, type="Track", playerType="music_thin")
+        background["state"]["volume"] = 0.8
+        observed_at = datetime(2026, 10, 30, tzinfo=timezone.utc)
+        with patch(
+            "custom_components.yandex_station.binary_sensor.dt_util.utcnow",
+            return_value=observed_at,
+        ):
+            station.async_set_state({**background, "softwareVersion": "v4"})
+        assert station.media_title == "2. Киношедевр"
+        assert station.volume_level == 0.8
+        assert sensor.extra_state_attributes["software_version"] == "v4"
+        assert sensor.extra_state_attributes["last_heartbeat"] == observed_at.isoformat()
 
 
 def test_firmware_only_dispatch_reaches_diagnostics_without_state_change(tmp_path):

@@ -10,7 +10,7 @@ from homeassistant.components.media_player import (
 from . import FakeYandexStation
 
 
-def _player_frame(*, omit=(), **changes):
+def _player_frame(*, playing=True, omit=(), **changes):
     player = {
         "duration": 1920.0,
         "entityInfo": {"description": "", "id": "", "type": ""},
@@ -42,7 +42,7 @@ def _player_frame(*, omit=(), **changes):
             "canStop": True,
             "hdmi": {"capable": True, "present": False},
             "playerState": player,
-            "playing": True,
+            "playing": playing,
             "volume": 0.2,
         }
     }
@@ -100,35 +100,90 @@ def test_yaos_kinopoisk_vod(kind, subtitle, duration, title, expected, series):
     assert entity.media_position == 27.0
 
 
-def test_glagol_anti_flap_concurrent_players():
+@pytest.mark.parametrize("backend", ["com.yandex.tv.videoplayer", "com.yandex.tv.live"])
+@pytest.mark.parametrize("playing", [True, False])
+def test_glagol_background_music_keeps_video_and_updates_device(backend, playing):
     entity = FakeYandexStation()
-    video = dict(playerType="com.yandex.tv.videoplayer", type="tv_show_episode",
-                 title="2. Киношедевр", subtitle="Три кота")
-    music = dict(playerType="music_thin", type="Track",
-                 title="Звезда по имени Солнце", subtitle="КИНО")
-    for fields, playing, expected_state, expected_type, title, series in [
-        (video, True, MediaPlayerState.PLAYING, MediaType.TVSHOW,
-         "2. Киношедевр", "Три кота"),
-        (music, False, MediaPlayerState.PLAYING, MediaType.TVSHOW,
-         "2. Киношедевр", "Три кота"),
-        (video, False, MediaPlayerState.PAUSED, MediaType.TVSHOW,
-         "2. Киношедевр", "Три кота"),
-        (music, False, MediaPlayerState.PAUSED, MediaType.MUSIC,
-         "Звезда по имени Солнце", None),
-        (video, True, MediaPlayerState.PLAYING, MediaType.TVSHOW,
-         "2. Киношедевр", "Три кота"),
-        (music, True, MediaPlayerState.PLAYING, MediaType.MUSIC,
-         "Звезда по имени Солнце", None),
-        (video, False, MediaPlayerState.PLAYING, MediaType.MUSIC,
-         "Звезда по имени Солнце", None),
-    ]:
-        frame = _player_frame(**fields)
-        frame["state"]["playing"] = playing
-        entity.async_set_state(frame)
-        assert entity.state == expected_state
-        assert entity.media_content_type == expected_type
-        assert entity.media_title == title
-        assert entity.media_series_title == series
+    video = _player_frame(
+        playerType=backend, type="tv_show_episode", id="synthetic-video",
+        title="1. Скамейка", subtitle="Смешарики",
+        extra={"coverURI": "https://example.invalid/cover.jpg"},
+        playlistType="Playlist", hasNext=True,
+        entityInfo={"repeatMode": "All", "shuffled": True},
+    )
+    video["state"]["playing"] = playing
+    entity.async_set_state(video)
+    assert entity.state == (MediaPlayerState.PLAYING if playing else MediaPlayerState.PAUSED)
+    fields = (
+        "state", "media_title", "media_content_type", "media_content_id",
+        "media_artist", "media_channel", "media_series_title", "media_duration",
+        "media_position", "media_position_updated_at", "media_image_url",
+        "media_playlist", "repeat", "shuffle", "supported_features",
+    )
+    selected = tuple(getattr(entity, key) for key in fields)
+    for volume in (0.8, 0.0):
+        background = _player_frame(
+            playerType="music_thin", type="Track", title="Другой трек",
+            showPlayer=True, progress=0.0,
+        )
+        background["state"].update(playing=False, volume=volume, aliceState="LISTENING")
+        entity.async_set_state(background)
+        assert tuple(getattr(entity, key) for key in fields) == selected
+        assert entity.volume_level == 0.8
+        assert entity.is_volume_muted is (volume == 0.0)
+        assert entity.extra_state_attributes["alice_state"] == "LISTENING"
+
+
+@pytest.mark.parametrize("playing", [True, False])
+def test_glagol_video_cleanup_respects_selected_music(playing):
+    entity = FakeYandexStation()
+    video = dict(playerType="com.yandex.tv.videoplayer", type="tv_show_episode")
+    clear = dict(
+        playing=False, playerType="", type="", id="", title="", subtitle="",
+        showPlayer=False, duration=0.0, progress=0.0,
+    )
+    entity.async_set_state(_player_frame(playing=False, **video))
+    entity.async_set_state(_player_frame(**clear))
+    assert entity.state == MediaPlayerState.IDLE
+    assert entity.media_title is None
+    assert entity.media_content_type is None
+
+    entity.async_set_state(_player_frame(**video))
+    music = dict(playerType="music_thin", type="Track", title="Музыка", showPlayer=True)
+    entity.async_set_state(_player_frame(**music))
+    entity.async_set_state(_player_frame(playing=playing, **music))
+    position_time = entity.media_position_updated_at
+    entity.async_set_state(_player_frame(**clear))
+    assert entity.state == (MediaPlayerState.PLAYING if playing else MediaPlayerState.PAUSED)
+    assert entity.media_content_type == MediaType.MUSIC
+    assert entity.media_title == "Музыка"
+    assert entity.media_position_updated_at == position_time
+    # Once the screen has closed, cleanup is no longer a delayed video teardown.
+    entity.async_set_state(_player_frame(**clear))
+    assert entity.state == MediaPlayerState.IDLE
+    assert entity.media_title is None
+    assert entity.media_position is None
+
+
+@pytest.mark.parametrize(
+    "backend,show",
+    [
+        ("com.yandex.tv.videoplayer", False),
+        ("com.yandex.tv.videoplayer", None),
+        ("com.yandex.tv.videoplayer", "absent"),
+        ("ru.yandex.quasar.app", True),
+        ("unknown", True),
+    ],
+)
+def test_glagol_unconfirmed_background_is_not_blocked(backend, show):
+    entity = FakeYandexStation()
+    entity.async_set_state(_player_frame(playerType=backend, type="movie"))
+    entity.async_set_state(_player_frame(
+        playing=False, playerType="music_thin", type="Track", showPlayer=show,
+        omit=("showPlayer",) if show == "absent" else (),
+    ))
+    assert entity.state == MediaPlayerState.PAUSED
+    assert entity.media_content_type == MediaType.MUSIC
 
 
 @pytest.mark.parametrize(
